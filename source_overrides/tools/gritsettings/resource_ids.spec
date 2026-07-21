@@ -1788,6 +1788,11 @@
     "includes": [10090],
   },
 
+  "<(SHARED_INTERMEDIATE_DIR)/third_party/focus_text_motion/focus_text_motion_resources.grd": {
+    "META": {"sizes": {"includes": [20]}},
+    "includes": [10095],
+  },
+
   "third_party/search_engines_data/resources_internal/search_engines_scaled_resources.grd": {
     "structures": [10100],
   },

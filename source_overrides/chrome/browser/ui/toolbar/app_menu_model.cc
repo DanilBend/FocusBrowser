@@ -1950,8 +1950,13 @@ void AppMenuModel::Build() {
           ? vector_icons::kChromeExtensionIcon
           : vector_icons::kExtensionChromeRefreshOldIcon);
 
+  const std::string resolved_locale =
+      l10n_util::GetApplicationLocale(std::string(), false);
+  const bool use_russian_ui =
+      resolved_locale == "ru" || resolved_locale.starts_with("ru-") ||
+      resolved_locale.starts_with("ru_");
   AddItemWithIcon(
-      IDC_OPEN_MEDITATION, u"Медитация",
+      IDC_OPEN_MEDITATION, use_russian_ui ? u"Медитация" : u"Meditation",
       ui::ImageModel::FromVectorIcon(
           features::IsRoundedIconsEnabled() ? vector_icons::kPlayArrowIcon
                                             : vector_icons::kPlayArrowOldIcon,

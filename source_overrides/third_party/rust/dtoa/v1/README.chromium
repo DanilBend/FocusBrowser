@@ -1,0 +1,11 @@
+Name: dtoa
+URL: https://crates.io/crates/dtoa
+Version: 1.0.11
+Revision: 4c30faa2d91f167d7c343d13ebc9d30730456d56
+Update Mechanism: Manual (https://crbug.com/449898466)
+License: Apache-2.0
+License File: //third_party/rust/chromium_crates_io/vendor/dtoa-v1/LICENSE-APACHE
+Shipped: yes
+Security Critical: yes
+
+Description: Fast floating point primitive to string conversion

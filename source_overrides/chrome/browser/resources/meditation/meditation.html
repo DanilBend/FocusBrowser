@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
-    <title>Медитация · Focus Browser</title>
+    <title>Meditation · Focus Browser</title>
     <link rel="stylesheet" href="meditation.css">
     <script type="module" src="strings.m.js"></script>
     <script type="module" src="meditation.js"></script>
@@ -24,49 +24,49 @@
           </span>
           <span>Focus Browser</span>
         </div>
-        <div class="section-name">
+        <div id="section-name" class="section-name">
           <span class="section-dot" aria-hidden="true"></span>
-          Медитация
+          Meditation
         </div>
       </header>
 
       <section class="hero" aria-labelledby="page-title">
-        <p class="eyebrow">Пауза для ясного ума</p>
-        <h1 id="page-title">Остановитесь.<br>Верните внимание.</h1>
-        <p class="hero-copy">
-          Несколько спокойных минут помогают убрать лишний шум и снова
-          сосредоточиться на главном.
+        <p id="eyebrow" class="eyebrow">A pause for a clear mind</p>
+        <h1 id="page-title"><span id="page-title-first">Pause.</span><br><span id="page-title-second">Bring your attention back.</span></h1>
+        <p id="hero-copy" class="hero-copy">
+          A few calm minutes can clear away the noise and help you focus on
+          what matters again.
         </p>
       </section>
 
       <section class="video-card" aria-labelledby="video-title">
         <div class="video-copy">
-          <p class="card-label">Практика дыхания</p>
+          <p id="card-label" class="card-label">Breathing practice</p>
           <h2 id="video-title">
-            Учу вас дышать: успех, власть, сила. Измени свою жизнь навсегда.
-            Мориарти.
+            Learn to breathe: success, power, strength. Change your life
+            forever. Moriarty.
           </h2>
-          <p class="video-description">
-            Устройтесь удобно, уберите уведомления и оставьте себе это время
-            без переключений.
+          <p id="video-description" class="video-description">
+            Get comfortable, silence notifications, and give yourself this
+            time without switching tasks.
           </p>
         </div>
 
         <div class="player-frame">
           <div id="privacy-gate" class="privacy-gate">
             <div class="breathing-orb" aria-hidden="true">
-              <span>вдох</span>
+              <span id="breathing-label">inhale</span>
             </div>
             <div class="privacy-copy">
-              <h3>Начните медитацию, когда будете готовы</h3>
-              <p>
-                Focus Browser откроет оригинальное видео в YouTube. Так оно
-                воспроизводится без ошибки встроенного плеера; сервис сможет
-                получить ваш IP-адрес и сведения об устройстве.
+              <h3 id="privacy-title">Start when you're ready</h3>
+              <p id="privacy-description">
+                Focus Browser will open the original video on YouTube. This
+                avoids the embedded-player error; the service may receive your
+                IP address and device information.
               </p>
             </div>
             <button id="load-video" class="primary-action" type="button">
-              Открыть видео и начать
+              <span id="load-video-label">Open video and begin</span>
             </button>
           </div>
         </div>
@@ -79,15 +79,15 @@
              target="_blank"
              rel="noopener noreferrer"
              referrerpolicy="no-referrer">
-            Открыть на YouTube
+            <span id="youtube-link-label">Open on YouTube</span>
             <span aria-hidden="true">↗</span>
           </a>
         </div>
       </section>
 
       <footer class="page-footer">
-        <span>Дышите медленнее. Делайте только одно дело.</span>
-        <span class="private-note">Без фоновой загрузки видео</span>
+        <span id="footer-guidance">Breathe more slowly. Do one thing at a time.</span>
+        <span id="footer-privacy" class="private-note">No background video loading</span>
       </footer>
     </main>
   </body>

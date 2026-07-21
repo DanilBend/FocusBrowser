@@ -1,0 +1,77 @@
+diff --git a/chrome/browser/metrics/chrome_feature_list_creator.cc b/chrome/browser/metrics/chrome_feature_list_creator.cc
+index 231324e08987d..05c21764e9ed1 100644
+--- a/chrome/browser/metrics/chrome_feature_list_creator.cc
++++ b/chrome/browser/metrics/chrome_feature_list_creator.cc
+@@ -43,11 +43,6 @@
+ #include "services/network/public/cpp/shared_url_loader_factory.h"
+ #include "ui/base/resource/resource_bundle.h"
+ 
+-#if BUILDFLAG(IS_WIN)
+-#include "chrome/installer/util/google_update_settings.h"
+-#include "components/language/core/browser/pref_names.h"
+-#endif  // BUILDFLAG(IS_WIN)
+-
+ #if BUILDFLAG(IS_CHROMEOS)
+ #include "chrome/browser/ash/policy/core/browser_policy_connector_ash.h"
+ #include "chrome/browser/ash/settings/about_flags.h"
+@@ -196,22 +191,6 @@ void ChromeFeatureListCreator::CreatePrefService() {
+   // there are any.
+   browser_policy_connector_->MaybeApplyLocalTestPolicies(local_state_.get());
+ 
+-// TODO(asvitkine): This is done here so that the pref is set before
+-// VariationsService queries the locale. This should potentially be moved to
+-// somewhere better, e.g. as a helper in first_run namespace.
+-#if BUILDFLAG(IS_WIN)
+-  if (first_run::IsChromeFirstRun()) {
+-    // During first run we read the google_update registry key to find what
+-    // language the user selected when downloading the installer. This
+-    // becomes our default language in the prefs.
+-    // Other platforms obey the system locale.
+-    std::wstring install_lang;
+-    if (GoogleUpdateSettings::GetLanguage(&install_lang)) {
+-      local_state_->SetString(language::prefs::kApplicationLocale,
+-                              base::WideToASCII(install_lang));
+-    }
+-  }
+-#endif  // BUILDFLAG(IS_WIN)
+ }
+ 
+ void ChromeFeatureListCreator::ConvertFlagsToSwitches() {
+diff --git a/ui/base/l10n/l10n_util_win.cc b/ui/base/l10n/l10n_util_win.cc
+index 5c994fd325a32..575ee55b59ec8 100644
+--- a/ui/base/l10n/l10n_util_win.cc
++++ b/ui/base/l10n/l10n_util_win.cc
+@@ -84,9 +84,28 @@ void AdjustUiFont(gfx::win::FontAdjustment& font_adjustment) {
+ void OverrideLocaleWithUILanguageList() {
+-  std::vector<std::wstring> ui_languages;
+-  CHECK(base::win::i18n::GetThreadPreferredUILanguageList(&ui_languages));
++  // Windows Settings' per-user language order is the primary OS fallback.
++  // The thread helper adds merged user/system fallbacks. If either Win32
++  // query fails, keep the successful list; fail only if neither is available.
++  std::vector<std::wstring> user_languages;
++  const bool got_user_languages =
++      base::win::i18n::GetUserPreferredUILanguageList(&user_languages);
++  std::vector<std::wstring> fallback_languages;
++  const bool got_fallback_languages =
++      base::win::i18n::GetThreadPreferredUILanguageList(&fallback_languages);
++  CHECK(got_user_languages || got_fallback_languages);
++
+   std::vector<std::string> ascii_languages;
+-  ascii_languages.reserve(ui_languages.size());
+-  std::ranges::transform(ui_languages, std::back_inserter(ascii_languages),
+-                         &base::WideToASCII);
++  ascii_languages.reserve(user_languages.size() + fallback_languages.size());
++  const auto append_unique = [&ascii_languages](
++                                 const std::vector<std::wstring>& languages) {
++    for (const std::wstring& language : languages) {
++      std::string ascii_language = base::WideToASCII(language);
++      if (std::ranges::find(ascii_languages, ascii_language) ==
++          ascii_languages.end()) {
++        ascii_languages.push_back(ascii_language);
++      }
++    }
++  };
++  append_unique(user_languages);
++  append_unique(fallback_languages);
+   override_locale_holder.Get().swap_value(&ascii_languages);
+ }

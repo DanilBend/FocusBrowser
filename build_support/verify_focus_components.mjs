@@ -1,5 +1,5 @@
 // Copyright 2026 The Focus Browser Authors
-// Static integrity checks for the two browser-owned protection components.
+// Static integrity checks for the browser-owned Focus components.
 
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -84,6 +84,8 @@ function manifestResources(manifest) {
 const jsonFiles = [
   ...walk(path.join(sourceRoot, 'third_party', 'focus_youtube'),
           file => file.endsWith('.json')),
+  ...walk(path.join(sourceRoot, 'third_party', 'focus_text_motion'),
+          file => file.endsWith('.json')),
   ...walk(path.join(sourceRoot, 'third_party', 'ublock'),
           file => file.endsWith('.json')),
 ];
@@ -102,6 +104,7 @@ assert.equal(focusYoutubeManifest.options_page, undefined);
 assert.equal(focusYoutubeManifest.options_ui, undefined);
 assert.deepEqual(focusYoutubeManifest.permissions, ['storage', 'alarms']);
 assert.deepEqual(focusYoutubeManifest.host_permissions, [
+  'https://youtube.com/*',
   'https://www.youtube.com/*',
   'https://m.youtube.com/*',
 ]);
@@ -227,6 +230,59 @@ assert.doesNotMatch(
     focusYoutubePopupScript,
     /openOptionsPage|window\.open|chrome\.tabs|location\.(?:href|assign|replace)/);
 
+const focusTextMotionRoot = path.join(
+    sourceRoot, 'third_party', 'focus_text_motion');
+const focusTextMotionManifest = parseJson(
+    path.join(focusTextMotionRoot, 'manifest.json'));
+assert.equal(extensionIdFromKey(focusTextMotionManifest.key),
+             'ajekofejbbjbbkdfnlghakcilbfdmofc');
+assert.equal(focusTextMotionManifest.manifest_version, 3);
+assert.equal(focusTextMotionManifest.name, 'Focus Text Motion');
+assert.equal(focusTextMotionManifest.short_name, 'Focus Motion');
+assert.equal(focusTextMotionManifest.version, '1.0.0');
+assert.equal(focusTextMotionManifest.incognito, 'split');
+assert.equal(focusTextMotionManifest.background.service_worker,
+             'background.js');
+assert.deepEqual(focusTextMotionManifest.permissions,
+                 ['settingsPrivate', 'storage']);
+assert.deepEqual(focusTextMotionManifest.host_permissions,
+                 ['http://*/*', 'https://*/*']);
+assert.equal(focusTextMotionManifest.action, undefined);
+assert.equal(focusTextMotionManifest.options_page, undefined);
+assert.equal(focusTextMotionManifest.options_ui, undefined);
+assert.equal(focusTextMotionManifest.content_scripts.length, 1);
+assert.deepEqual(focusTextMotionManifest.content_scripts[0].matches,
+                 focusTextMotionManifest.host_permissions);
+assert.equal(focusTextMotionManifest.content_scripts[0].all_frames, true);
+assert.equal(
+    focusTextMotionManifest.content_scripts[0].match_origin_as_fallback, true);
+assert.equal(focusTextMotionManifest.content_scripts[0].run_at,
+             'document_start');
+for (const resource of manifestResources(focusTextMotionManifest)) {
+  assert.ok(fs.existsSync(path.join(focusTextMotionRoot, resource)),
+            `Focus Text Motion manifest resource is missing: ${resource}`);
+}
+
+const focusTextMotionBackground = fs.readFileSync(
+    path.join(focusTextMotionRoot, 'background.js'), 'utf8');
+assert.match(focusTextMotionBackground, /focus\.ui\.motion_enabled/);
+assert.match(focusTextMotionBackground, /chrome\.settingsPrivate\.getPref/);
+assert.match(focusTextMotionBackground,
+             /chrome\.settingsPrivate\.onPrefsChanged/);
+assert.match(focusTextMotionBackground, /chrome\.storage\.local\.set/);
+assert.doesNotMatch(focusTextMotionBackground,
+                    /\bfetch\s*\(|XMLHttpRequest|WebSocket/);
+
+const focusTextMotionContent = fs.readFileSync(
+    path.join(focusTextMotionRoot, 'content-script.js'), 'utf8');
+assert.match(focusTextMotionContent, /compositionstart/);
+assert.match(focusTextMotionContent, /compositionend/);
+assert.match(focusTextMotionContent, /type\.toLowerCase\(\) === 'password'/);
+assert.match(focusTextMotionContent, /Never read a password value/);
+assert.match(focusTextMotionContent, /focus-text-motion\.get-state/);
+assert.doesNotMatch(focusTextMotionContent,
+                    /\bfetch\s*\(|XMLHttpRequest|WebSocket/);
+
 const focusBlockRoot = path.join(sourceRoot, 'third_party', 'ublock');
 const focusBlockManifest = parseJson(path.join(focusBlockRoot, 'manifest.json'));
 assert.equal(extensionIdFromKey(focusBlockManifest.key),
@@ -334,11 +390,60 @@ assert.match(focusBlockPopupScript,
 assert.match(focusBlockPopupScript, /\[data-focus-stat="page"\] \+ span/);
 assert.match(focusBlockPopupScript, /\[data-focus-stat="total"\] \+ span/);
 
-// Browser integration: both engines stay loaded as non-removable components,
-// never enter generic extension surfaces, and use dedicated native controls.
+// Browser integration: FocusBlock is a native engine (the legacy component is
+// not loaded), while FocusYoutube remains a non-removable component with its
+// dedicated native control.
 const componentLoader = read('chrome/browser/extensions/component_loader.cc');
-assert.match(componentLoader, /AddUBlock\(\)/);
-assert.match(componentLoader, /AddFocusYoutube\(\)/);
+const defaultComponentExtensionsBody = componentLoader.match(
+    /void ComponentLoader::AddDefaultComponentExtensions\([\s\S]*?void ComponentLoader::AddDefaultComponentExtensionsForKioskMode/)?.[0] || '';
+assert.doesNotMatch(defaultComponentExtensionsBody, /AddUBlock\(\)/,
+                    'Legacy FocusBlock component extension must not load');
+assert.match(defaultComponentExtensionsBody, /AddFocusYoutube\(\)/);
+
+const focusBlockBuild = read('chrome/browser/focus_block/BUILD.gn');
+assert.match(focusBlockBuild, /focus_block_url_loader_factory\.cc/);
+assert.doesNotMatch(focusBlockBuild, /focus_block_url_loader_throttle/);
+assert.ok(!fs.existsSync(path.join(
+    sourceRoot,
+    'chrome/browser/focus_block/focus_block_url_loader_throttle.cc')));
+assert.ok(!fs.existsSync(path.join(
+    sourceRoot,
+    'chrome/browser/focus_block/focus_block_url_loader_throttle.h')));
+
+const chromeContentBrowserClient = read(
+    'chrome/browser/chrome_content_browser_client.cc');
+assert.match(
+    chromeContentBrowserClient,
+    /focus_block::MaybeProxyURLLoaderFactory\([\s\S]*?MaybeProxyNetworkBoundRequest\(/,
+    'FocusBlock must intercept before the final network-bound factory');
+assert.doesNotMatch(
+    chromeContentBrowserClient, /focus_block_url_loader_throttle/);
+
+const focusBlockProxy = read(
+    'chrome/browser/focus_block/focus_block_url_loader_factory.cc');
+assert.match(focusBlockProxy, /class FocusBlockProxyingURLLoaderFactory/);
+assert.match(focusBlockProxy, /class FocusBlockURLLoader/);
+assert.match(
+    focusBlockProxy,
+    /OnReceiveRedirect\([\s\S]*?ShouldBlock\(redirected_request\)/,
+    'Redirect targets must be checked before reaching the renderer');
+assert.match(focusBlockProxy, /net::ERR_BLOCKED_BY_CLIENT/);
+assert.match(focusBlockProxy, /client_receiver_\.set_disconnect_handler/);
+assert.match(focusBlockProxy, /GetOutermostMainFrame\(\)/);
+assert.doesNotMatch(
+    focusBlockProxy, /WebContents::GetLastCommittedURL|web_contents_/,
+    'Network policy must use a stable factory snapshot, not the active tab');
+
+const focusBlockService = read(
+    'chrome/browser/focus_block/focus_block_service.cc');
+assert.match(
+    focusBlockService,
+    /ShouldBlock\([\s\S]*?top_level_url[\s\S]*?source_url/);
+assert.match(focusBlockService, /blocked_count_by_site_/);
+assert.match(focusBlockService, /GetCosmeticResourcesForUrl/);
+
+const focusBlockRustBuild = read('components/focus_block/rs/BUILD.gn');
+assert.match(focusBlockRustBuild, /third_party\/rust\/adblock\/v0_13:lib/);
 assert.match(read('chrome/browser/extensions/BUILD.gn'),
              /\/\/components\/focus_services/);
 assert.match(read('extensions/browser/BUILD.gn'),
@@ -351,21 +456,21 @@ assert.match(allowlist, /kFocusYoutubeComponentId/);
 const managementPolicy = read(
     'chrome/browser/extensions/standard_management_policy_provider.cc');
 const modifiablePolicyBody = managementPolicy.match(
-    /bool AdminPolicyIsModifiable[\s\S]*?\n}\n\n}  \/\/ namespace/)?.[0] || '';
+    /bool AdminPolicyIsModifiable[\s\S]*?\r?\n}\r?\n\r?\n}  \/\/ namespace/)?.[0] || '';
 assert.match(
     modifiablePolicyBody,
     /Manifest::IsComponentLocation\(extension->location\(\)\)[\s\S]*?is_modifiable = false;/);
 const remainEnabledBody = managementPolicy.match(
-    /bool StandardManagementPolicyProvider::MustRemainEnabled[\s\S]*?\n}/)?.[0] || '';
+    /bool StandardManagementPolicyProvider::MustRemainEnabled[\s\S]*?\r?\n}/)?.[0] || '';
 assert.match(remainEnabledBody, /!AdminPolicyIsModifiable/);
 const remainInstalledBody = managementPolicy.match(
-    /bool StandardManagementPolicyProvider::MustRemainInstalled[\s\S]*?\n}/)?.[0] || '';
+    /bool StandardManagementPolicyProvider::MustRemainInstalled[\s\S]*?\r?\n}/)?.[0] || '';
 assert.match(remainInstalledBody,
              /Manifest::IsComponentLocation\(extension->location\(\)\)[\s\S]*?return true;/);
 
 const extensionPrefs = read('extensions/browser/extension_prefs.cc');
 const componentDisableReasonsBody = extensionPrefs.match(
-    /void ExtensionPrefs::ClearInapplicableDisableReasonsForComponentExtension[\s\S]*?\n}/)?.[0] || '';
+    /void ExtensionPrefs::ClearInapplicableDisableReasonsForComponentExtension[\s\S]*?\r?\n}/)?.[0] || '';
 assert.doesNotMatch(componentDisableReasonsBody, /kUBlockOriginComponentId/);
 assert.doesNotMatch(componentDisableReasonsBody, /kFocusYoutubeComponentId/);
 assert.doesNotMatch(componentDisableReasonsBody, /DISABLE_USER_ACTION/);
@@ -385,11 +490,11 @@ assert.doesNotMatch(toolbarModel, /pinned\.push_back\(kFocus/);
 
 const manifestHeader = read('extensions/common/manifest.h');
 const uBlockComponentHelper = manifestHeader.match(
-    /static inline bool IsUBlockComponent[\s\S]*?\n  }/)?.[0] || '';
+    /static inline bool IsUBlockComponent[\s\S]*?\r?\n  }/)?.[0] || '';
 assert.match(uBlockComponentHelper, /kUBlockOriginComponentId/);
 const extensionUiUtil = read('extensions/browser/ui_util.cc');
 const settingsVisibilityBody = extensionUiUtil.match(
-    /bool ShouldDisplayInExtensionSettings[\s\S]*?\n}/)?.[0] || '';
+    /bool ShouldDisplayInExtensionSettings[\s\S]*?\r?\n}/)?.[0] || '';
 assert.match(settingsVisibilityBody, /Manifest::IsUBlockComponent/);
 assert.match(settingsVisibilityBody, /focus::kFocusYoutubeComponentId/);
 assert.match(settingsVisibilityBody,
@@ -399,28 +504,89 @@ const toolbarView = read(
     'chrome/browser/ui/views/toolbar/toolbar_view.cc');
 const toolbarViewHeader = read(
     'chrome/browser/ui/views/toolbar/toolbar_view.h');
-assert.match(toolbarView,
-             /focus_block_button_ = AddChildView\(std::make_unique<ToolbarButton>/);
+const locationBarView = read(
+    'chrome/browser/ui/views/location_bar/location_bar_view.cc');
+const locationBarViewHeader = read(
+    'chrome/browser/ui/views/location_bar/location_bar_view.h');
+const focusBlockBubble = read(
+    'chrome/browser/ui/views/location_bar/focus_block_bubble_view.cc');
+const focusYoutubeBubble = read(
+    'chrome/browser/ui/views/toolbar/focus_youtube_bubble_view.cc');
+const focusYoutubeBubbleHeader = read(
+    'chrome/browser/ui/views/toolbar/focus_youtube_bubble_view.h');
+assert.doesNotMatch(toolbarView,
+                    /focus_block_button_ = AddChildView\(std::make_unique<ToolbarButton>/);
 assert.match(toolbarView,
              /focus_youtube_button_ = AddChildView\(std::make_unique<ToolbarButton>/);
-assert.match(toolbarView,
-             /views::View\* const location_bar_container =[\s\S]*?ReorderChildView\(focus_block_button_,[\s\S]*?GetIndexOf\(location_bar_container\)\.value\(\)\);/,
-             'FocusBlock must stay immediately left of the address bar');
-assert.match(toolbarViewHeader, /raw_ptr<ToolbarButton> focus_block_button_/);
+assert.doesNotMatch(toolbarView, /ReorderChildView\(focus_block_button_/);
+assert.doesNotMatch(toolbarViewHeader,
+                    /raw_ptr<ToolbarButton> focus_block_button_/);
+assert.match(locationBarView,
+             /focus_block_button_ = AddChildView\(std::move\(focus_block_button\)\)/);
+assert.match(locationBarView,
+             /add_trailing_decoration\(focus_block_button_[\s\S]*?add_trailing_decoration\(page_action_icon_container_/,
+             'FocusBlock must be the first decoration at the address-bar right edge');
+assert.match(locationBarView,
+             /IncrementalMinimumWidth\(focus_block_button_\)/,
+             'Narrow omnibox layouts must reserve space for FocusBlock');
+assert.match(locationBarViewHeader,
+             /raw_ptr<views::ImageButton> focus_block_button_/);
+assert.match(locationBarViewHeader,
+             /void SetFocusBlockButtonVisible\(bool visible\)/);
+assert.match(locationBarViewHeader,
+             /virtual void ShowFocusBlockPopup\(views::View\*\)/);
 assert.match(toolbarViewHeader, /raw_ptr<ToolbarButton> focus_youtube_button_/);
 assert.match(toolbarView,
-             /ShowFocusComponentPopup\(focus::kUBlockOriginComponentId,[\s\S]*?"popup-fenix\.html"/);
+             /FocusBlockBubbleView::ShowBubble\(browser_, anchor_view\)/,
+             'FocusBlock must open its native Views bubble');
+assert.doesNotMatch(toolbarView,
+                    /ShowFocusComponentPopup\(focus::kUBlockOriginComponentId/);
 assert.match(toolbarView,
-             /ShowFocusComponentPopup\(focus::kFocusYoutubeComponentId, "popup\.html"/);
+             /FocusYoutubeBubbleView::ShowBubble\(browser_, focus_youtube_button_\)/,
+             'FocusYoutube must open its native Views bubble');
+assert.doesNotMatch(toolbarView,
+                    /ShowFocusComponentPopup\(focus::kFocusYoutubeComponentId/);
+assert.doesNotMatch(toolbarView,
+                    /ExtensionPopup::(?:ShowPopup|last_popup_for_testing)/);
+assert.match(focusYoutubeBubbleHeader,
+             /class FocusYoutubeBubbleView : public LocationBarBubbleDelegateView/);
+assert.match(focusYoutubeBubble,
+             /FocusYoutubeBubbleView::ShowBubble\(Browser\* browser,/);
+assert.match(focusYoutubeBubble,
+             /constexpr std::array<FeatureSpec, 20> kFeatures/);
+assert.match(focusYoutubeBubble,
+             /constexpr std::array<GroupSpec, 4> kGroups/);
+assert.match(focusYoutubeBubble,
+             /storage->Clear\(extension_, extensions::StorageAreaNamespace::kLocal/);
+assert.match(focusYoutubeBubble,
+             /storage->Set\(extension_, extensions::StorageAreaNamespace::kLocal,[\s\S]*?ResetValues\(\)/);
+assert.doesNotMatch(focusYoutubeBubble, /https?:\/\//,
+                    'Native FocusYoutube bubble must not link outside the browser');
+assert.match(focusBlockBubble,
+             /FocusBlockServiceFactory::GetForProfile/);
+assert.match(focusBlockBubble,
+             /service_->SetEnabled\(global_toggle_->GetIsOn\(\)\)/);
+assert.match(focusBlockBubble,
+             /service_->SetEnabledForUrl\(page_url_, site_toggle_->GetIsOn\(\)\)/);
+assert.match(focusBlockBubble, /service_->engine_ready\(\)/);
+assert.match(focusBlockBubble,
+             /u"Защита во всём браузере"/);
+assert.match(focusBlockBubble,
+             /u"Защита на этом сайте"/);
+assert.match(focusBlockBubble,
+             /GetBlockedCountForUrl\(page_url_\)/);
+assert.match(focusBlockBubble,
+             /blocked_count_session\(\)/);
+assert.match(focusBlockBubble,
+             /EasyList \+ EasyPrivacy[\s\S]*?adblock-rust 0\.13\.2/);
+assert.doesNotMatch(focusBlockBubble, /https?:\/\//,
+                    'Native FocusBlock bubble must not link outside the browser');
 assert.match(toolbarView,
-             /prefs::kFocusMotionEnabled[\s\S]*?popup_resource\.append\("\?focusMotion=0"\)[\s\S]*?GetResourceURL\(popup_resource\)/,
-             'Focus popup URLs must carry the shared motion preference');
-assert.match(toolbarView, /ExtensionPopup::ShowPopup/);
-assert.match(toolbarView, /ExtensionPopup::last_popup_for_testing/);
-assert.match(toolbarView,
-             /host == "www\.youtube\.com" \|\| host == "m\.youtube\.com"/);
-assert.match(toolbarView, /committed_url\.SchemeIs\(url::kHttpsScheme\)/);
-assert.doesNotMatch(toolbarView, /DomainIs\("youtube\.com"\)/);
+             /host == "youtube\.com" \|\| host == "www\.youtube\.com" \|\|[\s\S]{0,40}host == "m\.youtube\.com"/);
+assert.match(toolbarView, /GetVisibleURL\(\)/);
+assert.match(toolbarView, /visible_url\.is_valid\(\) \? visible_url : tab->GetLastCommittedURL\(\)/);
+assert.match(toolbarView, /context_url\.SchemeIs\(url::kHttpsScheme\)/);
+assert.doesNotMatch(toolbarView, /DomainIs\("youtube\.com"\)|ends_with|StartsWith/);
 
 // Default-browser handoff must fail closed. The native handler is shared by
 // Settings and onboarding, so neither stale policy state nor malformed WebUI
@@ -516,7 +682,7 @@ assert.match(customizeToolbarHandler,
 assert.match(customizeToolbarHandler,
              /OnBrowserOwnedActionPinnedChanged/);
 const customizePinBody = customizeToolbarHandler.match(
-    /void CustomizeToolbarHandler::PinAction[\s\S]*?\n}/)?.[0] || '';
+    /void CustomizeToolbarHandler::PinAction[\s\S]*?\r?\n}/)?.[0] || '';
 assert.match(customizePinBody,
              /ActionId::kFocusBlock[\s\S]*?SetBoolean\(prefs::kShowFocusBlockButton, pin\)/);
 assert.match(customizePinBody,
@@ -539,6 +705,7 @@ assert.match(extensionContextMenu,
 // Relevant overrides are the reproducible source of truth for a fresh source
 // tree. Other features may be edited concurrently by independent build agents.
 const relevantOverrideFiles = [
+  ...walk(path.join(overridesRoot, 'third_party', 'focus_text_motion')),
   ...walk(path.join(overridesRoot, 'third_party', 'focus_youtube')),
   ...walk(path.join(overridesRoot, 'third_party', 'ublock')),
   ...[
@@ -551,6 +718,8 @@ const relevantOverrideFiles = [
     'chrome/browser/ui/browser_ui_prefs.cc',
     'chrome/browser/ui/toolbar/toolbar_actions_model.cc',
     'chrome/browser/ui/toolbar/pinned_toolbar/pinned_toolbar_actions_model.cc',
+    'chrome/browser/ui/views/toolbar/focus_youtube_bubble_view.cc',
+    'chrome/browser/ui/views/toolbar/focus_youtube_bubble_view.h',
     'chrome/browser/ui/views/toolbar/toolbar_view.cc',
     'chrome/browser/ui/views/toolbar/toolbar_view.h',
     'chrome/browser/ui/views/toolbar/toolbar_view_browsertest.cc',
@@ -563,9 +732,11 @@ const relevantOverrideFiles = [
     'components/focus_onboarding/src/components/PageNavigation.svelte',
     'components/focus_onboarding/src/lib/browser/is-default.ts',
     'components/focus_onboarding/src/lib/onboarding-flow.ts',
+    'chrome/chrome_paks.gni',
     'extensions/browser/ui_util.cc',
     'extensions/browser/extension_prefs.cc',
     'extensions/common/manifest.h',
+    'tools/gritsettings/resource_ids.spec',
   ].map(relative => path.join(overridesRoot, relative)),
 ];
 for (const overrideFile of relevantOverrideFiles) {
@@ -577,4 +748,4 @@ for (const overrideFile of relevantOverrideFiles) {
 }
 
 console.log(`Focus component checks passed: ${jsonFiles.length} JSON files, ` +
-            'stable IDs, packaged resources, Russian UI, lifecycle and overrides.');
+            'stable IDs, native UI, text motion, lifecycle and overrides.');

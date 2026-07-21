@@ -61,6 +61,7 @@
 #include "ui/accessibility/accessibility_features.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/resource/resource_bundle.h"
+#include "third_party/focus_text_motion/resources/grit/focus_text_motion_resources.h"
 #include "third_party/focus_youtube/resources/grit/focus_youtube_resources.h"
 #include "third_party/ublock/resources/grit/ublock_resources.h"
 
@@ -467,6 +468,11 @@ void ComponentLoader::AddUBlock() {
   }
 }
 
+void ComponentLoader::AddFocusTextMotion() {
+  Add(IDR_FOCUS_TEXT_MOTION_MANIFEST_JSON,
+      base::FilePath(FILE_PATH_LITERAL("focus_text_motion")));
+}
+
 void ComponentLoader::AddFocusYoutube() {
   Add(IDR_FOCUS_YOUTUBE_MANIFEST_JSON,
       base::FilePath(FILE_PATH_LITERAL("focus_youtube")));
@@ -554,7 +560,7 @@ void ComponentLoader::AddDefaultComponentExtensions(
 
   if (!skip_session_components) {
     AddWebStoreApp();
-    AddUBlock();
+    AddFocusTextMotion();
     AddFocusYoutube();
     AddExtstoreFixups();
 #if BUILDFLAG(IS_CHROMEOS)

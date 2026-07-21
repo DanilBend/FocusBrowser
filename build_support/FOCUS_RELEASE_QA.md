@@ -84,11 +84,14 @@ First-run/onboarding checks:
 - [ ] Appearance offers the three address-bar styles (full, centered, minimal)
   and the smooth-animation switch. There is no obsolete tab-layout step.
   Selections apply without a crash.
+- [ ] Newly entered graphemes fade smoothly into place in the new-tab search,
+  native address bar, and editable fields on HTTP/HTTPS pages. Disabling
+  smooth animations stops all three paths immediately.
 - [ ] Search-engine and browser-import rows have visible, non-broken logos.
 - [ ] If Google Chrome is detected, the one-click Chrome import card is shown.
-  It imports bookmarks, history, saved passwords, autofill, search engine, and
-  extensions into this disposable Focus profile. Do not inspect or print the
-  imported values; the entire QA profile is deleted afterward.
+  It offers the Chromium importer categories implemented by this build
+  (bookmarks and history). Do not inspect or print imported values; the entire
+  disposable QA profile is deleted afterward.
 - [ ] The Focus Password Manager page opens
   `chrome://password-manager/passwords`; its import button opens
   `chrome://password-manager/settings`.
@@ -117,9 +120,16 @@ Clean-profile component URLs:
 
 Checks:
 
-- [ ] FocusBlock has a browser-owned toolbar control on a fresh profile;
+- [ ] FocusBlock has a browser-owned shield at the far right *inside* the
+  address field on a fresh profile. Verify normal, centered, compact, minimal
+  and vertical toolbar layouts, including a deliberately narrow window; the
+  shield must stay in the field and must open its popup from that same anchor.
   FocusYoutube appears only on `www.youtube.com` and `m.youtube.com`. Both use
   black/white Focus styling with Russian text.
+- [ ] FocusBlock opens a simple native panel, not an extension popup. It shows
+  engine state, the browser-wide switch, the current-site switch, blocked
+  counts for the site/session and `EasyList + EasyPrivacy / adblock-rust
+  0.13.2`; it contains no links to external settings sites.
 - [ ] Both controls can be hidden from toolbar customization; restart and
   confirm the hidden state persists. They can be restored from toolbar
   customization, not from the generic extensions menu.

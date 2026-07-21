@@ -629,6 +629,7 @@ source_set("extensions") {
     "//net:extras",
     "//services/metrics/public/cpp:ukm_builders",
     "//storage/browser",
+    "//third_party/focus_text_motion",
     "//third_party/focus_youtube",
     "//third_party/ublock",
     "//third_party/zlib/google:zip",

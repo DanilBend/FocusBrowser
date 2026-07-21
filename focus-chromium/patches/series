@@ -106,7 +106,9 @@ focus/core/fix-building-without-safebrowsing.patch
 focus/core/services-prefs.patch
 focus/core/services-schema-nag.patch
 focus/core/override-chrome-protocol.patch
+focus/core/windows-first-run-locale.patch
 focus/core/onboarding-page.patch
+focus/core/onboarding-application-locale.patch
 focus/core/meditation-page.patch
 focus/core/focus-onboarding.patch
 focus/core/change-chromium-branding.patch
@@ -234,6 +236,7 @@ focus/ui/update-cr-components.patch
 focus/ui/always-use-better-ntp.patch
 focus/ui/clean-new-tab-page.patch
 focus/ui/focus-new-tab-page.patch
+focus/ui/ntp-typing-motion.patch
 focus/ui/remove-toolbar-corners.patch
 focus/ui/location-bar.patch
 focus/ui/location-bar-page-action.patch
@@ -244,6 +247,7 @@ focus/ui/remove-toolbar-dividers.patch
 focus/ui/toolbar-window-frame-hit-test.patch
 focus/ui/toolbar-button-prefs.patch
 focus/ui/omnibox.patch
+focus/ui/omnibox-typing-motion.patch
 focus/ui/app-menu-style.patch
 focus/ui/app-menu-model.patch
 focus/ui/app-menu-button.patch
@@ -323,3 +327,4 @@ focus/ui/fix-windows-ui-position.patch
 focus/ui/native-frame-materials.patch
 focus/ui/page-zoom-indicator.patch
 focus/core/focus-network-cleanup.patch
+focus/core/focusblock-native-service.patch

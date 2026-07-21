@@ -23,6 +23,21 @@ const chromePath = path.resolve(process.argv[2] || defaultChrome);
 const outputDir = path.resolve(
     process.argv[3] || path.join(import.meta.dirname,
                                 `runtime-meditation-${timestamp}`));
+const uiLocale = process.argv[4] || 'ru';
+const useRussianUi = /^ru(?:[-_]|$)/i.test(uiLocale);
+const expectedMeditation = useRussianUi ? {
+  htmlLang: 'ru',
+  title: 'Медитация · Focus Browser',
+  sectionText: 'Медитация',
+  pageTitleParts: ['Остановитесь.', 'Верните внимание.'],
+  buttonText: 'Открыть видео и начать',
+} : {
+  htmlLang: 'en-US',
+  title: 'Meditation · Focus Browser',
+  sectionText: 'Meditation',
+  pageTitleParts: ['Pause.', 'Bring your attention back.'],
+  buttonText: 'Open video and begin',
+};
 const profileDir = path.join(outputDir, 'profile');
 const stdoutPath = path.join(outputDir, 'chrome.stdout.log');
 const stderrPath = path.join(outputDir, 'chrome.stderr.log');
@@ -237,6 +252,7 @@ const args = [
   '--disable-component-update',
   '--disable-sync',
   '--disable-search-engine-choice-screen',
+  `--lang=${uiLocale}`,
   'chrome://new-tab-page/',
 ];
 
@@ -246,6 +262,8 @@ let pageSession = null;
 let report = null;
 let primaryError = null;
 let appMenuStatic = null;
+const runtimeExceptions = [];
+const consoleMessages = [];
 
 try {
   const [activeMenu, overrideMenu] = await Promise.all([
@@ -253,7 +271,7 @@ try {
     readFile(overrideMenuPath, 'utf8'),
   ]);
   const menuEntryPattern =
-      /AddItemWithIcon\(\s*IDC_OPEN_MEDITATION,\s*u"Медитация",/m;
+      /IDC_OPEN_MEDITATION,\s*use_russian_ui\s*\?\s*u"Медитация"\s*:\s*u"Meditation"/m;
   const sha256 = value =>
       createHash('sha256').update(value, 'utf8').digest('hex');
   appMenuStatic = {
@@ -321,6 +339,17 @@ try {
 
   pageSession = new CdpSession(pageTarget.webSocketDebuggerUrl);
   await pageSession.connect();
+  pageSession.on('Runtime.exceptionThrown', ({exceptionDetails}) => {
+    runtimeExceptions.push(
+        exceptionDetails?.exception?.description ||
+        exceptionDetails?.text || 'Unknown runtime exception');
+  });
+  pageSession.on('Runtime.consoleAPICalled', ({type, args: values = []}) => {
+    consoleMessages.push({
+      type,
+      values: values.map(value => value.value ?? value.description ?? ''),
+    });
+  });
   await pageSession.send('Page.enable');
   await pageSession.send('Runtime.enable');
   await pageSession.send('Emulation.setDeviceMetricsOverride', {
@@ -401,8 +430,9 @@ try {
   await capture(pageSession, ntpScreenshot);
 
   await pageSession.send('Page.navigate', {url: 'chrome://meditation/'});
-  const meditation = await waitFor(() => evaluate(pageSession, `(() => {
-    if (location.hostname !== 'meditation') return null;
+  const meditation = await waitFor(() => evaluate(pageSession, `(async () => {
+    if (location.hostname !== 'meditation' ||
+        document.readyState !== 'complete') return null;
     const loadButton = document.querySelector('#load-video');
     const privacyGate = document.querySelector('#privacy-gate');
     if (!loadButton || !privacyGate) return null;
@@ -415,6 +445,11 @@ try {
       scheme: location.protocol,
       title: document.title,
       htmlLang: document.documentElement.lang,
+      navigatorLanguage: navigator.language,
+      navigatorLanguages: [...navigator.languages],
+      loadTimeApplicationLocale:
+          globalThis.loadTimeData?.getString?.('applicationLocale') || '',
+      scripts: [...document.scripts].map(script => script.src),
       viewport: {width: innerWidth, height: innerHeight},
       pageTitle: document.querySelector('#page-title')?.innerText || '',
       sectionText: document.querySelector('.section-name')?.innerText || '',
@@ -439,15 +474,16 @@ try {
     viewportIs2048x1152:
         meditation.viewport.width === VIEWPORT.width &&
         meditation.viewport.height === VIEWPORT.height,
-    russianDocument:
-        meditation.htmlLang === 'ru' &&
-        meditation.title === 'Медитация · Focus Browser' &&
-        meditation.sectionText.includes('Медитация') &&
-        meditation.pageTitle.includes('Остановитесь.') &&
-        meditation.pageTitle.includes('Верните внимание.'),
+    localizedDocument:
+        (useRussianUi ? /^ru(?:[-_]|$)/i.test(meditation.htmlLang) :
+                        /^en(?:[-_]|$)/i.test(meditation.htmlLang)) &&
+        meditation.title === expectedMeditation.title &&
+        meditation.sectionText.includes(expectedMeditation.sectionText) &&
+        expectedMeditation.pageTitleParts.every(
+            part => meditation.pageTitle.includes(part)),
     loadButtonVisible:
         meditation.buttonVisible && meditation.privacyGateVisible &&
-        meditation.buttonText === 'Открыть видео и начать',
+        meditation.buttonText === expectedMeditation.buttonText,
     directFallbackExact: meditation.secondaryHref === EXPECTED_VIDEO_URL,
     noEmbeddedPlayer: meditation.iframeCount === 0,
     noError153: !meditation.hasError153,
@@ -460,6 +496,8 @@ try {
 
   const meditationScreenshot = path.join(
       outputDir, '02-meditation-page-2048x1152.png');
+  // Let the entry transition settle so release evidence reflects the final UI.
+  await delay(650);
   await capture(pageSession, meditationScreenshot);
 
   await evaluate(pageSession, `(async () => {
@@ -577,6 +615,7 @@ try {
     devToolsPort: port,
     profileDir,
     viewport: VIEWPORT,
+    uiLocale,
     expectedVideoUrl: EXPECTED_VIDEO_URL,
     checks: {
       appMenu: appMenuStatic.checks,
@@ -608,7 +647,7 @@ try {
     devToolsPort: port,
     profileDir,
     checks: {appMenu: appMenuStatic?.checks ?? null},
-    evidence: {appMenu: appMenuStatic},
+    evidence: {appMenu: appMenuStatic, runtimeExceptions, consoleMessages},
     error: error.stack || String(error),
     stdoutPath,
     stderrPath,

@@ -68,9 +68,10 @@ bool ShouldDisplayInExtensionSettings(Manifest::Type type,
   }
 
   if (Manifest::IsUBlockComponent(extension_id) ||
-      extension_id == focus::kFocusYoutubeComponentId) {
-    // FocusBlock and FocusYoutube are surfaced through browser-owned controls,
-    // never through chrome://extensions, even in component debugging mode.
+      extension_id == focus::kFocusYoutubeComponentId ||
+      extension_id == focus::kFocusTextMotionComponentId) {
+    // Focus protections are browser-owned and never appear in
+    // chrome://extensions, even in component debugging mode.
     return false;
   }
 

@@ -51,6 +51,8 @@ constexpr char kFocusBlockExtensionId[] =
     "blockjmkbacgjkknlgpkjjiijinjdanf";
 constexpr char kFocusYoutubeExtensionId[] =
     "jafokmemnknjknbdiklabcnhlpheefbm";
+constexpr char kFocusTextMotionExtensionId[] =
+    "ajekofejbbjbbkdfnlghakcilbfdmofc";
 
 }  // namespace
 
@@ -274,12 +276,12 @@ void ToolbarActionsModel::OnReady() {
 
 bool ToolbarActionsModel::ShouldAddExtension(
     const extensions::Extension* extension) {
-  // FocusBlock and FocusYoutube are browser-owned protections. Their
+  // Focus protections are browser-owned. Their
   // component-extension implementations must never leak into the extensions
-  // toolbar model (including the extensions menu and its pin controls). They
-  // are surfaced by dedicated native buttons in ToolbarView instead.
+  // toolbar model (including the extensions menu and its pin controls).
   if (extension->id() == kFocusBlockExtensionId ||
-      extension->id() == kFocusYoutubeExtensionId) {
+      extension->id() == kFocusYoutubeExtensionId ||
+      extension->id() == kFocusTextMotionExtensionId) {
     return false;
   }
 

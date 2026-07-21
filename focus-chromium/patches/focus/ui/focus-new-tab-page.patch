@@ -58,7 +58,7 @@ diff --git a/chrome/browser/resources/new_tab_page/app.ts b/chrome/browser/resou
 diff --git a/chrome/browser/resources/new_tab_page/app.html b/chrome/browser/resources/new_tab_page/app.html
 --- a/chrome/browser/resources/new_tab_page/app.html
 +++ b/chrome/browser/resources/new_tab_page/app.html
-@@ -1,36 +1,30 @@
+@@ -1,36 +1,29 @@
  <div id="content">
 -  ${this.lazyRender_ ? html`
 -    ${this.shortcutsEnabled_ ? html`
@@ -90,13 +90,12 @@ diff --git a/chrome/browser/resources/new_tab_page/app.html b/chrome/browser/res
 -      <div id="themeAttribution">
 -        <div>$i18n{themeCreatedBy}</div>
 -        <img src="${this.theme_!.backgroundImage!.attributionUrl!}">
-+  <main id="focusHome" aria-label="Новая вкладка">
-+    <section id="focusSearch" aria-label="Поиск">
++  <main id="focusHome" aria-label="$i18n{title}">
++    <section id="focusSearch" aria-label="$i18n{searchBoxHint}">
 +      <div id="searchboxContainer"
 +          @focusin="${this.onSearchboxContainerFocusin_}"
 +          @focusout="${this.onSearchboxContainerFocusout_}">
 +        <ntp-searchbox id="searchbox" ?is-dark="${this.isThemeDark_()}"
-+            placeholder-text="Поиск или введите адрес"
 +            ?color-source-is-baseline="${this.colorSourceIsBaseline}"
 +            ?shown="${this.realboxShown_}"
 +            ?had-secondary-side="${this.realboxHadSecondarySide}"
@@ -106,7 +105,7 @@ diff --git a/chrome/browser/resources/new_tab_page/app.html b/chrome/browser/res
        </div>
 +    </section>
 +    ${this.lazyRender_ && this.shortcutsEnabled_ ? html`
-+      <section id="focusShortcuts" aria-label="Закреплённые ярлыки">
++      <section id="focusShortcuts" aria-label="$i18n{addLinkTitle}">
 +        <cr-most-visited id="mostVisited" .theme="${this.theme_?.mostVisited || null}"
 +            single-row reflow-on-overflow
 +            ?expandable-tiles-enabled="${this.ntpNextFeaturesEnabled_}"

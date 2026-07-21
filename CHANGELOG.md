@@ -4,11 +4,14 @@
 
 - Initial public Windows x64 release of Focus Browser.
 - Full Focus Browser branding with transparent monochrome target icon.
-- Built-in FocusBlock content protection and browser-native toolbar control.
+- Native FocusBlock protection powered by adblock-rust 0.13.2, with a simple
+  Russian control surface and a shield at the right edge inside every native
+  address-bar layout.
 - Built-in FocusYoutube panel with 24 essential distraction controls.
 - Russian first-run setup, one-click Chrome import and shortcut selection.
 - Minimal new-tab page containing only search and shortcuts.
-- Optional smooth interface and water-like ambient animations.
+- Optional smooth interface plus subtle water-like typing motion in the new-tab
+  search field and native address bar.
 - Meditation page in the main menu with direct YouTube playback.
 - Chromium password manager, Chrome Web Store installation path, proprietary
   codecs and Widevine integration hooks.

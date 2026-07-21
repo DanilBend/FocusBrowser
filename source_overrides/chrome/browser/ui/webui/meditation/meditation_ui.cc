@@ -4,6 +4,8 @@
 
 #include "chrome/browser/ui/webui/meditation/meditation_ui.h"
 
+#include <string>
+
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/grit/meditation_resources.h"
 #include "chrome/grit/meditation_resources_map.h"
@@ -12,6 +14,7 @@
 #include "content/public/browser/web_ui.h"
 #include "content/public/browser/web_ui_data_source.h"
 #include "services/network/public/mojom/content_security_policy.mojom.h"
+#include "ui/base/l10n/l10n_util.h"
 #include "ui/webui/webui_util.h"
 
 namespace meditation {
@@ -27,6 +30,12 @@ MeditationUI::MeditationUI(content::WebUI* web_ui)
   source->AddBoolean(
       "focusMotionEnabled",
       profile->GetPrefs()->GetBoolean(prefs::kFocusMotionEnabled));
+  std::string application_locale =
+      l10n_util::GetApplicationLocale(std::string(), false);
+  if (application_locale.empty()) {
+    application_locale = "en-US";
+  }
+  source->AddString("applicationLocale", application_locale);
 
   source->OverrideContentSecurityPolicy(
       network::mojom::CSPDirectiveName::ConnectSrc,

@@ -1,0 +1,33 @@
+# Copyright 2026 Focus Browser contributors
+# Use of this source code is governed by the license in the project root.
+
+source_set("focus_block") {
+  sources = [
+    "focus_block_service.cc",
+    "focus_block_service.h",
+    "focus_block_service_factory.cc",
+    "focus_block_service_factory.h",
+    "focus_block_tab_helper.cc",
+    "focus_block_tab_helper.h",
+    "focus_block_url_loader_factory.cc",
+    "focus_block_url_loader_factory.h",
+  ]
+
+  deps = [
+    "//base",
+    "//chrome/browser/profiles:profile",
+    "//chrome/common",
+    "//components/focus_block:native_engine",
+    "//components/focus_services",
+    "//components/keyed_service/core",
+    "//components/prefs",
+    "//content/public/browser",
+    "//mojo/public/cpp/bindings",
+    "//net",
+    "//services/network/public/cpp",
+    "//services/network/public/mojom",
+    "//third_party/ublock",
+    "//ui/base",
+    "//url",
+  ]
+}

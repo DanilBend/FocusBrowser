@@ -1589,5 +1589,17 @@
     "source": "components/focus_onboarding/focus_onboarding_strings.grdp",
     "context": "Onboarding description of KeePassXC as a password manager option.",
     "message": "Local, free, and open-source password manager for advanced users. Requires technical knowledge to set up and use."
+  },
+  {
+    "name": "IDS_SETTINGS_FOCUS_MOTION",
+    "source": "chrome/app/settings_strings.grdp",
+    "context": "Label for the toggle which enables or disables smooth motion in Focus-owned browser interfaces.",
+    "message": "Smooth interface animations"
+  },
+  {
+    "name": "IDS_SETTINGS_FOCUS_MOTION_DESCRIPTION",
+    "source": "chrome/app/settings_strings.grdp",
+    "context": "Description for the toggle which enables or disables smooth motion in Focus-owned browser interfaces.",
+    "message": "Calm, fluid transitions in Focus Browser. The system reduced-motion setting always takes priority."
   }
 ]

@@ -1,0 +1,208 @@
+--- a/chrome/browser/ui/views/location_bar/BUILD.gn
++++ b/chrome/browser/ui/views/location_bar/BUILD.gn
+@@ -11,6 +11,7 @@ source_set("location_bar") {
+     public += [
+       "ai_mode_page_action_icon_view.h",
+       "content_setting_image_view.h",
+       "custom_tab_bar_view.h",
++      "focus_block_bubble_view.h",
+       "intent_chip_button.h",
+       "intent_picker_view.h",
+@@ -73,6 +74,8 @@ source_set("impl") {
+     ":icon_label_bubble",
+     ":location_bar",
+     "//chrome/browser:defaults",
++    "//chrome/browser/focus_block",
+     "//chrome/browser/ui/dialogs",
+     "//chrome/browser/ui/select_file_policy",
++    "//components/vector_icons",
+   ]
+@@ -82,6 +84,7 @@ source_set("impl") {
+       "ai_mode_page_action_icon_view.cc",
+       "content_setting_image_view.cc",
+       "custom_tab_bar_view.cc",
++      "focus_block_bubble_view.cc",
+       "intent_chip_button.cc",
+       "intent_picker_view.cc",
+       "lens_overlay_homework_page_action_controller.cc",
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.h
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.h
+@@ -75,6 +75,10 @@ namespace page_actions {
+ class PageActionContainerView;
+ class PageActionController;
+ }  // namespace page_actions
++
++namespace ui {
++class Event;
++}  // namespace ui
+ 
+ namespace views {
+ class ImageButton;
+@@ -123,6 +123,10 @@ class LocationBarView
+     virtual ContentSettingBubbleModelDelegate*
+     GetContentSettingBubbleModelDelegate() = 0;
+ 
++    // Opens the browser-owned FocusBlock surface anchored to a control in the
++    // location bar. Non-browser embedders do not expose FocusBlock.
++    virtual void ShowFocusBlockPopup(views::View*) {}
++
+    protected:
+     virtual ~Delegate() = default;
+   };
+@@ -143,6 +147,10 @@ class LocationBarView
+   // Initializes the LocationBarView.
+   void Init();
+ 
++  // Controls the browser-owned FocusBlock shield without turning it into an
++  // extension action. The shield remains owned and laid out by this view.
++  void SetFocusBlockButtonVisible(bool visible);
++
+   bool in_popup_state_transition() const override;
+ 
+   // Returns a background that paints an (optionally stroked) rounded rect with
+@@ -374,6 +382,12 @@ class LocationBarView
+   // Updates the color of the icon for the "clear all" button.
+   void RefreshClearAllButtonIcon();
+ 
++  // Updates the FocusBlock shield for the current theme and density.
++  void RefreshFocusBlockButtonIcon();
++
++  // Opens FocusBlock from its fixed location-bar shield.
++  void FocusBlockButtonPressed(const ui::Event& event);
++
+   // Returns true if a keyword is selected in the model.
+   bool ShouldShowKeywordBubble() const;
+ 
+@@ -598,6 +612,10 @@ class LocationBarView
+   raw_ptr<page_actions::PageActionContainerView> page_action_container_ =
+       nullptr;
+ 
++  // Browser-owned, non-removable FocusBlock control. It is the first trailing
++  // decoration, so it stays at the right edge for every native omnibox layout.
++  raw_ptr<views::ImageButton> focus_block_button_ = nullptr;
++
+   // An [x] that appears in touch mode (when the OSK is visible) and allows the
+   // user to clear all text.
+   raw_ptr<views::ImageButton> clear_all_button_ = nullptr;
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+@@ -151,6 +151,7 @@
+ #include "components/strings/grit/components_strings.h"
+ #include "components/translate/core/browser/language_state.h"
+ #include "components/variations/variations_associated_data.h"
++#include "components/vector_icons/vector_icons.h"
+ #include "content/public/browser/navigation_entry.h"
+ #include "content/public/browser/render_widget_host_view.h"
+ #include "content/public/browser/web_contents.h"
+@@ -201,4 +202,5 @@
+ #include "ui/views/view.h"
+ #include "ui/views/view_class_properties.h"
++#include "ui/views/window/dialog_delegate.h"
+ #include "ui/views/view_utils.h"
+ #include "ui/views/widget/widget.h"
+@@ -475,6 +476,28 @@ void LocationBarView::Init() {
+     content_setting_views_.push_back(AddChildView(std::move(image_view)));
+   }
+ 
++  if (browser_) {
++    auto focus_block_button = views::CreateVectorImageButton(
++        base::BindRepeating(&LocationBarView::FocusBlockButtonPressed,
++                            base::Unretained(this)));
++    const std::string resolved_locale =
++        l10n_util::GetApplicationLocale(std::string(), false);
++    const bool use_russian_ui =
++        resolved_locale == "ru" || resolved_locale.starts_with("ru-") ||
++        resolved_locale.starts_with("ru_");
++    focus_block_button->SetTooltipText(use_russian_ui
++                                           ? u"FocusBlock — защита от рекламы"
++                                           : u"FocusBlock — ad protection");
++    focus_block_button->GetViewAccessibility().SetName(
++        use_russian_ui ? u"Открыть встроенную защиту FocusBlock"
++                       : u"Open built-in FocusBlock protection");
++    focus_block_button->SetFocusBehavior(
++        views::View::FocusBehavior::ACCESSIBLE_ONLY);
++    views::InstallCircleHighlightPathGenerator(focus_block_button.get());
++    focus_block_button_ = AddChildView(std::move(focus_block_button));
++    RefreshFocusBlockButtonIcon();
++  }
++
+   std::vector<actions::ActionItem*> page_action_items = {};
+   if (browser_) {
+     actions::ActionItem* root_action_item =
+@@ -944,7 +967,15 @@ void LocationBarView::Layout(PassKey) {
+           /*max_fraction=*/0, intra_item_padding, edge_padding, view);
+     }
+   };
+ 
++  // LocationBarLayout consumes right-edge decorations in insertion order.
++  // Add the non-collapsible FocusBlock shield first so it remains flush right
++  // in normal, centered, compact, minimal and vertical toolbar layouts.
++  if (focus_block_button_) {
++    add_trailing_decoration(focus_block_button_, /*intra_item_padding=*/0,
++                            trailing_decorations_edge_padding);
++  }
++
+   // When the AIM page action is shown as the right-most page action in the
+   // location bar, it should be positioned flush against the right edge of the
+   // location bar.
+@@ -1104,6 +1135,7 @@ void LocationBarView::OnThemeChanged() {
+ 
+   RefreshBackground();
+   RefreshClearAllButtonIcon();
++  RefreshFocusBlockButtonIcon();
+ }
+ 
+ void LocationBarView::ChildPreferredSizeChanged(views::View* child) {
+@@ -1496,7 +1528,8 @@ int LocationBarView::GetMinimumLeadingWidth() const {
+ }
+ 
+ int LocationBarView::GetMinimumTrailingWidth() const {
+-  int trailing_width = IncrementalMinimumWidth(page_action_icon_container_) +
++  int trailing_width = IncrementalMinimumWidth(focus_block_button_) +
++                       IncrementalMinimumWidth(page_action_icon_container_) +
+                        IncrementalMinimumWidth(page_action_container_);
+ 
+   for (ContentSettingImageView* content_setting_view : content_setting_views_) {
+@@ -1684,6 +1717,42 @@ void LocationBarView::RefreshClearAllButtonIcon() {
+       GetLayoutInsets(LOCATION_BAR_ICON_INTERIOR_PADDING)));
+ }
+ 
++void LocationBarView::RefreshFocusBlockButtonIcon() {
++  if (!focus_block_button_) {
++    return;
++  }
++
++  views::SetImageFromVectorIconWithColor(
++      focus_block_button_, vector_icons::kShieldIcon,
++      views::IconColors(kColorOmniboxActionIcon, kColorOmniboxActionIcon,
++                        kColorOmniboxActionIconHover),
++      GetLayoutConstant(LayoutConstant::kLocationBarTrailingIconSize));
++  focus_block_button_->SetBorder(views::CreateEmptyBorder(
++      GetLayoutInsets(LOCATION_BAR_PAGE_ACTION_ICON_PADDING)));
++}
++
++void LocationBarView::FocusBlockButtonPressed(const ui::Event&) {
++  if (delegate_ && focus_block_button_) {
++    delegate_->ShowFocusBlockPopup(focus_block_button_);
++  }
++}
++
++void LocationBarView::SetFocusBlockButtonVisible(bool visible) {
++  if (!focus_block_button_ || focus_block_button_->GetVisible() == visible) {
++    return;
++  }
++  if (!visible) {
++    if (views::DialogDelegate* bubble =
++            focus_block_button_->GetProperty(views::kAnchoredDialogKey)) {
++      if (views::Widget* widget = bubble->GetWidget()) {
++        widget->Close();
++      }
++    }
++  }
++  focus_block_button_->SetVisible(visible);
++  InvalidateLayout();
++}
++
+ bool LocationBarView::ShouldShowKeywordBubble() const {
+   return GetOmniboxController()->edit_model()->is_keyword_selected();
+ }

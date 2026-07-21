@@ -7,6 +7,11 @@ chrome/browser/ui/webui/settings/services_schema_handler.h
 components/focus_onboarding/src/pages/FocusServices.svelte
 components/focus_onboarding/src/pages/Finish.svelte
 
+# FocusBlock moved from a navigation throttle to the native URLLoaderFactory
+# proxy. Remove stale files when upgrading an existing incremental tree.
+chrome/browser/focus_block/focus_block_url_loader_throttle.cc
+chrome/browser/focus_block/focus_block_url_loader_throttle.h
+
 # Legacy Unhook artwork is not part of the browser-owned FocusYoutube UI.
 third_party/focus_youtube/images/bug.svg
 third_party/focus_youtube/images/bug2.svg

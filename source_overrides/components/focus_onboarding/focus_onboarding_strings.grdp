@@ -2,401 +2,407 @@
 <grit-part>
 
 <message name="IDS_FOCUS_ONBOARDING_PAGE_TITLE" desc="The title of the Focus setup onboarding page.">
-  Настройка Focus Browser
+  Focus Browser Setup
 </message>
 
 <message name="IDS_FOCUS_ONBOARDING_SETUP_CAPTION" desc="Short caption below the Focus Browser name in the onboarding sidebar.">
-  Первоначальная настройка
+  Initial setup
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SETUP_STEPS_ARIA" desc="Accessible label for the onboarding step list.">
-  Этапы первоначальной настройки
+  Initial setup steps
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SETUP_NOTE" desc="Sidebar note explaining that onboarding choices can be changed later.">
-  Все параметры можно изменить позже в настройках браузера.
+  You can change every option later in browser settings.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SETUP_STEP_FOCUS" desc="Short sidebar label for focus preferences.">
-  Режим работы
+  Work preferences
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SETUP_STEP_APPEARANCE" desc="Short sidebar label for address bar appearance.">
-  Адресная строка
+  Address bar
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SETUP_STEP_SEARCH" desc="Short sidebar label for search selection.">
-  Поиск
+  Search
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SETUP_STEP_IMPORT" desc="Short sidebar label for browser data import.">
-  Импорт данных
+  Data import
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SETUP_STEP_PASSWORDS" desc="Short sidebar label for the built-in password manager.">
-  Пароли
+  Passwords
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SETUP_STEP_DEFAULT" desc="Short sidebar label for the default browser choice.">
-  Основной браузер
+  Default browser
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SETUP_STEP_SHORTCUTS" desc="Short sidebar label for New Tab Page shortcuts.">
-  Ярлыки
+  Shortcuts
 </message>
 
 <message name="IDS_FOCUS_ONBOARDING_BUTTON_USE_DEFAULTS" desc="Button label that skips detailed setup and applies the default onboarding choices.">
-  Применить готовые настройки
+  Use focus preset
 </message>
 <message name="IDS_FOCUS_ONBOARDING_BUTTON_CONFIGURE" desc="Button label that starts the detailed onboarding setup flow.">
-  Настроить браузер
+  Set up Focus Browser
 </message>
 <message name="IDS_FOCUS_ONBOARDING_BUTTON_NEXT" desc="Button label to continue to the next onboarding step.">
-  Далее
+  Next
 </message>
 <message name="IDS_FOCUS_ONBOARDING_BUTTON_BACK" desc="Button label to return to the previous onboarding step.">
-  Назад
+  Back
 </message>
 <message name="IDS_FOCUS_ONBOARDING_BUTTON_LETS_GO" desc="Button label that finishes onboarding and opens the browser.">
-  Начать работу
+  Start working
 </message>
 <message name="IDS_FOCUS_ONBOARDING_BUTTON_SKIP" desc="Button label that skips optional shortcut selection.">
-  Пропустить
+  Skip
 </message>
 <message name="IDS_FOCUS_ONBOARDING_BUTTON_START" desc="Button label that saves shortcut choices and finishes onboarding.">
-  Начать
+  Start
 </message>
 <message name="IDS_FOCUS_ONBOARDING_NAVIGATION_ERROR" desc="Error shown when the current onboarding choices could not be saved.">
-  Не удалось сохранить настройки. Проверьте выбор и попробуйте ещё раз.
+  Couldn't save your settings. Check your choices and try again.
+</message>
+<message name="IDS_FOCUS_ONBOARDING_NAVIGATION_STEP" desc="Label before the current onboarding step number.">
+  Step
+</message>
+<message name="IDS_FOCUS_ONBOARDING_NAVIGATION_OF" desc="Separator between the current and total onboarding step counts.">
+  of
 </message>
 
 <message name="IDS_FOCUS_ONBOARDING_PARTNER_TITLE" desc="Badge title shown for partner services in onboarding.">
-  Партнёр Focus Browser
+  Focus Browser partner
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PARTNER_TOOLTIP" desc="Tooltip explaining why a listed service is marked as a Focus partner.">
-  Оплата этого сервиса помогает развитию Focus Browser.
+  Payment from this service helps support Focus Browser development.
 </message>
 
 <message name="IDS_FOCUS_ONBOARDING_WELCOME_GREETING" desc="Main greeting on the first onboarding screen.">
-  Сосредоточьтесь на главном.
+  Focus on what matters.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_WELCOME_BODY" desc="Introductory body text on the first onboarding screen.">
-  Focus Browser убирает лишнее из интерфейса, чтобы внимание оставалось на текущей задаче.
+  Focus Browser removes distractions from the interface, so your attention stays on the task at hand.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_WELCOME_EYEBROW" desc="Short product label above the first onboarding heading.">
-  Focus Browser · для сосредоточенной работы
+  Focus Browser · built for focused work
 </message>
 <message name="IDS_FOCUS_ONBOARDING_WELCOME_FEATURES_LABEL" desc="Accessible label for the focus benefits listed on the welcome screen.">
-  Преимущества Focus Browser
+  Focus Browser benefits
 </message>
 <message name="IDS_FOCUS_ONBOARDING_WELCOME_FEATURE_QUIET" desc="Welcome screen benefit describing fewer interruptions.">
-  Меньше отвлечений
+  Fewer distractions
 </message>
 <message name="IDS_FOCUS_ONBOARDING_WELCOME_FEATURE_CLEAN" desc="Welcome screen benefit describing a clean interface.">
-  Чистый интерфейс
+  Clean interface
 </message>
 <message name="IDS_FOCUS_ONBOARDING_WELCOME_FEATURE_INTENT" desc="Welcome screen benefit describing intentional work.">
-  Создан для глубокой работы
+  Built for deep work
 </message>
 <message name="IDS_FOCUS_ONBOARDING_WELCOME_TERMS_NOTE" desc="Legal note prefix before privacy policy and terms links.">
-  Продолжая, вы принимаете
+  By continuing, you accept the
 </message>
 <message name="IDS_FOCUS_ONBOARDING_WELCOME_TERMS_PRIVACY" desc="Privacy policy link text in the onboarding legal note.">
-  политику конфиденциальности
+  privacy policy
 </message>
 <message name="IDS_FOCUS_ONBOARDING_WELCOME_TERMS_AND" desc="Conjunction between privacy policy and terms links in the onboarding legal note.">
-  и
+  and
 </message>
 <message name="IDS_FOCUS_ONBOARDING_WELCOME_TERMS_USE" desc="Terms of use link text in the onboarding legal note.">
-  условия использования
+  terms of use
 </message>
 <message name="IDS_FOCUS_ONBOARDING_WELCOME_FOOTER" desc="Footer text explaining that setup choices remain under user control.">
-  Все выбранные параметры можно изменить позже в настройках.
+  You can change every selected option later in settings.
 </message>
 
 <message name="IDS_FOCUS_ONBOARDING_FOCUS_TITLE" desc="Title of the onboarding step for focus-oriented defaults.">
-  Настройте режим работы
+  Set up your work preferences
 </message>
 <message name="IDS_FOCUS_ONBOARDING_FOCUS_SUBTITLE" desc="Subtitle of the onboarding step for focus-oriented defaults.">
-  Выберите спокойный интерфейс без лишних отвлечений. Эти параметры можно изменить позже.
+  Choose a calm interface with fewer distractions. You can change these options later.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_FOCUS_QUIET_TITLE" desc="Title of the option to block website notification prompts.">
-  Тихие уведомления
+  Quiet notifications
 </message>
 <message name="IDS_FOCUS_ONBOARDING_FOCUS_QUIET_DESC" desc="Description of the option to block website notification prompts.">
-  Сайты не смогут отвлекать вас запросами на отправку уведомлений.
+  Stop websites from interrupting you with notification requests.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_FOCUS_MINIMAL_TITLE" desc="Title of the option to use a minimal browser interface.">
-  Минимальный интерфейс
+  Minimal interface
 </message>
 <message name="IDS_FOCUS_ONBOARDING_FOCUS_MINIMAL_DESC" desc="Description of the option to use a minimal browser interface.">
-  Скрывает кнопку «Главная» и панель закладок. Закладки останутся доступны в меню.
+  Hides the Home button and bookmarks bar. Your bookmarks remain available in the menu.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_FOCUS_MOTION_TITLE" desc="Title of the option to enable smooth motion in Focus-owned interfaces.">
-  Плавные анимации
+  Smooth animations
 </message>
 <message name="IDS_FOCUS_ONBOARDING_FOCUS_MOTION_DESC" desc="Description of the option to enable smooth motion in Focus-owned interfaces.">
-  Добавляет спокойные плавные переходы. Системная настройка уменьшения движения всегда имеет приоритет.
+  Adds calm, fluid transitions. The system reduced-motion setting always takes priority.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_FOCUS_NOTE" desc="Note below focus preset options explaining that choices are reversible.">
-  Все выбранные параметры можно изменить позже в настройках браузера.
+  You can change every selected option later in browser settings.
 </message>
 
 <message name="IDS_FOCUS_ONBOARDING_APPEARANCE_TITLE" desc="Title of the onboarding step for choosing the address bar style.">
-  Настройте адресную строку
+  Set up the address bar
 </message>
 <message name="IDS_FOCUS_ONBOARDING_APPEARANCE_SUBTITLE" desc="Subtitle of the onboarding step for choosing the address bar style.">
-  Выберите удобную ширину поля, в котором вводятся адреса и поисковые запросы.
+  Choose a comfortable width for entering addresses and search queries.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_APPEARANCE_BAR_TITLE" desc="Heading above address bar style choices.">
-  Вид адресной строки
+  Address bar style
 </message>
 <message name="IDS_FOCUS_ONBOARDING_APPEARANCE_BAR_FULL" desc="Full width address bar option.">
-  Во всю ширину
+  Full width
 </message>
 <message name="IDS_FOCUS_ONBOARDING_APPEARANCE_BAR_FULL_DESC" desc="Description of the full width address bar option.">
-  Максимум места для длинных адресов.
+  Maximum room for long addresses.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_APPEARANCE_BAR_CENTERED" desc="Centered address bar option.">
-  По центру
+  Centered
 </message>
 <message name="IDS_FOCUS_ONBOARDING_APPEARANCE_BAR_CENTERED_DESC" desc="Description of the centered address bar option.">
-  Сбалансированный вид для повседневной работы.
+  A balanced layout for everyday work.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_APPEARANCE_BAR_MINIMAL" desc="Minimal address bar option.">
-  Минимальная
+  Minimal
 </message>
 <message name="IDS_FOCUS_ONBOARDING_APPEARANCE_BAR_MINIMAL_DESC" desc="Description of the minimal address bar option.">
-  Компактное поле с минимумом визуального шума.
+  A compact field with minimal visual noise.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_APPEARANCE_NOTE" desc="Note explaining that appearance choices remain available in settings.">
-  Позже эти параметры можно изменить в разделе «Настройки → Внешний вид».
+  You can change these options later under Settings → Appearance.
 </message>
 
 <message name="IDS_FOCUS_ONBOARDING_SHORTCUTS_TITLE" desc="Title of the onboarding step for selecting New Tab Page shortcuts.">
-  Что оставить под рукой?
+  What should stay close at hand?
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SHORTCUTS_SUBTITLE" desc="Subtitle of the onboarding step for selecting New Tab Page shortcuts.">
-  Выберите ярлыки для новой вкладки. По умолчанию ничего не выбрано.
+  Choose shortcuts for the New Tab page. Nothing is selected by default.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SHORTCUTS_SOCIAL" desc="Heading for social media shortcut choices.">
-  Социальные сети
+  Social media
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SHORTCUTS_CODING" desc="Heading for coding shortcut choices.">
-  Разработка
+  Coding
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SHORTCUTS_AI" desc="Heading for AI shortcut choices.">
-  ИИ
+  AI
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SHORTCUTS_PRODUCTIVITY" desc="Heading for productivity shortcut choices.">
-  Работа и продуктивность
+  Work and productivity
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SHORTCUTS_EMPTY" desc="Status shown when no New Tab Page shortcuts are selected.">
-  Ярлыки не выбраны. Можно пропустить этот шаг.
+  No shortcuts are selected. You can skip this step.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SHORTCUTS_SELECTED" desc="Prefix for the selected shortcut count.">
-  Выбрано:
+  Selected:
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SHORTCUTS_LIMIT" desc="Message shown when the maximum number of shortcuts has been selected.">
-  Можно выбрать не больше 10 ярлыков.
+  You can select up to 10 shortcuts.
 </message>
 
 <message name="IDS_FOCUS_ONBOARDING_FINISH_TITLE" desc="Title on the final onboarding screen.">
-  Всё готово для работы
+  You're ready to work
 </message>
 <message name="IDS_FOCUS_ONBOARDING_FINISH_BODY" desc="Body text on the final onboarding screen.">
-  Focus Browser настроен. Откройте задачу и сосредоточьтесь на главном.
+  Focus Browser is set up. Open a task and focus on what matters.
 </message>
 
 <message name="IDS_FOCUS_ONBOARDING_SEARCH_TITLE" desc="Title of the onboarding screen for selecting a default search engine.">
-  Поисковая система
+  Search engine
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SEARCH_SUBTITLE" desc="Subtitle for the onboarding screen for selecting a default search engine.">
-  Выберите поиск по умолчанию. Позже его можно сменить в настройках.
+  Choose your default search engine. You can change it later in settings.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SEARCH_LOADING" desc="Status shown while available search engines are loading.">
-  Загружаем доступные поисковые системы…
+  Loading available search engines…
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SEARCH_NONE" desc="Status shown when there are no available search engines.">
-  Доступные поисковые системы не найдены.
+  No available search engines were found.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SEARCH_ERROR" desc="Status shown when available search engines could not be loaded.">
-  Не удалось загрузить список поисковых систем. Можно продолжить с текущей.
+  Couldn't load the search engine list. You can continue with the current engine.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SEARCH_CATEGORIES_PRIVATE" desc="Description for privacy-first search engines in onboarding.">
-  Поиск с упором на конфиденциальность и без рекламного профилирования.
+  Privacy-first search without advertising profiles.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SEARCH_CATEGORIES_SMALL" desc="Description for smaller search engines that are more private than mainstream engines but not privacy-focused.">
-  Более прозрачная альтернатива крупным поисковым системам.
+  A more transparent alternative to the major search engines.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SEARCH_CATEGORIES_MAINSTREAM" desc="Description for mainstream search engines in onboarding.">
-  Популярная поисковая система, которая может собирать данные для персонализации.
+  A popular search engine that may collect data for personalization.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SEARCH_CATEGORIES_CUSTOM" desc="Description for a custom search engine in onboarding.">
-  Пользовательская поисковая система. Focus Browser не проверял её политику конфиденциальности.
+  A custom search engine. Focus Browser hasn't reviewed its privacy policy.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SEARCH_ENGINES_DUCKDUCKGO" desc="Onboarding description of DuckDuckGo as a search engine option.">
-  Ориентирован на конфиденциальность. Использует результаты Bing и не создаёт рекламный профиль пользователя.
+  Privacy-focused. Uses Bing results and doesn't create an advertising profile.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SEARCH_ENGINES_KAGI" desc="Onboarding description of Kagi as a search engine option.">
-  Поиск без рекламы и отслеживания с настраиваемой выдачей. Требуется платная учётная запись.
+  Search without ads or tracking and with customizable results. A paid account is required.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SEARCH_ENGINES_QWANT" desc="Onboarding description of Qwant as a search engine option.">
-  Европейская поисковая система на базе результатов Bing.
+  A European search engine powered by Bing results.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SEARCH_ENGINES_ECOSIA" desc="Onboarding description of Ecosia as a search engine option.">
-  Направляет часть рекламного дохода на экологические проекты. Использует результаты Bing и Google.
+  Directs part of its advertising revenue to environmental projects. Uses Bing and Google results.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SEARCH_ENGINES_BING" desc="Onboarding description of Bing as a search engine option.">
-  Популярный поиск Microsoft с персонализацией результатов и рекламы.
+  Microsoft's popular search engine, with personalized results and ads.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_SEARCH_ENGINES_GOOGLE" desc="Onboarding description of Google as a search engine option.">
-  Популярный поиск Google с персонализацией результатов и рекламы.
+  Google's popular search engine, with personalized results and ads.
 </message>
 
 <message name="IDS_FOCUS_ONBOARDING_DEFAULT_BROWSER_TITLE" desc="Title of the onboarding screen asking whether Focus should be the default browser.">
-  Сделать Focus Browser основным?
+  Make Focus Browser your default?
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DEFAULT_BROWSER_SUBTITLE" desc="Subtitle of the onboarding screen asking whether Focus should be the default browser.">
-  Тогда ссылки из других приложений будут открываться в Focus Browser. Выбор можно изменить в Windows.
+  Links from other apps will open in Focus Browser. You can change this choice in Windows.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DEFAULT_BROWSER_YES" desc="Label for the option to make Focus the default browser.">
-  Да, сделать основным
+  Yes, make it default
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DEFAULT_BROWSER_NO" desc="Label for the option to keep the current default browser.">
-  Не сейчас
+  Not now
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DEFAULT_BROWSER_YES_DESC" desc="Description for the option to make Focus the default browser.">
-  Открывать веб-ссылки в Focus Browser.
+  Open web links in Focus Browser.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DEFAULT_BROWSER_NO_DESC" desc="Description for the option to keep the current default browser.">
-  Оставить текущий браузер основным.
+  Keep your current default browser.
 </message>
 
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_TITLE" desc="Title of the onboarding screen for importing browser data.">
-  Перенесите данные из другого браузера
+  Bring your data from another browser
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_SUBTITLE" desc="Subtitle of the onboarding screen for importing browser data.">
-  Выберите профиль или импортируйте всё из Google Chrome одним нажатием.
+  Choose a profile or import supported data from Google Chrome with one click.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_SUBTITLE_NO_CHROME" desc="Import subtitle shown when no Google Chrome profile was found.">
-  Выберите найденный браузер и данные, которые хотите перенести.
+  Choose a detected browser and the data you want to bring over.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_BOOKMARKS" desc="Label for bookmarks as an importable data type.">
-  Закладки
+  Bookmarks
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_HISTORY" desc="Label for history as an importable data type.">
-  История
+  History
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_EXTENSIONS" desc="Label for extensions as an importable data type.">
-  Расширения
+  Extensions
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_PASSWORDS" desc="Label for passwords as an importable data type.">
-  Пароли
+  Passwords
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_AUTOFILL" desc="Label for autofill data as an importable data type.">
-  Автозаполнение
+  Autofill
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_SEARCH_ENGINE" desc="Label for the default search engine as an importable data type.">
-  Поисковая система
+  Search engine
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_LOADING" desc="Status shown while the list of importable browser profiles is loading.">
-  Ищем установленные браузеры…
+  Looking for installed browsers…
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_NONE" desc="Status shown when no importable browser profiles were found.">
-  Профили для импорта не найдены. Можно продолжить без импорта.
+  No profiles are available to import. You can continue without importing.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_LOAD_ERROR" desc="Status shown when importable browser profiles could not be loaded.">
-  Не удалось получить список браузеров. Можно продолжить без импорта.
+  Couldn't load the browser list. You can continue without importing.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_IMPORTED" desc="Status shown for a profile that was already imported during onboarding.">
-  Уже импортировано
+  Already imported
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_DEFAULT_PROFILE" desc="Fallback label for an importable browser profile without a name.">
-  Основной профиль
+  Default profile
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_CHROME_QUICK_TITLE" desc="Title of the one-click Chrome import card.">
-  Импортировать всё из Google Chrome
+  Import supported data from Google Chrome
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_CHROME_QUICK_DESC" desc="Description of the data included in one-click Chrome import.">
-  Закладки, история, пароли, автозаполнение, поисковая система и расширения.
+  Available bookmarks, history, and extensions.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_CHROME_QUICK_BUTTON" desc="Button label that starts one-click Chrome import.">
-  Импортировать
+  Import
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_CHROME_QUICK_WORKING" desc="Status shown while one-click Chrome import is running.">
-  Импортируем…
+  Importing…
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_CHROME_QUICK_DONE" desc="Status shown after one-click Chrome import succeeds.">
-  Готово
+  Done
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_CHROME_QUICK_FAILED" desc="Status shown after one-click Chrome import fails.">
-  Не удалось импортировать данные. Попробуйте ещё раз или выберите профиль ниже.
+  Couldn't import the data. Try again or choose a profile below.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_DATA_IMPORT_CHROME_QUICK_RETRY" desc="Button label that retries one-click Chrome import after an error.">
-  Повторить
+  Try again
 </message>
 
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_TITLE" desc="Title of the onboarding screen for the built-in password manager.">
-  Менеджер паролей Focus
+  Focus Password Manager
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_SUBTITLE" desc="Subtitle of the onboarding screen for the built-in password manager.">
-  Встроен в браузер и включён по умолчанию. Ничего дополнительно устанавливать не нужно.
+  Built into the browser and enabled by default. There's nothing else to install.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_LOCAL_TITLE" desc="Title of the local password storage benefit.">
-  Защищённое локальное хранение
+  Protected local storage
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_LOCAL_DESC" desc="Description of local password storage in the built-in password manager.">
-  Пароли шифруются средствами Windows и хранятся в вашем профиле Focus Browser.
+  Passwords are encrypted by Windows and stored in your Focus Browser profile.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_FILL_TITLE" desc="Title of the password autofill and generation benefit.">
-  Автозаполнение и генерация
+  Autofill and generation
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_FILL_DESC" desc="Description of password autofill and generation.">
-  Focus Browser сохраняет, подставляет и создаёт надёжные пароли прямо на сайтах.
+  Focus Browser saves, fills, and creates strong passwords directly on websites.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_PASSKEYS_TITLE" desc="Title of the passwords and passkeys benefit.">
-  Пароли и ключи доступа
+  Passwords and passkeys
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_PASSKEYS_DESC" desc="Description of passwords and passkeys management.">
-  Управляйте сохранёнными данными для входа и поддерживаемыми ключами доступа в одном месте.
+  Manage saved sign-in details and supported passkeys in one place.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_OPEN_MANAGER" desc="Button label that opens the built-in password manager.">
-  Открыть менеджер
+  Open manager
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_OPEN_IMPORT" desc="Button label that opens password import settings.">
-  Импортировать пароли
+  Import passwords
 </message>
-<message name="IDS_FOCUS_ONBOARDING_PASSWORD_NOTE" desc="Note about importing Chrome passwords from the previous onboarding step.">
-  Пароли из Chrome также можно перенести на предыдущем шаге импорта данных.
+<message name="IDS_FOCUS_ONBOARDING_PASSWORD_NOTE" desc="Note explaining how Chrome passwords can be imported separately.">
+  Chrome passwords are not included in browser data import. Export them from Chrome, then use Import passwords above.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_IMPORT_GUIDE" desc="Button label linking to a password manager import guide.">
-  Импорт
+  Import
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_SETUP_GUIDE" desc="Button label linking to a password manager setup guide.">
-  Настройка
+  Setup
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_PRIVACY" desc="Button label linking to a password manager privacy policy.">
-  Конфиденциальность
+  Privacy
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_INSTALL" desc="Button label to install a password manager extension.">
-  Установить
+  Install
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_INSTALLED" desc="Status label shown when a password manager extension is installed.">
-  Установлено
+  Installed
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_ERROR" desc="Prefix label shown before a password manager install error.">
-  Ошибка:
+  Error:
 </message>
 
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_MANAGERS_PROTON_PASS" desc="Onboarding description of Proton Pass as a password manager option.">
-  Менеджер паролей Proton с открытым исходным кодом и бесплатным тарифом.
+  Proton's open-source password manager with a free plan.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_MANAGERS_BITWARDEN" desc="Onboarding description of Bitwarden as a password manager option.">
-  Популярный менеджер паролей с открытым исходным кодом, бесплатным тарифом и возможностью самостоятельного размещения.
+  A popular open-source password manager with a free plan and self-hosting support.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_MANAGERS_ONE_PASSWORD" desc="Onboarding description of 1Password as a password manager option.">
-  Платный менеджер паролей с закрытым исходным кодом.
+  A paid, closed-source password manager.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_MANAGERS_DASHLANE" desc="Onboarding description of Dashlane as a password manager option.">
-  Платный менеджер паролей с закрытым исходным кодом и хранением данных в Европе.
+  A paid, closed-source password manager with data storage in Europe.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_MANAGERS_ICLOUD_PASSWORDS" desc="Onboarding description of iCloud Passwords as a password manager option.">
-  Бесплатный менеджер паролей Apple. На Windows может требовать повторный вход после перезапуска браузера.
+  Apple's free password manager. On Windows it may require signing in again after a browser restart.
 </message>
 <message name="IDS_FOCUS_ONBOARDING_PASSWORD_MANAGERS_KEE_PASS_XC" desc="Onboarding description of KeePassXC as a password manager option.">
-  Локальный бесплатный менеджер паролей с открытым исходным кодом для опытных пользователей.
+  A local, free, open-source password manager for advanced users.
 </message>
 
 </grit-part>

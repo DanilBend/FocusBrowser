@@ -20,6 +20,9 @@ inline constexpr char kUblockOriginComponentIdHashed[] =
 inline constexpr char kFocusYoutubeComponentId[] =
     "jafokmemnknjknbdiklabcnhlpheefbm";
 
+inline constexpr char kFocusTextMotionComponentId[] =
+    "ajekofejbbjbbkdfnlghakcilbfdmofc";
+
 }  // namespace focus
 
-#endif  /* COMPONENTS_FOCUS_SERVICES_EXTENSION_IDS_H_ */
+#endif /* COMPONENTS_FOCUS_SERVICES_EXTENSION_IDS_H_ */
