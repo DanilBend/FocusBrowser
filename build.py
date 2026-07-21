@@ -1,0 +1,481 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+# Copyright 2025 The Focus Authors
+# You can use, redistribute, and/or modify this source code under
+# the terms of the GPL-3.0 license that can be found in the LICENSE file.
+
+# Copyright (c) 2019 The ungoogled-chromium Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+"""
+Focus Browser build script for Windows
+"""
+
+import sys
+import time
+import argparse
+import base64
+import binascii
+import os
+import shutil
+import subprocess
+import ctypes
+import urllib.parse
+from pathlib import Path
+from contextlib import chdir
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'focus-chromium' / 'utils'))
+import downloads
+import domain_substitution
+import i18n_apply
+import name_substitution
+import focus_version
+import generate_resources
+import replace_resources
+import prune_binaries
+import patches
+from _common import ENCODING, USE_REGISTRY, ExtractorEnum, get_logger
+sys.path.pop(0)
+
+_ROOT_DIR = Path(__file__).resolve().parent
+_PATCH_BIN_RELPATH = Path('third_party/git/usr/bin/patch.exe')
+
+
+def _is_valid_winsparkle_public_key(value):
+    """Returns whether value is a canonical base64 Ed25519 public key."""
+    if not value or value != value.strip():
+        return False
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return (len(decoded) == 32 and
+            base64.b64encode(decoded).decode('ascii') == value)
+
+
+def _is_valid_winsparkle_appcast_url(value):
+    """Returns whether value is a safe absolute HTTPS appcast URL."""
+    if (not value or value != value.strip() or
+            any(ord(char) < 0x21 or ord(char) > 0x7e for char in value) or
+            any(char in value for char in ('\\', '"', "'"))):
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        # Accessing port also validates that it is numeric and in range.
+        parsed.port
+    except ValueError:
+        return False
+    return (parsed.scheme == 'https' and bool(parsed.hostname) and
+            parsed.username is None and parsed.password is None and
+            not parsed.fragment)
+
+
+def _escape_gn_string(value):
+    """Escapes a validated external value for a double-quoted GN string."""
+    return value.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\\$')
+
+
+def _winsparkle_gn_flags(environment):
+    """Builds safe GN args for an optional, fully configured updater."""
+    winsparkle_ed_key = environment.get('WINSPARKLE_ED_KEY', '').strip()
+    winsparkle_appcast_url = environment.get(
+        'WINSPARKLE_APPCAST_URL', '').strip()
+    authenticode_org = environment.get(
+        'WINSPARKLE_AUTHENTICODE_ORG', '').strip()
+    updater_requested = bool(winsparkle_ed_key or winsparkle_appcast_url)
+    if not updater_requested:
+        return ''
+
+    if not _is_valid_winsparkle_public_key(winsparkle_ed_key):
+        raise ValueError(
+            'WINSPARKLE_ED_KEY must be a canonical base64-encoded '
+            '32-byte Ed25519 public key')
+    if not _is_valid_winsparkle_appcast_url(winsparkle_appcast_url):
+        raise ValueError(
+            'WINSPARKLE_APPCAST_URL must be an absolute HTTPS URL '
+            'without credentials or a fragment')
+
+    updater_flags = 'enable_winsparkle=true\n'
+    updater_flags += (
+        f'winsparkle_ed_key="{_escape_gn_string(winsparkle_ed_key)}"\n')
+    updater_flags += (
+        'winsparkle_appcast_url="'
+        f'{_escape_gn_string(winsparkle_appcast_url)}"\n')
+    if authenticode_org:
+        updater_flags += (
+            'winsparkle_authenticode_org="'
+            f'{_escape_gn_string(authenticode_org)}"\n')
+    return updater_flags
+
+
+def _get_vcvars_path(name='64'):
+    """
+    Returns the path to the corresponding vcvars*.bat path
+
+    As of VS 2017, name can be one of: 32, 64, all, amd64_x86, x86_amd64
+    """
+    vswhere_exe = '%ProgramFiles(x86)%\\Microsoft Visual Studio\\Installer\\vswhere.exe'
+    result = subprocess.run(
+        '"{}" -products * -prerelease -latest -property installationPath'.format(vswhere_exe),
+        shell=True,
+        check=True,
+        stdout=subprocess.PIPE,
+        universal_newlines=True)
+    vcvars_path = Path(result.stdout.strip(), 'VC/Auxiliary/Build/vcvars{}.bat'.format(name))
+    if not vcvars_path.exists():
+        raise RuntimeError(
+            'Could not find vcvars batch script in expected location: {}'.format(vcvars_path))
+    return vcvars_path
+
+
+def _run_build_process(*args, **kwargs):
+    """
+    Runs the subprocess with the correct environment variables for building
+    """
+    # Add call to set VC variables
+    cmd_input = ['call "%s" >nul' % _get_vcvars_path()]
+    cmd_input.append('set DEPOT_TOOLS_WIN_TOOLCHAIN=0')
+    cmd_input.append(' '.join(map('"{}"'.format, args)))
+    cmd_input.append('exit\n')
+    subprocess.run(('cmd.exe', '/k'),
+                   input='\n'.join(cmd_input),
+                   check=True,
+                   encoding=ENCODING,
+                   **kwargs)
+
+
+def _run_build_process_timeout(*args, timeout):
+    """
+    Runs the subprocess with the correct environment variables for building
+    """
+    # Add call to set VC variables
+    cmd_input = ['call "%s" >nul' % _get_vcvars_path()]
+    cmd_input.append('set DEPOT_TOOLS_WIN_TOOLCHAIN=0')
+    cmd_input.append(' '.join(map('"{}"'.format, args)))
+    cmd_input.append('exit\n')
+    with subprocess.Popen(('cmd.exe', '/k'), encoding=ENCODING, stdin=subprocess.PIPE, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP) as proc:
+        proc.stdin.write('\n'.join(cmd_input))
+        proc.stdin.close()
+        try:
+            proc.wait(timeout)
+            if proc.returncode != 0:
+                raise RuntimeError('Build failed!')
+        except subprocess.TimeoutExpired:
+            print('Sending keyboard interrupt')
+            for _ in range(3):
+                ctypes.windll.kernel32.GenerateConsoleCtrlEvent(1, proc.pid)
+                time.sleep(1)
+            try:
+                proc.wait(10)
+            except:
+                proc.kill()
+            sys.exit(42)
+
+
+def _make_tmp_paths():
+    """Creates TMP and TEMP variable dirs so ninja won't fail"""
+    tmp_path = Path(os.environ['TMP'])
+    if not tmp_path.exists():
+        tmp_path.mkdir()
+    tmp_path = Path(os.environ['TEMP'])
+    if not tmp_path.exists():
+        tmp_path.mkdir()
+
+
+def main():
+    """CLI Entrypoint"""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        '--7z-path',
+        dest='sevenz_path',
+        default=USE_REGISTRY,
+        help=('Command or path to 7-Zip\'s "7z" binary. If "_use_registry" is '
+              'specified, determine the path from the registry. Default: %(default)s'))
+    parser.add_argument(
+        '--winrar-path',
+        dest='winrar_path',
+        default=USE_REGISTRY,
+        help=('Command or path to WinRAR\'s "winrar.exe" binary. If "_use_registry" is '
+              'specified, determine the path from the registry. Default: %(default)s'))
+    parser.add_argument(
+        '-j',
+        type=int,
+        dest='thread_count',
+        help=('Number of CPU threads to use for compiling'))
+    parser.add_argument(
+        '--ci',
+        type=int,
+    )
+    parser.add_argument('--build-installer', action='store_true')
+    parser.add_argument(
+        '--arm',
+        action='store_true'
+    )
+    parser.add_argument(
+        '--tarball',
+        action='store_true'
+    )
+    parser.add_argument(
+        '--dev',
+        action='store_true'
+    )
+    args = parser.parse_args()
+
+    # Set common variables
+    source_tree = _ROOT_DIR / 'build' / 'src'
+    downloads_cache = _ROOT_DIR / 'build' / 'download_cache'
+
+    if not args.ci or not (source_tree / 'BUILD.gn').exists():
+        # Setup environment
+        source_tree.mkdir(parents=True, exist_ok=True)
+        downloads_cache.mkdir(parents=True, exist_ok=True)
+        _make_tmp_paths()
+
+        # Extractors
+        extractors = {
+            ExtractorEnum.SEVENZIP: args.sevenz_path,
+            ExtractorEnum.WINRAR: args.winrar_path,
+        }
+
+        # Prepare source folder
+        if args.tarball:
+            # Download chromium tarball
+            get_logger().info('Downloading chromium tarball...')
+            download_info = downloads.DownloadInfo([_ROOT_DIR / 'focus-chromium' / 'downloads.ini'])
+            downloads.retrieve_downloads(download_info, downloads_cache, None, True)
+            try:
+                downloads.check_downloads(download_info, downloads_cache, None)
+            except downloads.HashMismatchError as exc:
+                get_logger().error('File checksum does not match: %s', exc)
+                exit(1)
+
+            # Unpack chromium tarball
+            get_logger().info('Unpacking chromium tarball...')
+            downloads.unpack_downloads(download_info, downloads_cache, None, source_tree, extractors)
+        else:
+            # Clone sources
+            subprocess.run([sys.executable, str(Path('focus-chromium', 'utils', 'clone.py')), '-o', 'build\\src', '-p', 'win-arm64' if args.arm else 'win64'], check=True)
+
+        # Retrieve windows downloads
+        get_logger().info('Downloading required files...')
+        download_info_win = downloads.DownloadInfo([_ROOT_DIR / 'downloads.ini'])
+        downloads.retrieve_downloads(download_info_win, downloads_cache, None, True)
+        try:
+            downloads.check_downloads(download_info_win, downloads_cache, None)
+        except downloads.HashMismatchError as exc:
+            get_logger().error('File checksum does not match: %s', exc)
+            exit(1)
+
+        # Retrieve deps
+        get_logger().info('Downloading deps...')
+        deps_info = downloads.DownloadInfo([_ROOT_DIR / 'focus-chromium' / 'deps.ini'])
+        downloads.retrieve_downloads(deps_info, downloads_cache, None, True)
+        try:
+            downloads.check_downloads(deps_info, downloads_cache, None)
+        except downloads.HashMismatchError as exc:
+            get_logger().error('File checksum does not match: %s', exc)
+            exit(1)
+        get_logger().info('Unpacking deps...')
+        downloads.unpack_downloads(deps_info, downloads_cache, None, source_tree, extractors)
+
+
+        # Prune binaries
+        pruning_list = _ROOT_DIR / 'focus-chromium' / 'pruning.list'
+        unremovable_files = prune_binaries.prune_files(
+            source_tree,
+            pruning_list.read_text(encoding=ENCODING).splitlines()
+        )
+        if unremovable_files:
+            get_logger().error('Files could not be pruned: %s', unremovable_files)
+            parser.exit(1)
+
+        # Unpack downloads
+        DIRECTX = source_tree / 'third_party' / 'microsoft_dxheaders' / 'src'
+        ESBUILD = source_tree / 'third_party' / 'devtools-frontend' / 'src' / 'third_party' / 'esbuild'
+        if DIRECTX.exists():
+            shutil.rmtree(DIRECTX)
+            DIRECTX.mkdir()
+        if ESBUILD.exists():
+            shutil.rmtree(ESBUILD)
+            ESBUILD.mkdir()
+        get_logger().info('Unpacking downloads...')
+        downloads.unpack_downloads(download_info_win, downloads_cache, None, source_tree, extractors)
+
+        # Download rust & llvm toolchains
+        with chdir('build\\src'):
+            _run_build_process(sys.executable, 'tools\\rust\\update_rust.py')
+            _run_build_process(sys.executable, 'tools\\clang\\scripts\\update.py')
+
+        if not args.dev:
+            # Apply patches
+            # First, ungoogled-chromium-patches
+            patches.apply_patches(
+                patches.generate_patches_from_series(_ROOT_DIR / 'focus-chromium' / 'patches', resolve=True),
+                source_tree,
+                patch_bin_path=(source_tree / _PATCH_BIN_RELPATH)
+            )
+            # Then Windows-specific patches
+            patches.apply_patches(
+                patches.generate_patches_from_series(_ROOT_DIR / 'patches', resolve=True),
+                source_tree,
+                patch_bin_path=(source_tree / _PATCH_BIN_RELPATH)
+            )
+
+            # Substitute domains
+            domain_substitution_list = _ROOT_DIR / 'focus-chromium' / 'domain_substitution.list'
+            domain_substitution.apply_substitution(
+                _ROOT_DIR / 'focus-chromium' / 'domain_regex.list',
+                domain_substitution_list,
+                source_tree,
+                None
+            )
+
+            # Substitute names
+            name_substitution.do_substitution(
+                source_tree,
+                tarpath=None,
+                workers=min(32, os.cpu_count()),
+                dry_run=False
+            )
+
+            # Append translations
+            i18n_apply.apply_translations(source_tree)
+
+            # Apply the final Focus Browser source overlay. These files are
+            # intentionally kept versioned with the Windows source package so
+            # locally developed browser features and binary artwork remain
+            # reproducible without any external repository.
+            source_overrides = _ROOT_DIR / 'source_overrides'
+            deleted_files = source_overrides / 'delete.txt'
+            if deleted_files.exists():
+                for relative_path in deleted_files.read_text(
+                        encoding=ENCODING).splitlines():
+                    relative_path = relative_path.strip()
+                    if not relative_path or relative_path.startswith('#'):
+                        continue
+                    target = (source_tree / Path(relative_path)).resolve()
+                    if source_tree.resolve() not in target.parents:
+                        raise ValueError(
+                            f'Override deletion escapes source tree: '
+                            f'{relative_path}')
+                    if target.is_file() or target.is_symlink():
+                        target.unlink()
+
+            if source_overrides.exists():
+                for source in source_overrides.rglob('*'):
+                    if not source.is_file() or source == deleted_files:
+                        continue
+                    destination = source_tree / source.relative_to(
+                        source_overrides)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
+        else:
+            print("Apply patches using quilt, then press Enter")
+            input()
+
+        # Set version
+        version_parts = focus_version.get_version_parts(_ROOT_DIR / 'focus-chromium', _ROOT_DIR)
+        chrome_version_path = source_tree / "chrome" / "VERSION"
+        focus_version.check_existing_version(chrome_version_path)
+        with open(chrome_version_path, "a") as f:
+            for name, version in version_parts.items():
+                focus_version.append_version(f, name, version)
+
+        # Copy resources
+        # First, generate and copy Windows-specific resources
+        generate_resources.generate_resources(
+            _ROOT_DIR / 'resources' / 'generate_resources.txt',
+            _ROOT_DIR / 'resources'
+        )
+
+        replace_resources.copy_resources(
+            _ROOT_DIR / 'resources' / 'platform_resources.txt',
+            _ROOT_DIR / 'resources',
+            source_tree
+        )
+
+        # Then common Focus Browser resources
+        generate_resources.generate_resources(
+            _ROOT_DIR / 'focus-chromium' / 'resources' / 'generate_resources.txt',
+            _ROOT_DIR / 'focus-chromium' / 'resources'
+        )
+
+        replace_resources.copy_resources(
+            _ROOT_DIR / 'focus-chromium' / 'resources' / 'focus_resources.txt',
+            _ROOT_DIR / 'focus-chromium' / 'resources',
+            source_tree
+        )
+
+    if not args.ci or not (source_tree / 'out/Default').exists():
+        # Output args.gn
+        (source_tree / 'out/Default').mkdir(parents=True)
+        gn_flags = (_ROOT_DIR / 'focus-chromium' / 'flags.gn').read_text(encoding=ENCODING)
+        gn_flags += '\n'
+        windows_flags = (_ROOT_DIR / 'flags.windows.gn').read_text(encoding=ENCODING)
+        if args.arm:
+            windows_flags = windows_flags.replace('x64', 'arm64')
+        if args.tarball:
+            windows_flags += '\nchrome_pgo_phase=0\n'
+
+        if shutil.which('sccache'):
+            windows_flags += 'cc_wrapper = "sccache"\n'
+
+        gn_flags += windows_flags
+        if args.dev:
+            gn_flags += 'is_component_build=true\n'
+        else:
+            gn_flags += 'is_official_build=true\n'
+
+        try:
+            gn_flags += _winsparkle_gn_flags(os.environ)
+        except ValueError as exc:
+            parser.error(str(exc))
+
+        (source_tree / 'out/Default/args.gn').write_text(gn_flags, encoding=ENCODING)
+
+    # Enter source tree to run build commands
+    os.chdir(source_tree)
+
+    if not args.ci or not os.path.exists('out\\Default\\gn.exe'):
+        # Run GN bootstrap
+        _run_build_process(
+            sys.executable, 'tools\\gn\\bootstrap\\bootstrap.py', '-o', 'out\\Default\\gn.exe',
+            '--skip-generate-buildfiles')
+
+        # Run gn gen
+        _run_build_process('out\\Default\\gn.exe', 'gen', 'out\\Default', '--fail-on-unused-args')
+
+    # Ninja commandline
+    ninja_commandline = ['third_party\\ninja\\ninja.exe']
+    if args.thread_count is not None:
+        ninja_commandline.append('-j')
+        ninja_commandline.append(args.thread_count)
+    ninja_commandline.append('-C')
+    ninja_commandline.append('out\\Default')
+
+    if not args.ci or not args.build_installer:
+        ninja_commandline.append('chrome')
+        ninja_commandline.append('chromedriver')
+        ninja_commandline.append('setup')
+
+    if not args.ci or args.build_installer:
+        ninja_commandline.append('mini_installer')
+
+    # Run ninja
+    if args.ci:
+        max_time = 5.5 * 60 * 60
+        secs_spent = int(time.time()) - args.ci
+        timeout = int(max_time - secs_spent)
+        print(f"{timeout} seconds left for build")
+
+        _run_build_process_timeout(*ninja_commandline, timeout=timeout)
+        if args.build_installer:
+            os.chdir(_ROOT_DIR)
+            subprocess.run([sys.executable, 'package.py'], check=True)
+    else:
+        _run_build_process(*ninja_commandline)
+
+
+if __name__ == '__main__':
+    main()

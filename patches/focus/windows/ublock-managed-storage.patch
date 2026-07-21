@@ -1,0 +1,22 @@
+--- a/chrome/installer/mini_installer/chrome.release
++++ b/chrome/installer/mini_installer/chrome.release
+@@ -42,6 +42,7 @@ WinSparkle.dll: %(VersionDir)s\
+ #
+ Extensions\*.*: %(VersionDir)s\Extensions\
+ locales\*.pak: %(VersionDir)s\Locales
++resources\ublock\managed_storage.json: %(VersionDir)s\resources\ublock\
+ 
+ #
+ # VisualElements sub-dir.
+--- a/chrome/tools/build/win/FILES.cfg
++++ b/chrome/tools/build/win/FILES.cfg
+@@ -332,5 +332,9 @@ FILES = [
+   {
+     'filename': 'resources.pak',
+     'buildtype': ['official'],
+   },
++  {
++    'filename': 'resources/ublock/managed_storage.json',
++    'buildtype': ['official'],
++  },
+   # Widevine CDM files:

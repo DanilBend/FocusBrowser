@@ -1,0 +1,843 @@
+diff --git a/chrome/app/chrome_command_ids.h b/chrome/app/chrome_command_ids.h
+index 8e800a3..a36cfa6 100644
+--- a/chrome/app/chrome_command_ids.h
++++ b/chrome/app/chrome_command_ids.h
+@@ -312,6 +312,7 @@
+ #define IDC_SHOW_TABS_FROM_OTHER_DEVICES_SIDE_PANEL 40304
+ 
+ #define IDC_FOCUS_SERVICES_OPEN 40700
++#define IDC_OPEN_MEDITATION 40701
+ 
+ // Spell-check
+ // Insert any additional suggestions before _LAST; these have to be consecutive.
+diff --git a/chrome/browser/resources/BUILD.gn b/chrome/browser/resources/BUILD.gn
+index 8ed5557..d5e4667 100644
+--- a/chrome/browser/resources/BUILD.gn
++++ b/chrome/browser/resources/BUILD.gn
+@@ -67,6 +67,7 @@ group("resources") {
+       "key_value_pair_viewer_shared:resources",
+       "lens/overlay:resources",
+       "lens/shared:resources",
++      "meditation:resources",
+       "new_tab_footer:resources",
+       "omnibox_popup:resources",
+       "password_manager:resources",
+diff --git a/chrome/browser/resources/meditation/BUILD.gn b/chrome/browser/resources/meditation/BUILD.gn
+new file mode 100644
+index 0000000..ef71f87
+--- /dev/null
++++ b/chrome/browser/resources/meditation/BUILD.gn
+@@ -0,0 +1,18 @@
++# Copyright 2026 The Focus Browser Authors
++# You can use, redistribute, and/or modify this source code under
++# the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++import("//ui/webui/resources/tools/build_webui.gni")
++
++assert(!is_android)
++
++build_webui("build") {
++  grd_prefix = "meditation"
++
++  static_files = [
++    "meditation.css",
++    "meditation.html",
++  ]
++
++  ts_files = [ "meditation.ts" ]
++}
+diff --git a/chrome/browser/resources/meditation/meditation.css b/chrome/browser/resources/meditation/meditation.css
+new file mode 100644
+index 0000000..d605d34
+--- /dev/null
++++ b/chrome/browser/resources/meditation/meditation.css
+@@ -0,0 +1,360 @@
++/* Copyright 2026 The Focus Browser Authors
++ * You can use, redistribute, and/or modify this source code under
++ * the terms of the GPL-3.0 license that can be found in the LICENSE file. */
++
++:root {
++  color-scheme: dark;
++  --background: #050505;
++  --surface: #0d0d0d;
++  --surface-raised: #141414;
++  --line: rgba(255, 255, 255, 0.11);
++  --muted: #999;
++  --text: #f4f4f4;
++  --accent: #e7ff55;
++  --accent-text: #090a03;
++}
++
++* {
++  box-sizing: border-box;
++}
++
++html {
++  background: var(--background);
++  min-height: 100%;
++}
++
++body {
++  background:
++      radial-gradient(circle at 75% 8%, rgba(231, 255, 85, 0.08), transparent 30rem),
++      var(--background);
++  color: var(--text);
++  font-family: Inter, 'Segoe UI Variable', 'Segoe UI', sans-serif;
++  margin: 0;
++  min-height: 100vh;
++}
++
++button,
++a {
++  font: inherit;
++}
++
++.page-shell {
++  margin: 0 auto;
++  max-width: 1240px;
++  padding: 0 48px 40px;
++}
++
++.topbar {
++  align-items: center;
++  border-bottom: 1px solid var(--line);
++  display: flex;
++  height: 82px;
++  justify-content: space-between;
++}
++
++.brand,
++.section-name {
++  align-items: center;
++  display: flex;
++  font-size: 14px;
++  font-weight: 650;
++  gap: 11px;
++  letter-spacing: 0.01em;
++}
++
++.brand-mark {
++  align-items: center;
++  background: #000;
++  border: 1px solid rgba(255, 255, 255, 0.22);
++  border-radius: 9px;
++  display: inline-flex;
++  height: 36px;
++  justify-content: center;
++  width: 36px;
++}
++
++.brand-mark svg {
++  display: block;
++  fill: none;
++  height: 28px;
++  stroke: #fff;
++  width: 28px;
++}
++
++.brand-mark .brand-mark-dot {
++  fill: #fff;
++  stroke: none;
++}
++
++.section-name {
++  color: var(--muted);
++  font-weight: 540;
++}
++
++.section-dot {
++  background: var(--accent);
++  border-radius: 50%;
++  box-shadow: 0 0 18px rgba(231, 255, 85, 0.4);
++  height: 7px;
++  width: 7px;
++}
++
++.hero {
++  max-width: 860px;
++  padding: 90px 0 72px;
++}
++
++.eyebrow,
++.card-label {
++  color: var(--accent);
++  font-size: 12px;
++  font-weight: 720;
++  letter-spacing: 0.16em;
++  margin: 0 0 22px;
++  text-transform: uppercase;
++}
++
++h1 {
++  font-size: clamp(54px, 7vw, 96px);
++  font-weight: 650;
++  letter-spacing: -0.065em;
++  line-height: 0.94;
++  margin: 0;
++}
++
++.hero-copy {
++  color: var(--muted);
++  font-size: 19px;
++  line-height: 1.55;
++  margin: 32px 0 0;
++  max-width: 590px;
++}
++
++.video-card {
++  background: var(--surface);
++  border: 1px solid var(--line);
++  border-radius: 24px;
++  overflow: hidden;
++}
++
++.video-copy {
++  display: grid;
++  gap: 18px 44px;
++  grid-template-columns: minmax(0, 1.5fr) minmax(260px, 0.7fr);
++  padding: 38px 42px 32px;
++}
++
++.video-copy .card-label {
++  grid-column: 1 / -1;
++  margin: 0;
++}
++
++h2 {
++  font-size: clamp(26px, 3vw, 42px);
++  font-weight: 590;
++  letter-spacing: -0.035em;
++  line-height: 1.08;
++  margin: 0;
++}
++
++.video-description {
++  align-self: end;
++  color: var(--muted);
++  font-size: 15px;
++  line-height: 1.6;
++  margin: 0;
++}
++
++.player-frame {
++  aspect-ratio: 16 / 9;
++  background: #080808;
++  border-bottom: 1px solid var(--line);
++  border-top: 1px solid var(--line);
++  display: grid;
++  min-height: 420px;
++  place-items: center;
++  position: relative;
++}
++
++.privacy-gate {
++  align-items: center;
++  display: flex;
++  flex-direction: column;
++  max-width: 620px;
++  padding: 36px;
++  text-align: center;
++}
++
++.breathing-orb {
++  align-items: center;
++  animation: breathe 8s ease-in-out infinite;
++  background: radial-gradient(circle at 35% 30%, #f6ffb9, var(--accent) 50%, #879d00);
++  border-radius: 50%;
++  box-shadow: 0 0 70px rgba(231, 255, 85, 0.18);
++  color: var(--accent-text);
++  display: flex;
++  font-size: 11px;
++  font-weight: 760;
++  height: 96px;
++  justify-content: center;
++  letter-spacing: 0.12em;
++  margin-bottom: 30px;
++  text-transform: uppercase;
++  width: 96px;
++}
++
++@keyframes breathe {
++  0%,
++  100% {
++    transform: scale(0.82);
++  }
++  50% {
++    transform: scale(1.08);
++  }
++}
++
++.privacy-copy h3 {
++  font-size: 24px;
++  font-weight: 600;
++  letter-spacing: -0.025em;
++  margin: 0 0 12px;
++}
++
++.privacy-copy p {
++  color: var(--muted);
++  font-size: 14px;
++  line-height: 1.6;
++  margin: 0 auto;
++  max-width: 560px;
++}
++
++.primary-action,
++.secondary-action {
++  align-items: center;
++  border-radius: 999px;
++  cursor: pointer;
++  display: inline-flex;
++  font-size: 14px;
++  font-weight: 680;
++  justify-content: center;
++  text-decoration: none;
++}
++
++.primary-action {
++  background: var(--accent);
++  border: 0;
++  color: var(--accent-text);
++  margin-top: 28px;
++  min-height: 48px;
++  padding: 0 24px;
++}
++
++.primary-action:hover {
++  background: #f0ff86;
++}
++
++.primary-action:focus-visible,
++.secondary-action:focus-visible {
++  outline: 2px solid var(--accent);
++  outline-offset: 3px;
++}
++
++.meditation-video {
++  border: 0;
++  height: 100%;
++  inset: 0;
++  position: absolute;
++  width: 100%;
++}
++
++.video-footer {
++  align-items: center;
++  display: flex;
++  justify-content: space-between;
++  min-height: 78px;
++  padding: 16px 24px 16px 32px;
++}
++
++.connection-status {
++  color: var(--muted);
++  font-size: 13px;
++  margin: 0;
++}
++
++.secondary-action {
++  color: var(--text);
++  gap: 8px;
++  min-height: 42px;
++  padding: 0 16px;
++}
++
++.secondary-action:hover {
++  background: var(--surface-raised);
++}
++
++.page-footer {
++  color: #777;
++  display: flex;
++  font-size: 12px;
++  justify-content: space-between;
++  padding: 30px 4px 0;
++}
++
++.private-note::before {
++  background: #5e6b14;
++  border-radius: 50%;
++  content: '';
++  display: inline-block;
++  height: 6px;
++  margin-right: 8px;
++  width: 6px;
++}
++
++[hidden] {
++  display: none !important;
++}
++
++@media (max-width: 760px) {
++  .page-shell {
++    padding: 0 20px 28px;
++  }
++
++  .topbar {
++    height: 68px;
++  }
++
++  .hero {
++    padding: 58px 0 46px;
++  }
++
++  .video-copy {
++    grid-template-columns: 1fr;
++    padding: 28px 24px;
++  }
++
++  .player-frame {
++    aspect-ratio: auto;
++    min-height: 470px;
++  }
++
++  .privacy-gate {
++    padding: 24px;
++  }
++
++  .video-footer,
++  .page-footer {
++    align-items: flex-start;
++    flex-direction: column;
++    gap: 10px;
++  }
++
++  .video-footer {
++    padding: 18px 20px;
++  }
++}
++
++@media (prefers-reduced-motion: reduce) {
++  .breathing-orb {
++    animation: none;
++  }
++}
+diff --git a/chrome/browser/resources/meditation/meditation.html b/chrome/browser/resources/meditation/meditation.html
+new file mode 100644
+index 0000000..a88205f
+--- /dev/null
++++ b/chrome/browser/resources/meditation/meditation.html
+@@ -0,0 +1,103 @@
++<!doctype html>
++<html lang="ru">
++  <head>
++    <meta charset="utf-8">
++    <meta name="viewport" content="width=device-width, initial-scale=1">
++    <meta name="color-scheme" content="dark">
++    <title>Медитация · Focus Browser</title>
++    <link rel="stylesheet" href="meditation.css">
++    <script type="module" src="meditation.js"></script>
++  </head>
++  <body>
++    <main class="page-shell">
++      <header class="topbar">
++        <div class="brand" aria-label="Focus Browser">
++          <span class="brand-mark" aria-hidden="true">
++            <svg viewBox="0 0 256 256" focusable="false">
++              <circle cx="128" cy="128" r="88" stroke-width="11"></circle>
++              <circle cx="128" cy="128" r="37" stroke-width="10"></circle>
++              <path d="M128 64V84M172 128H192M128 172V192M64 128H84"
++                    stroke-width="10" stroke-linecap="round"></path>
++              <circle class="brand-mark-dot" cx="128" cy="128" r="12"></circle>
++            </svg>
++          </span>
++          <span>Focus Browser</span>
++        </div>
++        <div class="section-name">
++          <span class="section-dot" aria-hidden="true"></span>
++          Медитация
++        </div>
++      </header>
++
++      <section class="hero" aria-labelledby="page-title">
++        <p class="eyebrow">Пауза для ясного ума</p>
++        <h1 id="page-title">Остановитесь.<br>Верните внимание.</h1>
++        <p class="hero-copy">
++          Несколько спокойных минут помогают убрать лишний шум и снова
++          сосредоточиться на главном.
++        </p>
++      </section>
++
++      <section class="video-card" aria-labelledby="video-title">
++        <div class="video-copy">
++          <p class="card-label">Практика дыхания</p>
++          <h2 id="video-title">
++            Учу вас дышать: успех, власть, сила. Измени свою жизнь навсегда.
++            Мориарти.
++          </h2>
++          <p class="video-description">
++            Устройтесь удобно, уберите уведомления и оставьте себе это время
++            без переключений.
++          </p>
++        </div>
++
++        <div class="player-frame">
++          <div id="privacy-gate" class="privacy-gate">
++            <div class="breathing-orb" aria-hidden="true">
++              <span>вдох</span>
++            </div>
++            <div class="privacy-copy">
++              <h3>Видео включается только по вашему решению</h3>
++              <p>
++                До нажатия кнопки соединения с YouTube нет. При запуске
++                Focus Browser подключится к YouTube; сервис сможет получить
++                ваш IP-адрес и сведения об устройстве согласно своей политике.
++              </p>
++            </div>
++            <button id="load-video" class="primary-action" type="button">
++              Подключиться и открыть видео
++            </button>
++          </div>
++
++          <iframe
++              id="meditation-video"
++              class="meditation-video"
++              title="Видео для медитации на YouTube"
++              referrerpolicy="no-referrer"
++              sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"
++              allow="encrypted-media; picture-in-picture; fullscreen"
++              allowfullscreen
++              hidden></iframe>
++        </div>
++
++        <div class="video-footer">
++          <p id="connection-status" class="connection-status" aria-live="polite">
++          </p>
++          <a class="secondary-action"
++             href="https://www.youtube.com/watch?v=R2K7ZHsnypI"
++             target="_blank"
++             rel="noopener noreferrer"
++             referrerpolicy="no-referrer">
++            Открыть на YouTube
++            <span aria-hidden="true">↗</span>
++          </a>
++        </div>
++      </section>
++
++      <footer class="page-footer">
++        <span>Дышите медленнее. Делайте только одно дело.</span>
++        <span class="private-note">Без фоновой загрузки видео</span>
++      </footer>
++    </main>
++  </body>
++</html>
+diff --git a/chrome/browser/resources/meditation/meditation.ts b/chrome/browser/resources/meditation/meditation.ts
+new file mode 100644
+index 0000000..6c98758
+--- /dev/null
++++ b/chrome/browser/resources/meditation/meditation.ts
+@@ -0,0 +1,34 @@
++// Copyright 2026 The Focus Browser Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++const VIDEO_URL =
++    'https://www.youtube-nocookie.com/embed/R2K7ZHsnypI?rel=0';
++
++function requiredElement<T extends HTMLElement>(id: string): T {
++  const element = document.getElementById(id);
++  if (!element) {
++    throw new Error(`Missing required element: ${id}`);
++  }
++  return element as T;
++}
++
++document.addEventListener('DOMContentLoaded', () => {
++  const loadButton =
++      requiredElement<HTMLButtonElement>('load-video');
++  const privacyGate = requiredElement<HTMLElement>('privacy-gate');
++  const player =
++      requiredElement<HTMLIFrameElement>('meditation-video');
++  const status = requiredElement<HTMLElement>('connection-status');
++
++  loadButton.addEventListener('click', () => {
++    loadButton.disabled = true;
++    status.textContent = 'Устанавливается соединение с YouTube…';
++
++    player.addEventListener('load', () => {
++      status.textContent =
++          'Видео загружено с YouTube в режиме повышенной конфиденциальности.';
++    }, {once: true});
++
++    player.src = VIDEO_URL;
++    privacyGate.hidden = true;
++    player.hidden = false;
++    player.focus();
++  }, {once: true});
++});
+diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
+index f012bcb..fbbfd27 100644
+--- a/chrome/browser/ui/browser_command_controller.cc
++++ b/chrome/browser/ui/browser_command_controller.cc
+@@ -1302,6 +1302,9 @@ bool BrowserCommandController::ExecuteCommandWithDisposition(
+     case IDC_FOCUS_SERVICES_OPEN:
+       ShowFocusServices(browser_->GetBrowserForOpeningWebUi());
+       break;
++    case IDC_OPEN_MEDITATION:
++      ShowMeditation(browser_->GetBrowserForOpeningWebUi());
++      break;
+     case IDC_OPEN_SAFETY_HUB:
+       ShowSettingsSubPage(browser_->GetBrowserForOpeningWebUi(),
+                           chrome::kSafetyHubSubPage);
+@@ -1966,6 +1969,7 @@ void BrowserCommandController::InitCommandState() {
+   // These are always enabled; the menu determines their menu item visibility.
+   command_updater_.UpdateCommandEnabled(IDC_UPGRADE_DIALOG, true);
+   command_updater_.UpdateCommandEnabled(IDC_FOCUS_SERVICES_OPEN, true);
++  command_updater_.UpdateCommandEnabled(IDC_OPEN_MEDITATION, true);
+   command_updater_.UpdateCommandEnabled(IDC_TOGGLE_ZEN_MODE_TOP_CHROME_PIN,
+                                         false);
+   command_updater_.UpdateCommandEnabled(IDC_SET_BROWSER_AS_DEFAULT, true);
+diff --git a/chrome/browser/ui/chrome_pages.cc b/chrome/browser/ui/chrome_pages.cc
+index 4e8642e..45ca87c 100644
+--- a/chrome/browser/ui/chrome_pages.cc
++++ b/chrome/browser/ui/chrome_pages.cc
+@@ -619,6 +619,11 @@ void ShowFocusServices(BrowserWindowInterface* browser) {
+       browser, GURL("chrome://settings/privacy/services"));
+ }
+ 
++void ShowMeditation(BrowserWindowInterface* browser) {
++  base::RecordAction(UserMetricsAction("FocusBrowser.OpenMeditation"));
++  ShowSingletonTab(browser, GURL(kChromeUIMeditationURL));
++}
++
+ void ShowSearchEngineSettings(BrowserWindowInterface* browser) {
+   base::RecordAction(UserMetricsAction("EditSearchEngines"));
+   ShowSettingsSubPage(
+diff --git a/chrome/browser/ui/chrome_pages.h b/chrome/browser/ui/chrome_pages.h
+index 3d1cc8e..a0f5b5f 100644
+--- a/chrome/browser/ui/chrome_pages.h
++++ b/chrome/browser/ui/chrome_pages.h
+@@ -141,6 +141,7 @@ void ShowSafeBrowsingEnhancedProtectionWithIph(
+ void ShowImportDialog(BrowserWindowInterface* browser);
+ void ShowAboutChrome(BrowserWindowInterface* browser);
+ void ShowFocusServices(BrowserWindowInterface* browser);
++void ShowMeditation(BrowserWindowInterface* browser);
+ void ShowSearchEngineSettings(BrowserWindowInterface* browser);
+ void ShowWebStore(BrowserWindowInterface* browser,
+                   std::string_view utm_source_value);
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.cc b/chrome/browser/ui/toolbar/app_menu_model.cc
+index 0f7f03b..76ac930 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.cc
++++ b/chrome/browser/ui/toolbar/app_menu_model.cc
+@@ -1951,6 +1951,13 @@ void AppMenuModel::Build() {
+           ? vector_icons::kChromeExtensionIcon
+           : vector_icons::kExtensionChromeRefreshOldIcon);
+ 
++  AddItemWithIcon(
++      IDC_OPEN_MEDITATION, u"Медитация",
++      ui::ImageModel::FromVectorIcon(
++          features::IsRoundedIconsEnabled() ? vector_icons::kPlayArrowIcon
++                                            : vector_icons::kPlayArrowOldIcon,
++          ui::kColorMenuIcon, kDefaultIconSize));
++
+   AddItemWithStringIdAndVectorIcon(
+       this, IDC_CLEAR_BROWSING_DATA, IDS_CLEAR_BROWSING_DATA,
+       features::IsRoundedIconsEnabled() ? kDeleteIcon
+diff --git a/chrome/browser/ui/webui/BUILD.gn b/chrome/browser/ui/webui/BUILD.gn
+index 28e6d96..ddfee96 100644
+--- a/chrome/browser/ui/webui/BUILD.gn
++++ b/chrome/browser/ui/webui/BUILD.gn
+@@ -121,6 +121,7 @@ source_set("configs") {
+       "//chrome/browser/ui/webui/data_sharing",
+       "//chrome/browser/ui/webui/infobar_internals",
+       "//chrome/browser/ui/webui/inspect",
++      "//chrome/browser/ui/webui/meditation",
+       "//chrome/browser/ui/webui/multistep_filter_internals",
+       "//chrome/browser/ui/webui/new_tab_footer",
+       "//chrome/browser/ui/webui/personal_context",
+diff --git a/chrome/browser/ui/webui/chrome_web_ui_configs.cc b/chrome/browser/ui/webui/chrome_web_ui_configs.cc
+index cc9ac30..76dc505 100644
+--- a/chrome/browser/ui/webui/chrome_web_ui_configs.cc
++++ b/chrome/browser/ui/webui/chrome_web_ui_configs.cc
+@@ -40,6 +40,9 @@
+ #include "chrome/browser/ui/webui/media/media_engagement_ui.h"
+ #include "chrome/browser/ui/webui/media/webrtc_logs_ui.h"
+ #include "chrome/browser/ui/webui/memory_internals_ui.h"
++#if !BUILDFLAG(IS_ANDROID)
++#include "chrome/browser/ui/webui/meditation/meditation_ui.h"
++#endif
+ #include "chrome/browser/ui/webui/metrics_internals/metrics_internals_ui.h"
+ #include "chrome/browser/ui/webui/net_export_ui.h"
+ #include "chrome/browser/ui/webui/net_internals/net_internals_ui.h"
+@@ -284,6 +287,9 @@ void RegisterChromeWebUIConfigs() {
+   map.AddWebUIConfig(std::make_unique<LocationInternalsUIConfig>());
+   map.AddWebUIConfig(std::make_unique<MediaEngagementUIConfig>());
+   map.AddWebUIConfig(std::make_unique<MemoryInternalsUIConfig>());
++#if !BUILDFLAG(IS_ANDROID)
++  map.AddWebUIConfig(std::make_unique<meditation::MeditationUIConfig>());
++#endif
+   map.AddWebUIConfig(std::make_unique<MetricsInternalsUIConfig>());
+   map.AddWebUIConfig(std::make_unique<NetExportUIConfig>());
+   map.AddWebUIConfig(std::make_unique<NetInternalsUIConfig>());
+diff --git a/chrome/browser/ui/webui/meditation/BUILD.gn b/chrome/browser/ui/webui/meditation/BUILD.gn
+new file mode 100644
+index 0000000..cb1d54c
+--- /dev/null
++++ b/chrome/browser/ui/webui/meditation/BUILD.gn
+@@ -0,0 +1,21 @@
++# Copyright 2026 The Focus Browser Authors
++# You can use, redistribute, and/or modify this source code under
++# the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++assert(!is_android)
++
++source_set("meditation") {
++  sources = [
++    "meditation_ui.cc",
++    "meditation_ui.h",
++  ]
++
++  deps = [
++    "//chrome/browser/profiles:profile",
++    "//chrome/browser/resources/meditation:resources",
++    "//chrome/common",
++    "//content/public/browser",
++    "//services/network/public/mojom",
++    "//ui/webui",
++  ]
++}
+diff --git a/chrome/browser/ui/webui/meditation/meditation_ui.cc b/chrome/browser/ui/webui/meditation/meditation_ui.cc
+new file mode 100644
+index 0000000..fbe208f
+--- /dev/null
++++ b/chrome/browser/ui/webui/meditation/meditation_ui.cc
+@@ -0,0 +1,41 @@
++// Copyright 2026 The Focus Browser Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#include "chrome/browser/ui/webui/meditation/meditation_ui.h"
++
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/grit/meditation_resources.h"
++#include "chrome/grit/meditation_resources_map.h"
++#include "content/public/browser/web_ui.h"
++#include "content/public/browser/web_ui_data_source.h"
++#include "services/network/public/mojom/content_security_policy.mojom.h"
++#include "ui/webui/webui_util.h"
++
++namespace meditation {
++
++MeditationUI::MeditationUI(content::WebUI* web_ui)
++    : WebUIController(web_ui) {
++  Profile* profile = Profile::FromWebUI(web_ui);
++  content::WebUIDataSource* source = content::WebUIDataSource::CreateAndAdd(
++      profile, chrome::kChromeUIMeditationHost);
++
++  webui::SetupWebUIDataSource(source, kMeditationResources,
++                              IDR_MEDITATION_MEDITATION_HTML);
++
++  // The top-level page is entirely local. The external frame is allowed only
++  // for the privacy-enhanced YouTube host and is created after user consent.
++  source->OverrideContentSecurityPolicy(
++      network::mojom::CSPDirectiveName::FrameSrc,
++      "frame-src https://www.youtube-nocookie.com;");
++  source->OverrideContentSecurityPolicy(
++      network::mojom::CSPDirectiveName::ConnectSrc,
++      "connect-src 'self';");
++  source->OverrideContentSecurityPolicy(
++      network::mojom::CSPDirectiveName::ImgSrc,
++      "img-src 'self' data:;");
++}
++
++MeditationUI::~MeditationUI() = default;
++
++}  // namespace meditation
+diff --git a/chrome/browser/ui/webui/meditation/meditation_ui.h b/chrome/browser/ui/webui/meditation/meditation_ui.h
+new file mode 100644
+index 0000000..7e426cb
+--- /dev/null
++++ b/chrome/browser/ui/webui/meditation/meditation_ui.h
+@@ -0,0 +1,32 @@
++// Copyright 2026 The Focus Browser Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_WEBUI_MEDITATION_MEDITATION_UI_H_
++#define CHROME_BROWSER_UI_WEBUI_MEDITATION_MEDITATION_UI_H_
++
++#include "chrome/common/webui_url_constants.h"
++#include "content/public/browser/web_ui_controller.h"
++#include "content/public/browser/webui_config.h"
++
++namespace meditation {
++
++class MeditationUI : public content::WebUIController {
++ public:
++  explicit MeditationUI(content::WebUI* web_ui);
++  MeditationUI(const MeditationUI&) = delete;
++  MeditationUI& operator=(const MeditationUI&) = delete;
++  ~MeditationUI() override;
++};
++
++class MeditationUIConfig
++    : public content::DefaultWebUIConfig<MeditationUI> {
++ public:
++  MeditationUIConfig()
++      : DefaultWebUIConfig(content::kChromeUIScheme,
++                           chrome::kChromeUIMeditationHost) {}
++};
++
++}  // namespace meditation
++
++#endif  // CHROME_BROWSER_UI_WEBUI_MEDITATION_MEDITATION_UI_H_
+diff --git a/chrome/chrome_paks.gni b/chrome/chrome_paks.gni
+index 6ca7517..96729ab 100644
+--- a/chrome/chrome_paks.gni
++++ b/chrome/chrome_paks.gni
+@@ -239,6 +239,7 @@ template("chrome_extra_paks") {
+         "$root_gen_dir/chrome/key_value_pair_viewer_shared_resources.pak",
+         "$root_gen_dir/chrome/lens_shared_resources.pak",
+         "$root_gen_dir/chrome/lens_untrusted_resources.pak",
++        "$root_gen_dir/chrome/meditation_resources.pak",
+         "$root_gen_dir/chrome/new_tab_footer_resources.pak",
+         "$root_gen_dir/chrome/omnibox_popup_resources.pak",
+         "$root_gen_dir/chrome/password_manager_resources.pak",
+@@ -275,6 +276,7 @@ template("chrome_extra_paks") {
+       deps += [
+         "//chrome/browser/actor/resources:browser_resources",
+         "//chrome/browser/indigo/resources:browser_resources",
++        "//chrome/browser/resources/meditation:resources",
+         "//components/headless/command_handler",
+         "//content/browser/tracing:resources",
+       ]
+diff --git a/chrome/common/webui_url_constants.cc b/chrome/common/webui_url_constants.cc
+index 05977a6..36d3f21 100644
+--- a/chrome/common/webui_url_constants.cc
++++ b/chrome/common/webui_url_constants.cc
+@@ -152,6 +152,7 @@ base::span<const base::cstring_view> ChromeURLHosts() {
+       kChromeUILocalStateHost,
+ #if !BUILDFLAG(IS_ANDROID)
+       kChromeUIManagementHost,
++      kChromeUIMeditationHost,
+ #endif
+       kChromeUIMediaEngagementHost,
+       kChromeUIMetricsInternalsHost,
+diff --git a/chrome/common/webui_url_constants.h b/chrome/common/webui_url_constants.h
+index db28e83..33e7d6b 100644
+--- a/chrome/common/webui_url_constants.h
++++ b/chrome/common/webui_url_constants.h
+@@ -217,6 +217,8 @@ inline constexpr char kChromeUIMediaEngagementHost[] = "media-engagement";
+ inline constexpr char kChromeUIMediaRouterInternalsHost[] =
+     "media-router-internals";
+ inline constexpr char kChromeUIMemoryInternalsHost[] = "memory-internals";
++inline constexpr char kChromeUIMeditationHost[] = "meditation";
++inline constexpr char kChromeUIMeditationURL[] = "focus://meditation/";
+ inline constexpr char kChromeUIMetricsInternalsHost[] = "metrics-internals";
+ inline constexpr char kChromeUINetExportHost[] = "net-export";
+ inline constexpr char kChromeUINetInternalsHost[] = "net-internals";
+diff --git a/tools/gritsettings/resource_ids.spec b/tools/gritsettings/resource_ids.spec
+index 444d071..3b8b0de 100644
+--- a/tools/gritsettings/resource_ids.spec
++++ b/tools/gritsettings/resource_ids.spec
+@@ -605,6 +605,10 @@
+     "META": {"sizes": {"includes": [5]}},
+     "includes": [4360],
+   },
++  "<(SHARED_INTERMEDIATE_DIR)/chrome/browser/resources/meditation/resources.grd": {
++    "META": {"sizes": {"includes": [5],}},
++    "includes": [4365],
++  },
+   "<(SHARED_INTERMEDIATE_DIR)/chrome/browser/resources/multistep_filter_internals/resources.grd": {
+     "META": {"sizes": {"includes": [10]}},
+     "includes": [4370],

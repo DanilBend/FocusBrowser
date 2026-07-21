@@ -1,0 +1,215 @@
+import("//tools/grit/grit_rule.gni")
+
+localized_strings_header =
+    "$target_gen_dir/focus_onboarding_localized_strings.h"
+
+action("localized_strings") {
+  script = "//third_party/node/node.py"
+
+  inputs = [
+    "focus_onboarding_strings.grdp",
+    "util/generate-i18n.mts",
+    "util/localized-strings.h.in",
+    "util/strings.ts.in",
+  ]
+
+  outputs = [ localized_strings_header ]
+
+  args = [
+    rebase_path("util/generate-i18n.mts", root_build_dir),
+    rebase_path(localized_strings_header, root_build_dir),
+  ]
+}
+
+action("build") {
+  script = "//third_party/node/node.py"
+  dist_dir = "$target_gen_dir/dist"
+
+  args = [
+    rebase_path("node_modules/vite/bin/vite.js"),
+    "build",
+    rebase_path("."),
+    "--outDir",
+    rebase_path(dist_dir),
+    "--emptyOutDir",
+  ]
+
+  # Keep these explicit: Ninja does not recursively track directory inputs.
+  # This prevents an edited logo/page from silently reusing an older bundle.
+  inputs = [
+    "index.html",
+    "src",
+    "public",
+    "package.json",
+    "pnpm-lock.yaml",
+    "vite.config.ts",
+    "svelte.config.js",
+    "tsconfig.app.json",
+    "tsconfig.json",
+    "tsconfig.node.json",
+    "public/favicon.png",
+    "src/app.css",
+    "src/App.svelte",
+    "src/components/ButtonLink.svelte",
+    "src/components/CircleCheckbox.svelte",
+    "src/components/DefaultBrowserOption.svelte",
+    "src/components/FocusPartner.svelte",
+    "src/components/OuterLink.svelte",
+    "src/components/PageHeader.svelte",
+    "src/components/PageNavigation.svelte",
+    "src/components/PasswordManagerOption.svelte",
+    "src/components/ProfileImportOption.svelte",
+    "src/components/SearchEngineItem.svelte",
+    "src/components/SetupShell.svelte",
+    "src/components/Spinner.svelte",
+    "src/components/Toggle.svelte",
+    "src/components/ToggleSeparator.svelte",
+    "src/components/Tooltip.svelte",
+    "src/icons/brands/anthropic.svg",
+    "src/icons/brands/github.svg",
+    "src/icons/brands/githubcopilot.svg",
+    "src/icons/brands/gmail.svg",
+    "src/icons/brands/googlecalendar.svg",
+    "src/icons/brands/googledrive.svg",
+    "src/icons/brands/googlegemini.svg",
+    "src/icons/brands/instagram.svg",
+    "src/icons/brands/NOTICE.md",
+    "src/icons/brands/notion.svg",
+    "src/icons/brands/openai.svg",
+    "src/icons/brands/perplexity.svg",
+    "src/icons/brands/stackoverflow.svg",
+    "src/icons/brands/telegram.svg",
+    "src/icons/brands/tiktok.svg",
+    "src/icons/brands/youtube.svg",
+    "src/icons/FocusLogo.svelte",
+    "src/icons/tabler/IconArrowLeft.svelte",
+    "src/icons/tabler/IconArrowRight.svelte",
+    "src/icons/tabler/IconCheck.svelte",
+    "src/icons/tabler/IconDownload.svelte",
+    "src/icons/tabler/IconExternalLink.svelte",
+    "src/icons/tabler/IconGridDots.svelte",
+    "src/icons/tabler/IconKey.svelte",
+    "src/icons/tabler/IconLoader.svelte",
+    "src/icons/tabler/IconLockStar.svelte",
+    "src/icons/tabler/IconSearch.svelte",
+    "src/icons/tabler/IconShieldCheck.svelte",
+    "src/icons/tabler/IconShieldExclamation.svelte",
+    "src/icons/tabler/IconShieldOff.svelte",
+    "src/icons/tabler/IconShieldQuestion.svelte",
+    "src/icons/tabler/IconTransferIn.svelte",
+    "src/icons/tabler/IconWorld.svelte",
+    "src/icons/tabler/IconWorldHeart.svelte",
+    "src/icons/tabler/IconX.svelte",
+    "src/icons/tabler/LICENSE",
+    "src/icons/third_party/browsers/arc.png",
+    "src/icons/third_party/browsers/brave.png",
+    "src/icons/third_party/browsers/chrome.png",
+    "src/icons/third_party/browsers/chrome_beta.png",
+    "src/icons/third_party/browsers/chrome_canary.png",
+    "src/icons/third_party/browsers/chrome_dev.png",
+    "src/icons/third_party/browsers/chromium.png",
+    "src/icons/third_party/browsers/comet.png",
+    "src/icons/third_party/browsers/dia.png",
+    "src/icons/third_party/browsers/edge.png",
+    "src/icons/third_party/browsers/firefox.png",
+    "src/icons/third_party/browsers/opera.png",
+    "src/icons/third_party/browsers/safari.png",
+    "src/icons/third_party/browsers/vivaldi.png",
+    "src/icons/third_party/browsers/whale.png",
+    "src/icons/third_party/browsers/yandex.png",
+    "src/icons/third_party/browsers/zen.png",
+    "src/icons/third_party/NOTICE.md",
+    "src/icons/third_party/password_managers/bitwarden.png",
+    "src/icons/third_party/password_managers/dashlane.png",
+    "src/icons/third_party/password_managers/icloudpasswords.png",
+    "src/icons/third_party/password_managers/keepassxc.png",
+    "src/icons/third_party/password_managers/onepassword.png",
+    "src/icons/third_party/password_managers/protonpass.png",
+    "src/icons/third_party/search_engines/bing.png",
+    "src/icons/third_party/search_engines/duckduckgo.svg",
+    "src/icons/third_party/search_engines/ecosia.svg",
+    "src/icons/third_party/search_engines/google.png",
+    "src/icons/third_party/search_engines/kagi.svg",
+    "src/icons/third_party/search_engines/qwant.svg",
+    "src/lib/brand-icons.ts",
+    "src/lib/browser/extensions.ts",
+    "src/lib/browser/focus.ts",
+    "src/lib/browser/importer.ts",
+    "src/lib/browser/index.ts",
+    "src/lib/browser/is-default.ts",
+    "src/lib/browser/prefs.ts",
+    "src/lib/browser/profile.ts",
+    "src/lib/browser/search-engines.ts",
+    "src/lib/browser/setup.ts",
+    "src/lib/browser/shortcuts.ts",
+    "src/lib/chrome-send-polyfill.ts",
+    "src/lib/cr/assert.ts",
+    "src/lib/cr/cr.d.ts",
+    "src/lib/cr/cr.ts",
+    "src/lib/cr/default_browser_browser_proxy.ts",
+    "src/lib/cr/import_data_browser_proxy.ts",
+    "src/lib/cr/index.ts",
+    "src/lib/cr/LICENSE",
+    "src/lib/cr/promise_resolver.ts",
+    "src/lib/cr/search_engines_browser_proxy.ts",
+    "src/lib/motion.ts",
+    "src/lib/onboarding-flow.ts",
+    "src/lib/password-managers.ts",
+    "src/lib/platform.ts",
+    "src/lib/search-engine-config.ts",
+    "src/main.ts",
+    "src/pages/AppearanceSetup.svelte",
+    "src/pages/DataImport.svelte",
+    "src/pages/DefaultBrowser.svelte",
+    "src/pages/FocusSetup.svelte",
+    "src/pages/index.ts",
+    "src/pages/PasswordManager.svelte",
+    "src/pages/SearchEngine.svelte",
+    "src/pages/ShortcutsSetup.svelte",
+    "src/pages/Welcome.svelte",
+    "src/vite-env.d.ts",
+  ]
+
+  deps = [ ":localized_strings" ]
+  outputs = [ "$dist_dir/index.html" ]
+}
+
+action("grit") {
+  script = "//third_party/node/node.py"
+  node_script = "./util/generate-grd.mts"
+  dist_dir = "$target_gen_dir/dist"
+
+  args = [
+    "--experimental-strip-types",
+    rebase_path(node_script),
+    rebase_path(dist_dir),
+    rebase_path("$target_gen_dir/resources.grd"),
+  ]
+
+  inputs = [
+    node_script,
+    "$dist_dir/index.html",
+  ]
+
+  outputs = [ "$target_gen_dir/resources.grd" ]
+  deps = [ ":build" ]
+}
+
+grit("generated_resources") {
+  source = "$target_gen_dir/resources.grd"
+
+  # Required because the .grd is generated.
+  enable_input_discovery_for_gn_analyze = false
+  use_brotli = true
+
+  output_dir = "$target_gen_dir/resources"
+
+  outputs = [
+    "grit/focus_onboarding_generated.h",
+    "grit/focus_onboarding_generated_map.cc",
+    "grit/focus_onboarding_generated_map.h",
+    "focus_onboarding_generated.pak",
+  ]
+
+  deps = [ ":grit" ]
+}

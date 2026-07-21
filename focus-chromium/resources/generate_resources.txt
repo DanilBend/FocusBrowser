@@ -1,0 +1,3 @@
+# Product icons are rendered at each native size by
+# build_support/generate_focus_browser_icons.py. Resizing the 1024px master
+# would erase the contrast keyline from the 16px, 24px and 32px assets.

@@ -1,0 +1,39 @@
+<style include="cr-shared-style settings-shared"></style>
+<settings-section page-title="$i18n{behaviorPageTitle}">
+
+  <settings-toggle-button id="newTabNextToActive"
+      pref="{{prefs.focus.browser.new_tab_next_to_active}}"
+      label="$i18n{openNewTabNextToActive}">
+  </settings-toggle-button>
+
+  <settings-toggle-button class="hr" id="tabCyclingMRU"
+      pref="{{prefs.focus.browser.mru_tab_cycling}}"
+      label="$i18n{cycleTabsInMRUOrder}">
+  </settings-toggle-button>
+
+  <settings-toggle-button class="hr" id="shiftRightClickContextMenu"
+      pref="{{prefs.focus.browser.shift_right_click_context_menu}}"
+      label="$i18n{shiftRightClickContextMenu}">
+  </settings-toggle-button>
+
+  <settings-toggle-button class="hr" id="copyPageUrlShortcut"
+      pref="{{prefs.focus.settings.a11y.copy_page_url_shortcut}}"
+      label="$i18n{copyPageUrlShortcut}">
+  </settings-toggle-button>
+
+  <settings-toggle-button class="hr" id="verticalCollapseShortcut"
+      pref="{{prefs.focus.settings.behavior.vertical_collapse_shortcut}}"
+      label="$i18n{verticalCollapseShortcut}">
+  </settings-toggle-button>
+
+  <settings-toggle-button class="hr" id="autoPinNewTabGroups"
+      pref="{{prefs.auto_pin_new_tab_groups}}"
+      label="$i18n{autoPinNewTabGroups}">
+  </settings-toggle-button>
+
+  <settings-toggle-button class="hr" id="splitViewDragAndDrop"
+      pref="{{prefs.browser.split_view_drag_and_drop_enabled}}"
+      label="$i18n{allowSplitViewDragAndDrop}">
+  </settings-toggle-button>
+
+</settings-section>

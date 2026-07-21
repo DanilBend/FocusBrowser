@@ -1,0 +1,21 @@
+# Custom services are not exposed as a Focus Browser settings surface.
+chrome/browser/resources/settings/privacy_page/services_page.ts
+chrome/browser/resources/settings/privacy_page/services_page.html
+chrome/browser/resources/settings/privacy_page/changelog_proxy.ts
+chrome/browser/ui/webui/settings/services_schema_handler.cc
+chrome/browser/ui/webui/settings/services_schema_handler.h
+components/focus_onboarding/src/pages/FocusServices.svelte
+components/focus_onboarding/src/pages/Finish.svelte
+
+# Legacy Unhook artwork is not part of the browser-owned FocusYoutube UI.
+third_party/focus_youtube/images/bug.svg
+third_party/focus_youtube/images/bug2.svg
+third_party/focus_youtube/images/dark.svg
+third_party/focus_youtube/images/info.svg
+third_party/focus_youtube/images/light.svg
+third_party/focus_youtube/images/power.svg
+third_party/focus_youtube/images/rect.png
+third_party/focus_youtube/images/reload.svg
+third_party/focus_youtube/images/settings.svg
+third_party/focus_youtube/images/square.png
+third_party/focus_youtube/images/tooltip.svg

@@ -1,0 +1,22 @@
+// Copyright 2026 The Focus Authors
+// You can use, redistribute, and/or modify this source code under
+// the terms of the GPL-3.0 license that can be found in the LICENSE file.
+
+CANVAS_DIMENSIONS, 56,
+STROKE, 2.40625,
+CIRCLE, 28, 28, 19.25,
+NEW_PATH,
+STROKE, 2.1875,
+CIRCLE, 28, 28, 8.09375,
+NEW_PATH,
+STROKE, 2.1875,
+MOVE_TO, 28, 14,
+LINE_TO, 28, 18.375,
+MOVE_TO, 37.625, 28,
+LINE_TO, 42, 28,
+MOVE_TO, 28, 37.625,
+LINE_TO, 28, 42,
+MOVE_TO, 14, 28,
+LINE_TO, 18.375, 28,
+NEW_PATH,
+CIRCLE, 28, 28, 2.625

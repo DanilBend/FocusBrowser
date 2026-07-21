@@ -1,0 +1,44 @@
+--- a/chrome/browser/focus_flag_choices.h
++++ b/chrome/browser/focus_flag_choices.h
+@@ -29,6 +29,8 @@ namespace focus {
+   constexpr const char kUpdateServerUrlCommandLine[] =
+       "custom-update-server-url";
+ 
++  constexpr const char kDisableEchCommandLine[] = "disable-ech";
++
+ }  // namespace focus
+ 
+ #endif  /* CHROME_BROWSER_FOCUS_FLAG_CHOICES_H_ */
+--- a/chrome/browser/focus_flag_entries.h
++++ b/chrome/browser/focus_flag_entries.h
+@@ -14,4 +14,9 @@
+     {focus::kUpdateServerUrlCommandLine, "Update server URL",
+      "Overrides the default URL for fetching updates. Should be used only for testing. Focus Browser flag.", kOsDesktop,
+      STRING_VALUE_TYPE(focus::kUpdateServerUrlCommandLine, "")},
++    {focus::kDisableEchCommandLine,
++     "Disable ECH (Encrypted Client Hello)",
++     "Disables TLS Encrypted Client Hello. Not recommended unless you live in an area with heavy Internet"
++     " censorship and ECH prevents websites from loading. Focus Browser flag.",
++     kOsAll, SINGLE_VALUE_TYPE(focus::kDisableEchCommandLine)},
+ #endif  /* CHROME_BROWSER_FOCUS_FLAG_ENTRIES_H_ */
+--- a/chrome/browser/ssl/ssl_config_service_manager.cc
++++ b/chrome/browser/ssl/ssl_config_service_manager.cc
+@@ -10,6 +10,7 @@
+ #include <string_view>
+ #include <vector>
+ 
++#include "base/command_line.h"
+ #include "base/containers/to_vector.h"
+ #include "base/feature_list.h"
+ #include "base/functional/bind.h"
+@@ -253,6 +254,10 @@ network::mojom::SSLConfigPtr SSLConfigSe
+ 
+   config->ech_enabled = ech_enabled_.GetValue();
+ 
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("disable-ech")) {
++    config->ech_enabled = false;
++  }
++
+ #if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
+   config->trust_anchor_ids =
+       trust_anchor_ids_.has_value()

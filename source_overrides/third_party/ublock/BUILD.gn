@@ -1,0 +1,62 @@
+# Copyright 2025 The Focus Authors
+# You can use, redistribute, and/or modify this source code under
+# the terms of the GPL-3.0 license that can be found in the LICENSE file.
+
+import("//ui/webui/resources/tools/generate_grd.gni")
+import("//tools/grit/grit_rule.gni")
+
+file_list = "$target_gen_dir/files.json"
+generated_grd = "$target_gen_dir/ublock_resources.grd"
+
+copy("managed_storage") {
+    sources = [ "managed_storage.json" ]
+    outputs = [
+        "$root_out_dir/resources/ublock/managed_storage.json",
+    ]
+}
+
+action("generate_file_list") {
+    script = "generate_file_list.py"
+    args = [
+        rebase_path("."),
+        rebase_path(file_list),
+    ]
+    inputs = [
+        "css/focus-dashboard.css",
+        "manifest.json",
+        "generate_file_list.py",
+    ]
+    outputs = [ file_list ]
+}
+
+generate_grd("ublock_grd") {
+    out_grd = generated_grd
+
+    grd_prefix = "ublock"
+    resource_path_prefix = "ublock"
+
+    manifest_files = [ file_list ]
+    deps = [":generate_file_list"]
+}
+
+grit("ublock") {
+    source = generated_grd
+
+    # Required because the .grd is generated.
+    enable_input_discovery_for_gn_analyze = false
+    use_brotli = true
+
+    output_dir = "$target_gen_dir/resources"
+
+    outputs = [
+        "grit/ublock_resources.h",
+        "grit/ublock_resources_map.cc",
+        "grit/ublock_resources_map.h",
+        "ublock_resources.pak"
+    ]
+
+    deps = [
+        ":managed_storage",
+        ":ublock_grd",
+    ]
+}

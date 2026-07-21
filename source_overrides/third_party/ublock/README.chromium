@@ -1,0 +1,16 @@
+Name: uBlock Origin
+Short Name: ublock
+URL: https://github.com/gorhill/uBlock
+Version: 1.72.2.2
+License: GPL-3.0
+License File: LICENSE.txt
+Shipped: yes
+Security Critical: yes
+
+Description:
+uBlock Origin - An efficient blocker for Chromium and Firefox. Fast and lean.
+
+Local Modifications:
+Integrated as non-removable FocusBlock; black-and-white Focus UI, Russian
+localization, bundled assets, a stable component key, and a persistent
+default-on master switch independent from per-site controls.

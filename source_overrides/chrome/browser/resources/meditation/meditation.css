@@ -1,0 +1,429 @@
+/* Copyright 2026 The Focus Browser Authors
+ * You can use, redistribute, and/or modify this source code under
+ * the terms of the GPL-3.0 license that can be found in the LICENSE file. */
+
+:root {
+  color-scheme: dark;
+  --background: #050505;
+  --surface: #0d0d0d;
+  --surface-raised: #141414;
+  --line: rgba(255, 255, 255, 0.11);
+  --muted: #999;
+  --text: #f4f4f4;
+  --accent: #e7ff55;
+  --accent-text: #090a03;
+  --focus-motion-fast: 180ms;
+  --focus-motion-normal: 620ms;
+  --focus-motion-water: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--background);
+  min-height: 100%;
+}
+
+body {
+  background:
+      radial-gradient(circle at 75% 8%, rgba(231, 255, 85, 0.08), transparent 30rem),
+      var(--background);
+  color: var(--text);
+  font-family: Inter, 'Segoe UI Variable', 'Segoe UI', sans-serif;
+  margin: 0;
+  min-height: 100vh;
+}
+
+body::before {
+  animation: meditation-water 20s var(--focus-motion-water) infinite alternate;
+  background:
+      radial-gradient(circle at 24% 38%, rgba(231, 255, 85, 0.06), transparent 24rem),
+      radial-gradient(circle at 72% 62%, rgba(255, 255, 255, 0.035), transparent 28rem);
+  content: '';
+  filter: blur(42px);
+  inset: -14%;
+  pointer-events: none;
+  position: fixed;
+  will-change: transform;
+}
+
+button,
+a {
+  font: inherit;
+}
+
+.page-shell {
+  margin: 0 auto;
+  max-width: 1240px;
+  padding: 0 48px 40px;
+  position: relative;
+  z-index: 1;
+}
+
+.topbar {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  height: 82px;
+  justify-content: space-between;
+}
+
+html[data-motion='on'] .topbar,
+html[data-motion='on'] .hero,
+html[data-motion='on'] .video-card {
+  animation: meditation-arrive var(--focus-motion-normal)
+      var(--focus-motion-water) both;
+}
+
+html[data-motion='on'] .hero {
+  animation-delay: 70ms;
+}
+
+html[data-motion='on'] .video-card {
+  animation-delay: 130ms;
+}
+
+.brand,
+.section-name {
+  align-items: center;
+  display: flex;
+  font-size: 14px;
+  font-weight: 650;
+  gap: 11px;
+  letter-spacing: 0.01em;
+}
+
+.brand-mark {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  display: inline-flex;
+  height: 36px;
+  justify-content: center;
+  width: 36px;
+}
+
+.brand-mark svg {
+  display: block;
+  fill: none;
+  height: 28px;
+  stroke: #fff;
+  width: 28px;
+}
+
+.brand-mark .brand-mark-dot {
+  fill: #fff;
+  stroke: none;
+}
+
+.section-name {
+  color: var(--muted);
+  font-weight: 540;
+}
+
+.section-dot {
+  background: var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 0 18px rgba(231, 255, 85, 0.4);
+  height: 7px;
+  width: 7px;
+}
+
+.hero {
+  max-width: 860px;
+  padding: 90px 0 72px;
+}
+
+.eyebrow,
+.card-label {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 720;
+  letter-spacing: 0.16em;
+  margin: 0 0 22px;
+  text-transform: uppercase;
+}
+
+h1 {
+  font-size: clamp(54px, 7vw, 96px);
+  font-weight: 650;
+  letter-spacing: -0.065em;
+  line-height: 0.94;
+  margin: 0;
+}
+
+.hero-copy {
+  color: var(--muted);
+  font-size: 19px;
+  line-height: 1.55;
+  margin: 32px 0 0;
+  max-width: 590px;
+}
+
+.video-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  overflow: hidden;
+}
+
+.video-copy {
+  display: grid;
+  gap: 18px 44px;
+  grid-template-columns: minmax(0, 1.5fr) minmax(260px, 0.7fr);
+  padding: 38px 42px 32px;
+}
+
+.video-copy .card-label {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+h2 {
+  font-size: clamp(26px, 3vw, 42px);
+  font-weight: 590;
+  letter-spacing: -0.035em;
+  line-height: 1.08;
+  margin: 0;
+}
+
+.video-description {
+  align-self: end;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.6;
+  margin: 0;
+}
+
+.player-frame {
+  aspect-ratio: 16 / 9;
+  background: #080808;
+  border-bottom: 1px solid var(--line);
+  border-top: 1px solid var(--line);
+  display: grid;
+  min-height: 420px;
+  place-items: center;
+  position: relative;
+}
+
+.privacy-gate {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  max-width: 620px;
+  padding: 36px;
+  text-align: center;
+}
+
+.breathing-orb {
+  align-items: center;
+  animation: breathe 8s var(--focus-motion-water) infinite;
+  background: radial-gradient(circle at 35% 30%, #f6ffb9, var(--accent) 50%, #879d00);
+  border-radius: 50%;
+  box-shadow: 0 0 70px rgba(231, 255, 85, 0.18);
+  color: var(--accent-text);
+  display: flex;
+  font-size: 11px;
+  font-weight: 760;
+  height: 96px;
+  justify-content: center;
+  letter-spacing: 0.12em;
+  margin-bottom: 30px;
+  text-transform: uppercase;
+  width: 96px;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    transform: scale(0.82);
+  }
+  50% {
+    transform: scale(1.08);
+  }
+}
+
+.privacy-copy h3 {
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  margin: 0 0 12px;
+}
+
+.privacy-copy p {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 0 auto;
+  max-width: 560px;
+}
+
+.primary-action,
+.secondary-action {
+  align-items: center;
+  border-radius: 999px;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 14px;
+  font-weight: 680;
+  justify-content: center;
+  text-decoration: none;
+  transition:
+      background-color var(--focus-motion-fast) var(--focus-motion-water),
+      transform var(--focus-motion-fast) var(--focus-motion-water);
+}
+
+.primary-action:active,
+.secondary-action:active {
+  transform: scale(0.98);
+}
+
+.primary-action {
+  background: var(--accent);
+  border: 0;
+  color: var(--accent-text);
+  margin-top: 28px;
+  min-height: 48px;
+  padding: 0 24px;
+}
+
+.primary-action:hover {
+  background: #f0ff86;
+}
+
+.primary-action:focus-visible,
+.secondary-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.meditation-video {
+  border: 0;
+  height: 100%;
+  inset: 0;
+  position: absolute;
+  width: 100%;
+}
+
+.video-footer {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  min-height: 78px;
+  padding: 16px 24px 16px 32px;
+}
+
+.connection-status {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0;
+}
+
+.secondary-action {
+  color: var(--text);
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 16px;
+}
+
+.secondary-action:hover {
+  background: var(--surface-raised);
+}
+
+.page-footer {
+  color: #777;
+  display: flex;
+  font-size: 12px;
+  justify-content: space-between;
+  padding: 30px 4px 0;
+}
+
+.private-note::before {
+  background: #5e6b14;
+  border-radius: 50%;
+  content: '';
+  display: inline-block;
+  height: 6px;
+  margin-right: 8px;
+  width: 6px;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+@keyframes meditation-arrive {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0);
+  }
+}
+
+@keyframes meditation-water {
+  from {
+    transform: translate3d(-1%, -0.7%, 0) scale(1);
+  }
+  to {
+    transform: translate3d(1%, 0.7%, 0) scale(1.025);
+  }
+}
+
+@media (max-width: 760px) {
+  .page-shell {
+    padding: 0 20px 28px;
+  }
+
+  .topbar {
+    height: 68px;
+  }
+
+  .hero {
+    padding: 58px 0 46px;
+  }
+
+  .video-copy {
+    grid-template-columns: 1fr;
+    padding: 28px 24px;
+  }
+
+  .player-frame {
+    aspect-ratio: auto;
+    min-height: 470px;
+  }
+
+  .privacy-gate {
+    padding: 24px;
+  }
+
+  .video-footer,
+  .page-footer {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .video-footer {
+    padding: 18px 20px;
+  }
+}
+
+html[data-motion='off'] *,
+html[data-motion='off'] *::before,
+html[data-motion='off'] *::after {
+  animation: none !important;
+  scroll-behavior: auto !important;
+  transition: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    scroll-behavior: auto !important;
+    transition: none !important;
+  }
+}

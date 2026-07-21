@@ -1,0 +1,969 @@
+/*
+ * FocusBlock dashboard skin.
+ *
+ * This file intentionally contains presentation only. The upstream dashboard
+ * IDs, data-pane values and JavaScript contracts stay unchanged.
+ */
+
+:root {
+    --focus-canvas: #f3f3f1;
+    --focus-surface: #ffffff;
+    --focus-surface-soft: #f8f8f6;
+    --focus-surface-hover: #eeeeeb;
+    --focus-border: #ddddda;
+    --focus-border-strong: #888882;
+    --focus-text: #101010;
+    --focus-text-muted: #656560;
+    --focus-text-subtle: #6b6b66;
+    --focus-solid: #111111;
+    --focus-on-solid: #ffffff;
+    --focus-nav: #0b0b0b;
+    --focus-nav-soft: #151515;
+    --focus-nav-border: #292929;
+    --focus-nav-text: #f5f5f5;
+    --focus-nav-muted: #8d8d8d;
+    --focus-nav-active: #ffffff;
+    --focus-nav-on-active: #0a0a0a;
+    --focus-shadow: 0 14px 40px rgb(0 0 0 / 8%);
+    --focus-radius-small: 8px;
+    --focus-radius: 14px;
+    --focus-radius-large: 20px;
+    color-scheme: light;
+}
+
+:root.dark {
+    --focus-canvas: #080808;
+    --focus-surface: #121212;
+    --focus-surface-soft: #181818;
+    --focus-surface-hover: #202020;
+    --focus-border: #2a2a2a;
+    --focus-border-strong: #686862;
+    --focus-text: #f4f4f2;
+    --focus-text-muted: #a4a4a0;
+    --focus-text-subtle: #8f8f89;
+    --focus-solid: #f4f4f2;
+    --focus-on-solid: #0a0a0a;
+    --focus-shadow: 0 18px 52px rgb(0 0 0 / 36%);
+    color-scheme: dark;
+}
+
+/* Dashboard shell */
+
+body.focusDashboardShell {
+    background: var(--focus-canvas);
+    display: grid;
+    grid-template-columns: 264px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    height: 100vh;
+    height: 100svh;
+    overflow: hidden;
+    width: 100vw;
+}
+
+body.focusDashboardShell #dashboard-nav {
+    align-items: stretch;
+    background: var(--focus-nav);
+    border: 0;
+    border-inline-end: 1px solid var(--focus-nav-border);
+    box-sizing: border-box;
+    color: var(--focus-nav-text);
+    display: flex;
+    flex-direction: column;
+    grid-column: 1;
+    grid-row: 1;
+    height: 100%;
+    justify-content: flex-start;
+    overflow: hidden;
+    padding: 22px 16px 18px;
+    position: relative;
+    width: 264px;
+    z-index: 10;
+}
+
+.focusDashboardBrand {
+    align-items: center;
+    display: flex;
+    gap: 12px;
+    min-height: 46px;
+    padding: 0 8px 22px;
+}
+
+.focusDashboardBrand .logo {
+    align-items: center;
+    background: #ffffff;
+    border: 1px solid #ffffff;
+    border-radius: 12px;
+    box-sizing: border-box;
+    display: inline-flex;
+    flex: 0 0 42px;
+    height: 42px;
+    justify-content: center;
+    padding: 5px;
+    width: 42px;
+}
+
+.focusDashboardBrand .logo > img {
+    height: 100%;
+    width: 100%;
+}
+
+.focusDashboardBrandCopy {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.focusDashboardBrandCopy strong {
+    color: #ffffff;
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+}
+
+.focusDashboardBrandCopy small {
+    color: var(--focus-nav-muted);
+    font-size: 10px;
+    line-height: 1.35;
+    margin-top: 4px;
+}
+
+.focusDashboardNavLabel {
+    color: var(--focus-nav-muted);
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.13em;
+    padding: 0 10px 9px;
+    text-transform: uppercase;
+}
+
+.focusDashboardTabs {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 4px;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-color: #343434 transparent;
+    scrollbar-width: thin;
+}
+
+body.focusDashboardShell .tabButton {
+    align-items: center;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    color: #b4b4b4;
+    display: flex;
+    flex: 0 0 auto;
+    font-family: Inter, sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    gap: 12px;
+    justify-content: flex-start;
+    letter-spacing: 0;
+    min-height: 42px;
+    padding: 0 12px;
+    text-align: start;
+    width: 100%;
+}
+
+body.focusDashboardShell .tabButton::before {
+    align-items: center;
+    border: 1px solid #343434;
+    border-radius: 6px;
+    color: #7c7c7c;
+    content: "";
+    display: inline-flex;
+    flex: 0 0 25px;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 9px;
+    height: 23px;
+    justify-content: center;
+    letter-spacing: 0.04em;
+}
+
+.focusDashboardTabs .tabButton:nth-of-type(1)::before { content: "01"; }
+.focusDashboardTabs .tabButton:nth-of-type(2)::before { content: "02"; }
+.focusDashboardTabs .tabButton:nth-of-type(3)::before { content: "03"; }
+.focusDashboardTabs .tabButton:nth-of-type(4)::before { content: "04"; }
+.focusDashboardTabs .tabButton:nth-of-type(5)::before { content: "05"; }
+.focusDashboardTabs .tabButton:nth-of-type(6)::before { content: "06"; }
+.focusDashboardTabs .tabButton:nth-of-type(7)::before { content: "07"; }
+
+body.focusDashboardShell .tabButton.selected {
+    background: var(--focus-nav-active);
+    border-color: var(--focus-nav-active);
+    color: var(--focus-nav-on-active);
+}
+
+body.focusDashboardShell .tabButton.selected::before {
+    border-color: #bdbdbd;
+    color: #111111;
+}
+
+:root.desktop body.focusDashboardShell .tabButton:not(.selected):hover {
+    background: var(--focus-nav-soft);
+    border-color: var(--focus-nav-border);
+    color: #ffffff;
+}
+
+body.focusDashboardShell .tabButton:focus-visible {
+    outline: 2px solid #ffffff;
+    outline-offset: 2px;
+}
+
+body.focusDashboardShell .tabButton[data-pane="no-dashboard.html"] {
+    display: none;
+}
+
+.focusDashboardFooter {
+    border-top: 1px solid var(--focus-nav-border);
+    color: var(--focus-nav-muted);
+    display: flex;
+    flex-direction: column;
+    font-size: 10px;
+    gap: 7px;
+    line-height: 1.4;
+    margin-top: 14px;
+    padding: 16px 10px 0;
+}
+
+.focusDashboardFooter .wikilink {
+    color: #d6d6d6;
+    text-decoration: underline;
+    text-decoration-color: #4b4b4b;
+    text-underline-offset: 3px;
+}
+
+.focusDashboardFooter .wikilink:hover {
+    color: #ffffff;
+    text-decoration-color: #ffffff;
+}
+
+body.focusDashboardShell > iframe {
+    background: var(--focus-canvas);
+    border: 0;
+    grid-column: 2;
+    grid-row: 1;
+    height: 100%;
+    min-height: 0;
+    width: 100%;
+}
+
+body.focusDashboardShell #unsavedWarning {
+    box-sizing: border-box;
+    grid-column: 2;
+    grid-row: 1;
+    left: auto;
+    right: auto;
+    top: auto;
+    inset-block-start: 0;
+    inset-inline: 0;
+    width: auto;
+}
+
+body.focusDashboardShell.noDashboard {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+body.focusDashboardShell.noDashboard #dashboard-nav {
+    display: none;
+}
+
+body.focusDashboardShell.noDashboard > iframe {
+    grid-column: 1;
+}
+
+body.focusDashboardShell.noDashboard #unsavedWarning {
+    grid-column: 1;
+}
+
+/* Shared pane layout */
+
+body.focusDashboardPane {
+    background: var(--focus-canvas);
+    color: var(--focus-text);
+    font-family: Inter, sans-serif;
+}
+
+body.focusDashboardPane > .body {
+    box-sizing: border-box;
+    margin-inline: auto;
+    max-width: 1168px;
+    padding: 0 24px 64px;
+    width: 100%;
+}
+
+.focusPaneHeader {
+    align-items: flex-start;
+    border-bottom: 1px solid var(--focus-border);
+    box-sizing: border-box;
+    display: flex;
+    gap: 28px;
+    justify-content: space-between;
+    margin: 0 auto 22px;
+    max-width: 1120px;
+    padding: 32px 0 24px;
+    width: calc(100% - 48px);
+}
+
+.body > .focusPaneHeader {
+    width: 100%;
+}
+
+.focusPaneHeader > div {
+    min-width: 0;
+}
+
+.focusPaneEyebrow {
+    color: var(--focus-text-subtle);
+    display: block;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.15em;
+    line-height: 1.4;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+}
+
+.focusPaneHeader h1,
+.focusNoDashboardCard h1 {
+    color: var(--focus-text);
+    font-size: clamp(25px, 3vw, 36px);
+    font-weight: 600;
+    letter-spacing: -0.045em;
+    line-height: 1.05;
+    margin: 0;
+}
+
+.focusPaneHeader p {
+    color: var(--focus-text-muted);
+    font-size: 13px;
+    line-height: 1.55;
+    margin: 10px 0 0;
+    max-width: 650px;
+}
+
+.focusPaneIndex {
+    color: var(--focus-text-subtle);
+    flex: 0 0 auto;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 13px;
+    letter-spacing: 0.06em;
+    padding-top: 4px;
+}
+
+body.focusDashboardPane hr {
+    border-color: var(--focus-border);
+}
+
+body.focusDashboardPane a:not(.fa-icon) {
+    color: var(--focus-text);
+    text-decoration: underline;
+    text-decoration-color: var(--focus-border-strong);
+    text-underline-offset: 3px;
+}
+
+body.focusDashboardPane a:not(.fa-icon):hover {
+    color: var(--focus-text);
+    text-decoration-color: var(--focus-text);
+}
+
+body.focusDashboardPane .fa-icon.info,
+body.focusDashboardPane .fa-icon.info.important,
+body.focusDashboardPane .info.very-important {
+    color: var(--focus-text-muted);
+    fill: var(--focus-text-muted);
+}
+
+body.focusDashboardPane button {
+    background: var(--focus-surface);
+    border: 1px solid var(--focus-border-strong);
+    border-radius: var(--focus-radius-small);
+    color: var(--focus-text);
+    fill: var(--focus-text);
+    font-family: Inter, sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    min-height: 36px;
+    padding-inline: 13px;
+}
+
+body.focusDashboardPane button.preferred:not(.disabled):not([disabled]) {
+    background: var(--focus-solid);
+    border-color: var(--focus-solid);
+    color: var(--focus-on-solid);
+    fill: var(--focus-on-solid);
+}
+
+body.focusDashboardPane button.disabled,
+body.focusDashboardPane button[disabled] {
+    background: var(--focus-surface-soft);
+    border-color: var(--focus-border);
+    color: var(--focus-text-subtle);
+    fill: var(--focus-text-subtle);
+    filter: none;
+    opacity: 0.7;
+}
+
+body.focusDashboardPane button:not(.disabled):not([disabled]):focus-visible,
+body.focusDashboardPane input:focus-visible,
+body.focusDashboardPane select:focus-visible,
+body.focusDashboardPane textarea:focus-visible,
+body.focusDashboardPane [role="button"][tabindex]:focus-visible,
+body.focusDashboardPane a.fa-icon:focus-visible {
+    outline: 2px solid var(--focus-text);
+    outline-offset: 2px;
+}
+
+body.focusDashboardPane input[type="search"],
+body.focusDashboardPane input[type="text"],
+body.focusDashboardPane input[type="number"],
+body.focusDashboardPane select,
+body.focusDashboardPane textarea {
+    background: var(--focus-surface);
+    border: 1px solid var(--focus-border-strong);
+    border-radius: 7px;
+    box-sizing: border-box;
+    color: var(--focus-text);
+    min-height: 34px;
+    padding: 6px 9px;
+}
+
+body.focusDashboardPane input[type="color"] {
+    background: var(--focus-surface-soft);
+    border: 1px solid var(--focus-border-strong);
+    border-radius: 7px;
+    height: 30px;
+    padding: 2px;
+}
+
+/* Monochrome toggle switches */
+
+body.focusDashboardPane .checkbox {
+    background: transparent !important;
+    border-radius: 999px;
+    height: 22px;
+    margin-inline-end: 12px;
+    width: 38px;
+}
+
+body.focusDashboardPane .checkbox::before {
+    background: var(--focus-surface-hover);
+    border: 1px solid var(--focus-border-strong);
+    border-radius: 999px;
+    box-sizing: border-box;
+    content: "";
+    inset: 0;
+    pointer-events: none;
+    position: absolute;
+    transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+body.focusDashboardPane .checkbox::after {
+    background: var(--focus-text-muted);
+    border-radius: 50%;
+    content: "";
+    height: 16px;
+    inset-block-start: 3px;
+    inset-inline-start: 3px;
+    pointer-events: none;
+    position: absolute;
+    transition: transform 120ms ease, background-color 120ms ease;
+    width: 16px;
+}
+
+body.focusDashboardPane .checkbox > input[type="checkbox"] {
+    cursor: pointer;
+    min-width: 38px;
+    opacity: 0;
+    z-index: 2;
+}
+
+body.focusDashboardPane .checkbox > input[type="checkbox"] + svg {
+    display: none;
+}
+
+body.focusDashboardPane .checkbox:has(> input[type="checkbox"]:checked)::before {
+    background: var(--focus-solid);
+    border-color: var(--focus-solid);
+}
+
+body.focusDashboardPane .checkbox:has(> input[type="checkbox"]:checked)::after {
+    background: var(--focus-on-solid);
+    transform: translateX(16px);
+}
+
+body[dir="rtl"].focusDashboardPane .checkbox:has(> input[type="checkbox"]:checked)::after {
+    transform: translateX(-16px);
+}
+
+body.focusDashboardPane .checkbox.partial::before {
+    background: var(--focus-solid);
+    border-color: var(--focus-solid);
+}
+
+body.focusDashboardPane .checkbox.partial::after {
+    background: var(--focus-on-solid);
+    transform: translateX(8px) !important;
+}
+
+body[dir="rtl"].focusDashboardPane .checkbox.partial::after {
+    transform: translateX(-8px) !important;
+}
+
+body.focusDashboardPane .checkbox:has(> input[type="checkbox"]:focus-visible) {
+    outline: 2px solid var(--focus-text);
+    outline-offset: 2px;
+}
+
+body.focusDashboardPane .checkbox[disabled] {
+    opacity: 0.45;
+}
+
+/* Settings */
+
+body.focusSettingsPane > .fieldset {
+    background: var(--focus-surface);
+    border: 1px solid var(--focus-border);
+    border-radius: var(--focus-radius);
+    box-shadow: var(--focus-shadow);
+    box-sizing: border-box;
+    margin: 14px auto;
+    max-width: 1120px;
+    padding: 10px 18px;
+    width: calc(100% - 48px);
+}
+
+body.focusSettingsPane > hr {
+    display: none;
+}
+
+body.focusSettingsPane .fieldset-header {
+    color: var(--focus-text-muted);
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    padding: 8px 2px 3px;
+    text-transform: uppercase;
+}
+
+body.focusSettingsPane .fieldset > .li {
+    border-bottom: 1px solid var(--focus-border);
+    box-sizing: border-box;
+    margin: 0;
+    min-height: 48px;
+    padding: 9px 2px;
+}
+
+body.focusSettingsPane .fieldset > .li:last-child,
+body.focusSettingsPane .fieldset > div > .li:last-child {
+    border-bottom: 0;
+}
+
+body.focusSettingsPane .fieldset label {
+    width: 100%;
+}
+
+body.focusSettingsPane #localData {
+    display: grid;
+    gap: 16px;
+    grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
+    margin-bottom: 64px;
+}
+
+body.focusSettingsPane #localData > div:last-of-type {
+    margin: 0;
+}
+
+body.focusSettingsPane #localData > div:last-of-type > button {
+    margin-bottom: 8px;
+    min-width: 100%;
+}
+
+/* Filter lists */
+
+body.focusFilterListsPane #actions {
+    align-items: center;
+    background: color-mix(in srgb, var(--focus-canvas) 92%, transparent);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--focus-border);
+    display: flex;
+    gap: 8px;
+    margin: 0 -2px 14px;
+    padding: 10px 2px;
+    top: 0;
+}
+
+.focusPreferenceCard,
+.focusCard,
+.focusEditorToolbar,
+.focusAboutCard {
+    background: var(--focus-surface);
+    border: 1px solid var(--focus-border);
+    border-radius: var(--focus-radius);
+    box-shadow: var(--focus-shadow);
+    box-sizing: border-box;
+}
+
+.focusPreferenceCard {
+    padding: 8px 18px;
+}
+
+.focusPreferenceCard > .li {
+    border-bottom: 1px solid var(--focus-border);
+    margin: 0;
+    min-height: 46px;
+    padding: 8px 0;
+}
+
+.focusPreferenceCard > .li:last-child {
+    border-bottom: 0;
+}
+
+.focusSectionDivider {
+    height: 14px;
+}
+
+body.focusFilterListsPane #lists {
+    padding: 16px 18px 22px;
+}
+
+body.focusFilterListsPane #lists .rootstats {
+    align-items: center;
+    border-bottom: 1px solid var(--focus-border);
+    display: flex;
+    font-weight: 600;
+    min-height: 42px;
+    padding-bottom: 8px;
+}
+
+body.focusFilterListsPane #lists .searchfield {
+    margin: 14px 0 8px;
+}
+
+body.focusFilterListsPane #lists .searchfield input {
+    min-width: min(320px, 70vw);
+    padding-inline-start: 28px;
+}
+
+body.focusFilterListsPane #lists .listEntry > .detailbar {
+    align-items: center;
+    box-sizing: border-box;
+    min-height: 38px;
+}
+
+body.focusFilterListsPane #lists .listEntries {
+    margin-inline-start: 24px;
+}
+
+body.focusFilterListsPane #lists > .listEntries {
+    margin-inline-start: 0;
+}
+
+/* Editor panes */
+
+body.focusEditorPane > .body {
+    max-width: none;
+    padding-bottom: 14px;
+}
+
+.focusEditorToolbar {
+    padding: 12px 16px;
+}
+
+.focusEditorToolbar > p:first-of-type {
+    margin-top: 0;
+}
+
+.focusEditorToolbar > p:last-of-type,
+.focusEditorToolbar > .li:last-child {
+    margin-bottom: 0;
+}
+
+body.focusEditorPane > .codeMirrorContainer,
+body.focusEditorPane > #whitelist,
+body.focusEditorPane > #advancedSettings {
+    background: var(--focus-surface);
+    border: 1px solid var(--focus-border);
+    border-radius: var(--focus-radius) var(--focus-radius) 0 0;
+    box-shadow: var(--focus-shadow);
+    margin: 0 24px 20px;
+    min-height: 8em;
+    overflow: hidden;
+}
+
+/* Keep editor controls reachable at large browser zoom and in short windows. */
+body.focusEditorPane {
+    overflow-x: hidden;
+    overflow-y: auto;
+}
+
+body.focusEditorPane .CodeMirror,
+body.focusEditorPane .CodeMirror-gutters,
+body.focusEditorPane .CodeMirror-merge,
+body.focusEditorPane .CodeMirror-merge-pane,
+body.focusEditorPane .CodeMirror-merge-gap {
+    background-color: var(--focus-surface);
+    border-color: var(--focus-border);
+}
+
+body.focusRulesPane #diff {
+    background: var(--focus-surface);
+    border: 1px solid var(--focus-border);
+    border-radius: var(--focus-radius);
+    box-shadow: var(--focus-shadow);
+    padding: 10px 14px;
+    white-space: normal;
+}
+
+body.focusRulesPane #diff .tools {
+    display: grid;
+    gap: 10px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+body.focusRulesPane #diff .ruleActions {
+    display: block;
+    min-width: 0;
+    white-space: normal;
+    width: auto;
+}
+
+body.focusRulesPane #ruleFilter {
+    background: var(--focus-surface-soft);
+    border-block: 1px solid var(--focus-border);
+    color: var(--focus-text-muted);
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 16px;
+}
+
+body.focusRulesPane > .codeMirrorContainer {
+    border-radius: 0 0 var(--focus-radius) var(--focus-radius);
+    border-top: 0;
+    margin-top: 0;
+}
+
+/* Support and About */
+
+body.focusSupportPane .body > div:not(.focusPaneHeader) {
+    background: var(--focus-surface);
+    border: 1px solid var(--focus-border);
+    border-radius: var(--focus-radius);
+    box-shadow: var(--focus-shadow);
+    box-sizing: border-box;
+    margin: 12px 0;
+    max-width: 840px;
+    padding: 14px 18px;
+}
+
+body.focusSupportPane .body > div:not(.focusPaneHeader) > hr,
+body.focusSupportPane .supportEntry > hr {
+    border-color: var(--focus-border);
+}
+
+body.focusSupportPane h3 {
+    color: var(--focus-text);
+    font-size: 15px;
+    letter-spacing: -0.01em;
+}
+
+body.focusSupportPane .supportEntry {
+    color: var(--focus-text-muted);
+    gap: 18px;
+}
+
+.focusAboutCard {
+    color: var(--focus-text-muted);
+    max-width: 900px;
+    padding: 18px 22px 28px;
+}
+
+body.focusAboutPane #aboutNameVer {
+    color: var(--focus-text);
+    font-size: 18px;
+    font-weight: 600;
+}
+
+body.focusAboutPane .liul {
+    border-inline-start: 1px solid var(--focus-border);
+    margin-inline-start: 8px;
+    padding-inline-start: 18px;
+}
+
+/* Restricted dashboard */
+
+body.focusNoDashboardPane {
+    align-items: center;
+    display: flex;
+    justify-content: center;
+    min-height: 100vh;
+    min-height: 100svh;
+    padding: 24px;
+}
+
+.focusNoDashboardCard {
+    background: var(--focus-surface);
+    border: 1px solid var(--focus-border);
+    border-radius: var(--focus-radius-large);
+    box-shadow: var(--focus-shadow);
+    box-sizing: border-box;
+    max-width: 560px;
+    padding: 36px;
+    text-align: center;
+    width: 100%;
+}
+
+.focusNoDashboardCard p {
+    color: var(--focus-text-muted);
+    margin: 14px 0 0;
+}
+
+/* Compact layout */
+
+@media (max-width: 800px) {
+    body.focusDashboardShell {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: auto minmax(0, 1fr);
+    }
+
+    body.focusDashboardShell #dashboard-nav {
+        border-bottom: 1px solid var(--focus-nav-border);
+        border-inline-end: 0;
+        grid-column: 1;
+        grid-row: 1;
+        height: auto;
+        padding: 10px 10px 8px;
+        width: 100%;
+    }
+
+    .focusDashboardBrand {
+        min-height: 34px;
+        padding: 0 4px 8px;
+    }
+
+    .focusDashboardBrand .logo {
+        border-radius: 9px;
+        flex-basis: 32px;
+        height: 32px;
+        padding: 4px;
+        width: 32px;
+    }
+
+    :root.mobile body.focusDashboardShell #dashboard-nav .focusDashboardBrand .logo {
+        display: inline-flex;
+    }
+
+    .focusDashboardBrandCopy strong {
+        font-size: 15px;
+    }
+
+    .focusDashboardBrandCopy small,
+    .focusDashboardNavLabel,
+    .focusDashboardFooter {
+        display: none;
+    }
+
+    .focusDashboardTabs {
+        flex-direction: row;
+        gap: 6px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        padding-bottom: 2px;
+    }
+
+    body.focusDashboardShell .tabButton {
+        min-height: 36px;
+        padding: 0 11px;
+        width: auto;
+    }
+
+    body.focusDashboardShell .tabButton::before {
+        display: none;
+    }
+
+    body.focusDashboardShell > iframe {
+        grid-column: 1;
+        grid-row: 2;
+    }
+
+    body.focusDashboardShell #unsavedWarning {
+        grid-column: 1;
+        grid-row: 2;
+    }
+
+    .focusPaneHeader {
+        gap: 14px;
+        margin-bottom: 14px;
+        padding: 22px 0 18px;
+        width: calc(100% - 32px);
+    }
+
+    .body > .focusPaneHeader {
+        width: 100%;
+    }
+
+    body.focusDashboardPane > .body {
+        padding-inline: 16px;
+    }
+
+    body.focusSettingsPane > .fieldset {
+        width: calc(100% - 32px);
+    }
+
+    body.focusSettingsPane #localData {
+        display: block;
+    }
+
+    body.focusEditorPane > .codeMirrorContainer,
+    body.focusEditorPane > #whitelist,
+    body.focusEditorPane > #advancedSettings {
+        margin-inline: 16px;
+    }
+
+    body.focusRulesPane #ruleFilter {
+        justify-content: flex-start;
+    }
+
+    body.focusRulesPane #diff .tools {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media (max-width: 480px) {
+    .focusPaneHeader p {
+        font-size: 12px;
+    }
+
+    .focusPaneIndex {
+        display: none;
+    }
+
+    body.focusDashboardPane button {
+        min-height: 38px;
+    }
+
+    .focusPreferenceCard,
+    .focusCard,
+    .focusEditorToolbar,
+    .focusAboutCard,
+    body.focusSettingsPane > .fieldset,
+    body.focusSupportPane .body > div:not(.focusPaneHeader) {
+        border-radius: 11px;
+    }
+
+    body.focusFilterListsPane #lists .listEntries {
+        margin-inline-start: 12px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    body.focusDashboardPane *,
+    body.focusDashboardShell * {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+    }
+}

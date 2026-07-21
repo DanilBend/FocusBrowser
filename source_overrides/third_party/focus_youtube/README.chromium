@@ -1,0 +1,24 @@
+Name: FocusYoutube (derived from Unhook)
+Short Name: focus_youtube
+URL: https://unhook.app/
+Version: 1.6.9.1
+License: Proprietary; modification and redistribution authorized in writing
+License File: LICENSE.txt
+Shipped: yes
+Security Critical: yes
+
+Description:
+Built-in distraction controls for www.youtube.com and m.youtube.com in
+Focus Browser. The packaged popup presents 24 essential controls on one
+screen while the broader internal schema remains for profile compatibility.
+
+Local Modifications:
+Rebranded as FocusYoutube with a Russian, monochrome, browser-local 400x600
+popup. No options page or external settings site is packaged. All individual
+YouTube filters default to off while the component master switch defaults to
+on. Account, license, premium, payment, analytics, remote font, donation,
+feedback, welcome, uninstall and external update flows are not packaged.
+Existing FocusYoutube profiles migrate locally without overwriting newer
+values. The component performs no network requests.
+The Focus Browser project owner retains the rightsholder's written permission
+for this modification and distribution.

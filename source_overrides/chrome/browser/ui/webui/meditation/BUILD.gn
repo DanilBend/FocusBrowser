@@ -1,0 +1,23 @@
+# Copyright 2026 The Focus Browser Authors
+# You can use, redistribute, and/or modify this source code under
+# the terms of the GPL-3.0 license that can be found in the LICENSE file.
+
+assert(!is_android)
+
+source_set("meditation") {
+  sources = [
+    "meditation_ui.cc",
+    "meditation_ui.h",
+  ]
+
+  deps = [
+    "//chrome/browser/profiles:profile",
+    "//chrome/browser/resources/meditation:resources",
+    "//chrome/common",
+    "//components/focus_services",
+    "//components/prefs",
+    "//content/public/browser",
+    "//services/network/public/mojom",
+    "//ui/webui",
+  ]
+}

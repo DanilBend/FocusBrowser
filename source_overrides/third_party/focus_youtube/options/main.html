@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="ru" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>FocusYoutube — настройки</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <a class="skipLink" href="#settingsList">К настройкам</a>
+
+  <div id="app" class="app">
+    <header class="topBar">
+      <div class="brand">
+        <img src="../images/icon-48.png" width="40" height="40" alt="">
+        <span>
+          <strong>FocusYoutube</strong>
+          <small>Настройки встроенной защиты YouTube</small>
+        </span>
+      </div>
+      <div class="topActions">
+        <button id="themeToggle" class="iconButton" type="button"
+                aria-label="Сменить тему">◐</button>
+        <label class="masterControl">
+          <span>
+            <strong id="masterLabel">Защита включена</strong>
+            <small>Главный переключатель</small>
+          </span>
+          <span class="switch">
+            <input id="global_enable" type="checkbox" role="switch"
+                   aria-labelledby="masterLabel">
+            <span aria-hidden="true"></span>
+          </span>
+        </label>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <aside class="sidebar" aria-label="Разделы настроек">
+        <div class="searchWrap">
+          <label for="settingsSearch">Поиск</label>
+          <input id="settingsSearch" type="search"
+                 placeholder="Например: Shorts или комментарии">
+        </div>
+        <nav id="categoryNav"></nav>
+        <button id="showActive" class="sideButton" type="button">
+          Только включённые
+        </button>
+        <button id="showAll" class="sideButton" type="button" hidden>
+          Показать все
+        </button>
+      </aside>
+
+      <main class="content">
+        <section class="intro" aria-labelledby="pageTitle">
+          <span class="eyebrow">FOCUS BROWSER</span>
+          <h1 id="pageTitle">Уберите только то, что мешает</h1>
+          <p>Все <strong id="totalCount">93</strong> функции доступны локально. Аккаунт и подписка не нужны.</p>
+          <div class="summary" aria-live="polite">
+            <strong id="activeCount">0</strong>
+            <span>фильтров включено</span>
+          </div>
+        </section>
+
+        <section id="settingsList" class="settingsList" aria-label="Фильтры YouTube"></section>
+
+        <section class="tools" aria-labelledby="automationTitle">
+          <div class="sectionTitle">
+            <span class="index">A</span>
+            <div>
+              <h2 id="automationTitle">Расписание и пауза</h2>
+              <p>Автоматическое включение остаётся только на этом устройстве.</p>
+            </div>
+          </div>
+          <div class="toolGrid">
+            <label class="toolToggle">
+              <span><strong>Использовать расписание</strong><small>По выбранным дням и интервалам</small></span>
+              <span class="switch">
+                <input id="schedule" type="checkbox" role="switch">
+                <span aria-hidden="true"></span>
+              </span>
+            </label>
+            <label class="field">
+              <span>Интервалы</span>
+              <input id="scheduleTimes" type="text" value="09:00-17:00"
+                     aria-describedby="scheduleHelp">
+              <small id="scheduleHelp">Например: 09:00-12:00, 13:00-17:00</small>
+            </label>
+            <fieldset class="days">
+              <legend>Дни недели</legend>
+              <label><input type="checkbox" value="mo">Пн</label>
+              <label><input type="checkbox" value="tu">Вт</label>
+              <label><input type="checkbox" value="we">Ср</label>
+              <label><input type="checkbox" value="th">Чт</label>
+              <label><input type="checkbox" value="fr">Пт</label>
+              <label><input type="checkbox" value="sa">Сб</label>
+              <label><input type="checkbox" value="su">Вс</label>
+            </fieldset>
+            <div class="buttonRow">
+              <button id="pause25" class="secondaryButton" type="button">Пауза на 25 минут</button>
+              <button id="resumeNow" class="secondaryButton" type="button">Вернуть сейчас</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="tools" aria-labelledby="dataTitle">
+          <div class="sectionTitle">
+            <span class="index">B</span>
+            <div>
+              <h2 id="dataTitle">Данные и блокировка</h2>
+              <p>Импорт, экспорт и локальная защита настроек.</p>
+            </div>
+          </div>
+          <div class="buttonGrid">
+            <button id="exportSettings" class="secondaryButton" type="button">Экспортировать</button>
+            <button id="importSettings" class="secondaryButton" type="button">Импортировать</button>
+            <button id="resetSettings" class="dangerButton" type="button">Сбросить фильтры</button>
+          </div>
+          <div class="passwordPanel">
+            <div>
+              <strong>Пароль на настройки</strong>
+              <p>Локальная защита от случайного изменения, не замена системной безопасности.</p>
+            </div>
+            <div class="passwordFields">
+              <input id="passwordInput" type="password" autocomplete="new-password"
+                     placeholder="Новый или текущий пароль" aria-label="Пароль">
+              <input id="passwordConfirm" type="password" autocomplete="new-password"
+                     placeholder="Повторите новый пароль" aria-label="Повтор пароля">
+              <button id="passwordAction" class="secondaryButton" type="button">Установить пароль</button>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="guard" class="guard" hidden role="dialog" aria-modal="true"
+       aria-labelledby="guardTitle">
+    <form id="guardForm" class="guardCard">
+      <span class="eyebrow">FOCUSYOUTUBE</span>
+      <h2 id="guardTitle">Настройки временно заблокированы</h2>
+      <p id="guardMessage"></p>
+      <code id="guardCode" hidden></code>
+      <input id="guardInput" type="password" autocomplete="current-password"
+             aria-label="Код или пароль" hidden>
+      <button id="guardButton" class="primaryButton" type="submit">Продолжить</button>
+    </form>
+  </div>
+
+  <dialog id="transferDialog" aria-labelledby="transferTitle"
+          aria-describedby="transferHelp">
+    <form method="dialog" class="dialogCard">
+      <h2 id="transferTitle">Перенос настроек</h2>
+      <p id="transferHelp">Скопируйте строку или вставьте сохранённую ранее.</p>
+      <textarea id="transferValue" rows="8" aria-labelledby="transferTitle"
+                aria-describedby="transferHelp"></textarea>
+      <div class="buttonRow">
+        <button value="cancel" class="secondaryButton">Закрыть</button>
+        <button id="transferSubmit" value="default" class="primaryButton" type="button">Готово</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="../shared/utils.js"></script>
+  <script src="../shared/main.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>

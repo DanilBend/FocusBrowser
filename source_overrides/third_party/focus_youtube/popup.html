@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>FocusYoutube</title>
+  <link rel="stylesheet" href="css/popup.css">
+</head>
+<body>
+  <main class="popup" aria-labelledby="focus-youtube-title">
+    <header class="topBar">
+      <div class="identity">
+        <img src="images/icon-32.png" width="32" height="32" alt="">
+        <div>
+          <h1 id="focus-youtube-title">FocusYoutube</h1>
+          <p>Спокойный YouTube без лишнего</p>
+        </div>
+      </div>
+      <button id="resetAll" class="resetButton" type="button" disabled>
+        Сбросить
+      </button>
+    </header>
+
+    <section class="masterCard" aria-labelledby="masterState">
+      <div>
+        <span class="eyebrow">Защита от отвлечений</span>
+        <strong id="masterState" aria-live="polite">FocusYoutube включён</strong>
+        <p id="masterHint">Включайте только то, что действительно помогает.</p>
+      </div>
+      <label class="switch switchLarge">
+        <input id="global_enable" type="checkbox" role="switch"
+               aria-labelledby="masterState" aria-describedby="masterHint">
+        <span aria-hidden="true"></span>
+      </label>
+    </section>
+
+    <section class="settings" aria-labelledby="settingsTitle">
+      <div class="settingsHeader">
+        <h2 id="settingsTitle">Основные функции</h2>
+        <p id="enabledCount" aria-live="polite">Включено 0 из 24</p>
+      </div>
+      <div id="controls" class="controls"></div>
+    </section>
+
+    <footer>
+      <span class="statusDot" aria-hidden="true"></span>
+      Настройки применяются сразу на YouTube
+    </footer>
+    <p id="statusMessage" class="srOnly" role="status" aria-live="polite"></p>
+  </main>
+
+  <script src="shared/main.js"></script>
+  <script src="js/popup.js"></script>
+</body>
+</html>

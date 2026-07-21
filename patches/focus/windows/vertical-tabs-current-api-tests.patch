@@ -1,0 +1,132 @@
+diff --git a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view_browsertest.cc b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view_browsertest.cc
+--- a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view_browsertest.cc
++++ b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view_browsertest.cc
+@@ -100,12 +100,12 @@ class VerticalTabStripRegionViewTest
+     return contents;
+   }
+ 
+   void PressCollapseButton() {
+-    region_view()
+-        ->GetTopContainer()
+-        ->GetCollapseButton()
+-        ->button_controller()
+-        ->NotifyClick();
++    actions::ActionItem* collapse_action =
++        actions::ActionManager::Get().FindAction(
++            kActionToggleCollapseVertical);
++    ASSERT_TRUE(collapse_action);
++    collapse_action->InvokeAction();
+   }
+ 
+   bool IsAnimatingSize() const {
+@@ -943,28 +943,26 @@ IN_PROC_BROWSER_TEST_F(VerticalTabStripRegionViewTest, ImmersiveModeLock) {
+   // 1. Simulate entering immersive mode.
+   browser_view->OnImmersiveFullscreenEntered();
+ 
+-  // 2. Try to disable vertical tabs via pref.
+-  browser()->profile()->GetPrefs()->SetBoolean(prefs::kVerticalTabsEnabled,
+-                                               false);
++  // 2. Try to disable vertical tabs through the current layout controller.
++  controller->SetVerticalTabsEnabled(false);
+ 
+   // 3. Verify vertical tabs are STILL enabled (deferred).
+   EXPECT_TRUE(controller->ShouldDisplayVerticalTabs());
+ 
+   // 4. Simulate exiting immersive mode.
+   browser_view->OnImmersiveFullscreenExited();
+ 
+   // 5. Verify vertical tabs are now disabled.
+   EXPECT_FALSE(controller->ShouldDisplayVerticalTabs());
+ 
+   // 6. Simulate entering immersive mode again.
+   browser_view->OnImmersiveFullscreenEntered();
+ 
+-  // 7. Try to enable vertical tabs via pref.
+-  browser()->profile()->GetPrefs()->SetBoolean(prefs::kVerticalTabsEnabled,
+-                                               true);
++  // 7. Try to enable vertical tabs through the current layout controller.
++  controller->SetVerticalTabsEnabled(true);
+ 
+   // 8. Verify vertical tabs are STILL disabled.
+   EXPECT_FALSE(controller->ShouldDisplayVerticalTabs());
+ 
+   // 9. Simulate exiting immersive mode.
+   browser_view->OnImmersiveFullscreenExited();
+@@ -1186,68 +1184,59 @@ IN_PROC_BROWSER_TEST_F(VerticalTabStripRegionViewTest,
+ IN_PROC_BROWSER_TEST_F(VerticalTabStripRegionViewTest,
+                        ExpandOnHoverEnabledChanged) {
+   // Fully collapse the tabstrip.
+   state_controller()->RequestCollapse(true);
+   ASSERT_TRUE(base::test::RunUntil(
+       [&]() { return state_controller()->IsCollapsed(); }));
+ 
+-  ASSERT_TRUE(browser()->profile()->GetPrefs()->GetBoolean(
+-      prefs::kVerticalTabsExpandOnHoverEnabled));
++  ASSERT_TRUE(state_controller()->IsExpandOnHoverEnabled());
+   ASSERT_FALSE(region_view()->is_expanded_on_hover());
+ 
+   region_view()->GetFocusManager()->SetFocusedView(region_view());
+   ASSERT_TRUE(base::test::RunUntil(
+       [&]() { return region_view()->is_expanded_on_hover(); }));
+   ASSERT_TRUE(base::test::RunUntil([&]() { return !IsAnimatingSize(); }));
+ 
+-  browser()->profile()->GetPrefs()->SetBoolean(
+-      prefs::kVerticalTabsExpandOnHoverEnabled, false);
++  state_controller()->SetExpandOnHoverEnabled(false);
+   EXPECT_FALSE(region_view()->is_expanded_on_hover());
+   EXPECT_TRUE(IsAnimatingSize());
+   EXPECT_EQ(TabStripAnimations::kCollapseOnHover,
+             BrowserAnimationController::From(browser())->GetCurrentMotion(
+                 TabStripAnimations::kVerticalTabStrip));
+ }
+ 
+ IN_PROC_BROWSER_TEST_F(VerticalTabStripRegionViewTest, ModeChanged) {
+-  browser()->profile()->GetPrefs()->SetBoolean(
+-      prefs::kVerticalTabsExpandOnHoverEnabled, false);
++  state_controller()->SetExpandOnHoverEnabled(false);
+ 
+   // Fully collapse the tabstrip.
+   state_controller()->RequestCollapse(true);
+   ASSERT_TRUE(base::test::RunUntil(
+       [&]() { return state_controller()->IsCollapsed(); }));
+ 
+-  ASSERT_TRUE(browser()->profile()->GetPrefs()->GetBoolean(
+-      prefs::kVerticalTabsEnabled));
+-  ASSERT_FALSE(browser()->profile()->GetPrefs()->GetBoolean(
+-      prefs::kVerticalTabsExpandOnHoverEnabled));
++  ASSERT_TRUE(state_controller()->ShouldDisplayVerticalTabs());
++  ASSERT_FALSE(state_controller()->IsExpandOnHoverEnabled());
+   ASSERT_FALSE(region_view()->is_expanded_on_hover());
+ 
+-  browser()->profile()->GetPrefs()->SetBoolean(
+-      prefs::kVerticalTabsExpandOnHoverEnabled, true);
++  state_controller()->SetExpandOnHoverEnabled(true);
+   region_view()->GetFocusManager()->SetFocusedView(region_view());
+   ASSERT_TRUE(base::test::RunUntil(
+       [&]() { return region_view()->is_expanded_on_hover(); }));
+   ASSERT_TRUE(base::test::RunUntil([&]() { return !IsAnimatingSize(); }));
+ 
+-  browser()->profile()->GetPrefs()->SetBoolean(prefs::kVerticalTabsEnabled,
+-                                               false);
++  state_controller()->SetVerticalTabsEnabled(false);
+ 
+-  browser()->profile()->GetPrefs()->SetBoolean(prefs::kVerticalTabsEnabled,
+-                                               true);
++  state_controller()->SetVerticalTabsEnabled(true);
+   EXPECT_FALSE(region_view()->is_expanded_on_hover());
+   EXPECT_FALSE(IsAnimatingSize());
+ }
+ 
+ IN_PROC_BROWSER_TEST_F(VerticalTabStripRegionViewTest,
+                        ResizeAreaNotVisibleInExpandOnHoverState) {
+   // Fully collapse the tabstrip.
+   state_controller()->RequestCollapse(true);
+   ASSERT_TRUE(base::test::RunUntil(
+       [&]() { return state_controller()->IsCollapsed(); }));
+-  browser()->profile()->GetPrefs()->SetBoolean(
+-      prefs::kVerticalTabsExpandOnHoverEnabled, true);
++  state_controller()->SetExpandOnHoverEnabled(true);
+ 
+   region_view()->GetFocusManager()->SetFocusedView(region_view());
+   ASSERT_TRUE(base::test::RunUntil(
+       [&]() { return region_view()->is_expanded_on_hover(); }));

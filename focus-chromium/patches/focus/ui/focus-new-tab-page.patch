@@ -1,0 +1,265 @@
+diff --git a/chrome/browser/resources/new_tab_page/app.ts b/chrome/browser/resources/new_tab_page/app.ts
+--- a/chrome/browser/resources/new_tab_page/app.ts
++++ b/chrome/browser/resources/new_tab_page/app.ts
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ import './action_chips/action_chips.js';
++import './ntp_searchbox.js';
+ import '/strings.m.js';
+ import 'chrome://new-tab-page/shared/customize_buttons/customize_buttons.js';
+ import 'chrome://resources/cr_elements/cr_button/cr_button.js';
+@@ -10,7 +11,6 @@ import 'chrome://resources/cr_elements/cr_toast/cr_toast.js';
+ import 'chrome://resources/cr_components/composebox/composebox.js';
+ import 'chrome://resources/cr_components/composebox/threads_rail.js';
+ 
+-import type {CustomizeButtonsElement} from 'chrome://new-tab-page/shared/customize_buttons/customize_buttons.js';
+ import {ColorChangeUpdater} from 'chrome://resources/cr_components/color_change_listener/colors_css_updater.js';
+ import {GlifAnimationState} from 'chrome://resources/cr_components/composebox/common.js';
+ import type {ComposeboxState} from 'chrome://resources/cr_components/composebox/common.js';
+@@ -136,12 +136,6 @@ function recordShowBrowserPromosResult(result: ShowNtpPromosResult) {
+ 
+ const AppElementBase = HelpBubbleMixinLit(CrLitElement);
+ 
+-export interface AppElement {
+-  $: {
+-    customizeButtons: CustomizeButtonsElement,
+-  };
+-}
+-
+ export class AppElement extends AppElementBase {
+   static get is() {
+     return 'ntp-app';
+@@ -786,24 +780,9 @@ export class AppElement extends AppElementBase {
+     // Integration tests use this attribute to determine when lazy load has
+     // completed.
+     document.documentElement.setAttribute('lazy-loaded', String(true));
+-    if (this.maybeRegisterCustomizeButtonHelpBubble_()) {
+-      this.pageHandler_.maybeTriggerAutomaticCustomizeChromePromo();
+-    }
+-    if (this.showWallpaperSearchButton_) {
+-      this.customizeButtonsHandler_.incrementWallpaperSearchButtonShownCount();
+-    }
+   }
+ 
+   private maybeRegisterCustomizeButtonHelpBubble_(): boolean {
+-    if (this.isAndroid_) {
+-      return false;
+-    }
+-    if (!this.isFooterVisible_) {
+-      this.registerHelpBubble(
+-          CUSTOMIZE_CHROME_BUTTON_ELEMENT_ID,
+-          ['ntp-customize-buttons', '#customizeButton'], {fixed: true});
+-      return true;
+-    }
+     return false;
+   }
+ 
+diff --git a/chrome/browser/resources/new_tab_page/app.html b/chrome/browser/resources/new_tab_page/app.html
+--- a/chrome/browser/resources/new_tab_page/app.html
++++ b/chrome/browser/resources/new_tab_page/app.html
+@@ -1,36 +1,30 @@
+ <div id="content">
+-  ${this.lazyRender_ ? html`
+-    ${this.shortcutsEnabled_ ? html`
+-      <cr-most-visited id="mostVisited" .theme="${this.theme_?.mostVisited || null}"
+-          single-row reflow-on-overflow
+-          ?expandable-tiles-enabled="${this.ntpNextFeaturesEnabled_}"
+-          max-tiles-in-collapsed-state="${this.maxTilesInCollapsedState_}"
+-          max-shortcuts-in-expanded-state="${this.maxShortcutsInExpandedState_}"
+-          max-most-visited-tiles-in-expanded-state="${this.maxMostVisitedTilesInExpandedState_}"
+-          max-enterprise-shortcuts="${this.maxEnterpriseShortcuts_}">
+-      </cr-most-visited>
+-    ` : ''}
+-    ${!this.isFooterVisible_ ? html`
+-      ${!this.isAndroid_ ? html`
+-        <ntp-customize-buttons id="customizeButtons"
+-            ?modules-shown-to-user="${this.modulesShownToUser}"
+-            ?show-background-image="${this.showBackgroundImage_}"
+-            ?show-customize="${this.showCustomize_}"
+-            ?show-customize-chrome-text="${this.showCustomizeChromeText_}"
+-            ?show-wallpaper-search="${this.showWallpaperSearch_}"
+-            ?show-wallpaper-search-button="${this.showWallpaperSearchButton_}"
+-            ?wallpaper-search-button-animation-enabled="${this.wallpaperSearchButtonAnimationEnabled_}"
+-            @customize-click="${this.onCustomizeClick_}"
+-            @wallpaper-search-click="${this.onWallpaperSearchClick_}" show-shadow>
+-        </ntp-customize-buttons>
+-      ` : ''}
+-    ` : ''}
+-    ${this.showThemeAttribution_() ? html`
+-      <div id="themeAttribution">
+-        <div>$i18n{themeCreatedBy}</div>
+-        <img src="${this.theme_!.backgroundImage!.attributionUrl!}">
++  <main id="focusHome" aria-label="Новая вкладка">
++    <section id="focusSearch" aria-label="Поиск">
++      <div id="searchboxContainer"
++          @focusin="${this.onSearchboxContainerFocusin_}"
++          @focusout="${this.onSearchboxContainerFocusout_}">
++        <ntp-searchbox id="searchbox" ?is-dark="${this.isThemeDark_()}"
++            placeholder-text="Поиск или введите адрес"
++            ?color-source-is-baseline="${this.colorSourceIsBaseline}"
++            ?shown="${this.realboxShown_}"
++            ?had-secondary-side="${this.realboxHadSecondarySide}"
++            @had-secondary-side-changed="${this.onRealboxHadSecondarySideChanged_}"
++            ?can-show-secondary-side="${this.realboxCanShowSecondarySide}">
++        </ntp-searchbox>
+       </div>
++    </section>
++    ${this.lazyRender_ && this.shortcutsEnabled_ ? html`
++      <section id="focusShortcuts" aria-label="Закреплённые ярлыки">
++        <cr-most-visited id="mostVisited" .theme="${this.theme_?.mostVisited || null}"
++            single-row reflow-on-overflow
++            ?expandable-tiles-enabled="${this.ntpNextFeaturesEnabled_}"
++            max-tiles-in-collapsed-state="${this.maxTilesInCollapsedState_}"
++            max-shortcuts-in-expanded-state="${this.maxShortcutsInExpandedState_}"
++            max-most-visited-tiles-in-expanded-state="${this.maxMostVisitedTilesInExpandedState_}"
++            max-enterprise-shortcuts="${this.maxEnterpriseShortcuts_}">
++        </cr-most-visited>
++      </section>
+     ` : ''}
+-  ` : ''}
+-  <div id="contentBottomSpacer"></div>
++  </main>
+ </div>
+diff --git a/chrome/browser/resources/new_tab_page/app.css b/chrome/browser/resources/new_tab_page/app.css
+--- a/chrome/browser/resources/new_tab_page/app.css
++++ b/chrome/browser/resources/new_tab_page/app.css
+@@ -154,16 +154,39 @@ cr-most-visited {
+ 
+ #content {
+   align-items: center;
++  box-sizing: border-box;
+   display: flex;
+   flex-direction: column;
+-  justify-content: center;
+-  height: calc(100vh - var(--ntp-one-google-bar-height));
++  /* Focus NTP has no One Google Bar. The top padding already reserves the
++     visual breathing room, so a full viewport keeps the page scrollbar-free. */
++  height: 100vh;
+-  min-width: fit-content; /* Prevents OneGoogleBar cutoff at 500% zoom. */
++  min-width: 0;
++  overflow: auto;
+   padding-top: var(--ntp-one-google-bar-height);
+   position: relative;
+   z-index: 1;
+ }
+ 
++#focusHome {
++  --ntp-search-box-width: min(640px, calc(100vw - 48px));
++  align-items: center;
++  box-sizing: border-box;
++  display: flex;
++  flex: 1 0 auto;
++  flex-direction: column;
++  justify-content: center;
++  min-height: calc(100vh - var(--ntp-one-google-bar-height));
++  padding: 48px 24px;
++  width: min(960px, 100%);
++}
++
++#focusSearch {
++  align-items: center;
++  display: flex;
++  flex-direction: column;
++  width: 100%;
++}
++
+ /*
+  * Below 900px, the threads rail will shift the main content aside.
+  * This happens in conjunction with the realbox width change as well,
+@@ -191,12 +212,52 @@ cr-most-visited {
+ 
+ #searchboxContainer {
+   --cr-focus-outline-color: var(--color-searchbox-results-icon-focused-outline);
+-  display: inherit;
+-  margin-bottom: 16px;
++  display: block;
++  margin: 0;
+   position: relative;
++  width: var(--ntp-search-box-width);
+   z-index: 2;
+ }
+ 
++#searchboxContainer ntp-searchbox {
++  width: 100%;
++}
++
++#focusShortcuts {
++  box-sizing: border-box;
++  margin-top: 36px;
++  max-width: 760px;
++  padding: 0 12px;
++  width: 100%;
++}
++
++#focusShortcuts cr-most-visited {
++  width: 100%;
++}
++
++@media (max-height: 760px) {
++  #focusHome {
++    justify-content: flex-start;
++    min-height: 0;
++    padding-top: 72px;
++  }
++
++  #focusShortcuts {
++    margin-top: 28px;
++  }
++}
++
++@media (max-width: 520px) {
++  #focusHome {
++    --ntp-search-box-width: calc(100vw - 32px);
++    padding-inline: 16px;
++  }
++
++  #focusShortcuts {
++    padding: 0;
++  }
++}
++
+ #modules:not([hidden]) {
+   /* We use animation instead of transition to allow a fade-in out of
+      display: none. */
+@@ -230,14 +291,6 @@ ntp-middle-slot-promo:not([hidden]) ~ #modules {
+   margin-top: 16px;
+ }
+ 
+-#themeAttribution {
+-  align-self: flex-start;
+-  bottom: 16px;
+-  color: var(--color-new-tab-page-secondary-foreground);
+-  margin-inline-start: 16px;
+-  position: fixed;
+-}
+-
+ #backgroundImageAttribution {
+   border-radius: 8px;
+   bottom: 16px;
+@@ -294,25 +347,6 @@ ntp-middle-slot-promo:not([hidden]) ~ #modules {
+   font-size: 0.75rem;
+ }
+ 
+-#customizeButtons {
+-  bottom: 16px;
+-  position: fixed;
+-}
+-
+-:host-context([dir='ltr']) #customizeButtons {
+-  right: 16px;
+-}
+-
+-:host-context([dir='rtl']) #customizeButtons {
+-  left: 16px;
+-}
+-
+-#contentBottomSpacer {
+-  flex-shrink: 0;
+-  height: 32px;
+-  width: 1px;
+-}
+-
+ svg {
+   position: fixed;
+ }

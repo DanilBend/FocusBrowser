@@ -1,0 +1,47 @@
+# Copyright 2026 The Focus Browser Authors
+# This directory packages the FocusYoutube component based on Unhook 1.6.9.
+# Modification and redistribution are covered by the project owner's written
+# permission from the Unhook rightsholder; see README.chromium.
+
+import("//tools/grit/grit_rule.gni")
+import("//ui/webui/resources/tools/generate_grd.gni")
+
+file_list = "$target_gen_dir/files.json"
+generated_grd = "$target_gen_dir/focus_youtube_resources.grd"
+
+action("generate_file_list") {
+  script = "generate_file_list.py"
+  args = [
+    rebase_path("."),
+    rebase_path(file_list),
+  ]
+  inputs = [
+    "manifest.json",
+    "generate_file_list.py",
+  ]
+  outputs = [ file_list ]
+}
+
+generate_grd("focus_youtube_grd") {
+  out_grd = generated_grd
+  grd_prefix = "focus_youtube"
+  resource_path_prefix = "focus_youtube"
+  manifest_files = [ file_list ]
+  deps = [ ":generate_file_list" ]
+}
+
+grit("focus_youtube") {
+  source = generated_grd
+  enable_input_discovery_for_gn_analyze = false
+  use_brotli = true
+  output_dir = "$target_gen_dir/resources"
+
+  outputs = [
+    "grit/focus_youtube_resources.h",
+    "grit/focus_youtube_resources_map.cc",
+    "grit/focus_youtube_resources_map.h",
+    "focus_youtube_resources.pak",
+  ]
+
+  deps = [ ":focus_youtube_grd" ]
+}

@@ -1,0 +1,28 @@
+diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
+--- a/chrome/BUILD.gn
++++ b/chrome/BUILD.gn
+@@ -149,6 +149,11 @@ executable("chrome_initial") {
+         "app/main_dll_loader_win.h",
+       ]
+ 
++      # Resource compiler dependencies are not discovered from ICON entries in
++      # .rc files. Track the branded application icon explicitly so incremental
++      # Focus Browser builds cannot retain an older icon in chrome.exe.
++      inputs = [ "//chrome/app/theme/chromium/win/chromium.ico" ]
++
+       deps += [
+         ":chrome_dll",
+         ":chrome_exe_version",
+diff --git a/chrome/app/BUILD.gn b/chrome/app/BUILD.gn
+--- a/chrome/app/BUILD.gn
++++ b/chrome/app/BUILD.gn
+@@ -53,6 +53,9 @@ source_set("chrome_dll_resources") {
+   if (is_win) {
+     sources += [ "chrome_dll.rc" ]
+ 
++    # Keep the icon embedded in chrome.dll in sync with the Focus Browser ICO.
++    inputs = [ "//chrome/app/theme/chromium/win/chromium.ico" ]
++
+     deps += [
+       "//build:branding_buildflags",
+       "//printing/buildflags",

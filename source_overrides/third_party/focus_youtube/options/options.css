@@ -1,0 +1,673 @@
+:root {
+  color-scheme: dark;
+  --bg: #080808;
+  --surface: #111111;
+  --surface-2: #1c1c1c;
+  --surface-3: #252525;
+  --border: #3b3b3b;
+  --text: #ffffff;
+  --muted: #a8a8a8;
+  --inverse: #000000;
+  --focus: #ffffff;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f3f3f3;
+  --surface: #ffffff;
+  --surface-2: #ebebeb;
+  --surface-3: #dddddd;
+  --border: #b5b5b5;
+  --text: #090909;
+  --muted: #5c5c5c;
+  --inverse: #ffffff;
+  --focus: #000000;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html {
+  min-width: 320px;
+  min-height: 100%;
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 Arial, sans-serif;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  color: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.skipLink {
+  position: fixed;
+  top: -60px;
+  left: 16px;
+  z-index: 100;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--text);
+  color: var(--inverse);
+}
+
+.skipLink:focus {
+  top: 12px;
+}
+
+.app {
+  min-height: 100vh;
+}
+
+.topBar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 76px;
+  padding: 12px 28px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.brand,
+.topActions,
+.masterControl,
+.sectionTitle,
+.optionRow,
+.toolToggle,
+.buttonRow,
+.days,
+.passwordPanel,
+.passwordFields {
+  display: flex;
+  align-items: center;
+}
+
+.brand {
+  gap: 12px;
+}
+
+.brand img {
+  border-radius: 10px;
+}
+
+.brand span,
+.masterControl > span:first-child {
+  display: grid;
+}
+
+.brand strong {
+  font-size: 17px;
+}
+
+.brand small,
+.masterControl small,
+.intro p,
+.sectionTitle p,
+.optionCopy small,
+.field small,
+.toolToggle small,
+.passwordPanel p {
+  color: var(--muted);
+}
+
+.topActions {
+  gap: 12px;
+}
+
+.iconButton,
+.sideButton,
+.primaryButton,
+.secondaryButton,
+.dangerButton {
+  min-height: 40px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.iconButton {
+  width: 40px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 20px;
+}
+
+.masterControl {
+  gap: 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.switch {
+  position: relative;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
+.switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.switch > span {
+  display: block;
+  width: 46px;
+  height: 26px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-3);
+}
+
+.switch > span::after {
+  content: "";
+  display: block;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 120ms ease;
+}
+
+.switch input:checked + span {
+  background: var(--text);
+}
+
+.switch input:checked + span::after {
+  background: var(--inverse);
+  transform: translateX(20px);
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 920px);
+  justify-content: center;
+  gap: 32px;
+  padding: 28px;
+}
+
+.sidebar {
+  position: sticky;
+  top: 104px;
+  align-self: start;
+  max-height: calc(100vh - 132px);
+  overflow: auto;
+}
+
+.searchWrap {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.searchWrap label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.searchWrap input,
+.field input,
+.passwordFields input,
+.guardCard input,
+textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.searchWrap input,
+.field input,
+.passwordFields input,
+.guardCard input {
+  min-height: 42px;
+  padding: 0 12px;
+}
+
+#categoryNav {
+  display: grid;
+  gap: 4px;
+}
+
+.categoryButton,
+.sideButton {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.categoryButton {
+  padding: 9px 10px;
+  border-radius: 8px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.categoryButton:hover,
+.categoryButton[aria-current="true"],
+.sideButton:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.sideButton {
+  margin-top: 10px;
+  padding: 9px 10px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.content {
+  min-width: 0;
+}
+
+.intro {
+  position: relative;
+  padding: 28px;
+  margin-bottom: 20px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface);
+}
+
+.eyebrow {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .15em;
+}
+
+.intro h1 {
+  max-width: 620px;
+  margin: 8px 0 10px;
+  font-size: clamp(28px, 5vw, 48px);
+  line-height: 1.05;
+  letter-spacing: -.035em;
+}
+
+.intro p {
+  max-width: 620px;
+  margin: 0;
+}
+
+.summary {
+  position: absolute;
+  right: 28px;
+  bottom: 24px;
+  display: grid;
+  justify-items: end;
+}
+
+.summary strong {
+  font-size: 34px;
+  line-height: 1;
+}
+
+.summary span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settingsList {
+  display: grid;
+  gap: 18px;
+}
+
+.settingsSection,
+.tools {
+  scroll-margin-top: 100px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.sectionTitle {
+  gap: 14px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sectionTitle .index {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sectionTitle h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.sectionTitle p {
+  margin: 2px 0 0;
+  font-size: 12px;
+}
+
+.optionRow {
+  justify-content: space-between;
+  min-height: 62px;
+  padding: 12px 20px;
+  gap: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.optionRow:last-child {
+  border-bottom: 0;
+}
+
+.optionRow:hover {
+  background: var(--surface-2);
+}
+
+.optionCopy {
+  min-width: 0;
+}
+
+.optionCopy label {
+  display: block;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.optionCopy small {
+  display: block;
+  margin-top: 2px;
+}
+
+.tools {
+  margin-top: 18px;
+}
+
+.toolGrid,
+.passwordPanel {
+  padding: 18px 20px;
+}
+
+.toolGrid {
+  display: grid;
+  gap: 16px;
+}
+
+.toolToggle,
+.passwordPanel {
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.toolToggle > span:first-child {
+  display: grid;
+}
+
+.field {
+  display: grid;
+  gap: 5px;
+}
+
+.days {
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+}
+
+.days legend {
+  width: 100%;
+  margin-bottom: 4px;
+}
+
+.days label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 36px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.buttonRow,
+.buttonGrid {
+  gap: 9px;
+}
+
+.buttonGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.primaryButton,
+.secondaryButton,
+.dangerButton {
+  padding: 0 15px;
+}
+
+.primaryButton {
+  border: 1px solid var(--text);
+  background: var(--text);
+  color: var(--inverse);
+  font-weight: 700;
+}
+
+.secondaryButton {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.dangerButton {
+  border: 1px solid var(--text);
+  background: transparent;
+}
+
+.passwordPanel p {
+  max-width: 480px;
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+
+.passwordFields {
+  width: min(100%, 360px);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.passwordFields input {
+  flex: 1 1 160px;
+}
+
+.guard {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, .88);
+}
+
+.guardCard,
+.dialogCard {
+  width: min(100%, 480px);
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.guardCard h2,
+.dialogCard h2 {
+  margin: 8px 0;
+}
+
+.guardCard code {
+  display: block;
+  margin: 16px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  font-size: 18px;
+  letter-spacing: .12em;
+  text-align: center;
+}
+
+.guardCard .primaryButton {
+  width: 100%;
+  margin-top: 12px;
+}
+
+dialog {
+  width: min(calc(100% - 32px), 560px);
+  padding: 0;
+  border: 0;
+  border-radius: 18px;
+  background: transparent;
+}
+
+dialog::backdrop {
+  background: rgba(0, 0, 0, .8);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 170px;
+  margin: 10px 0 14px;
+  padding: 12px;
+}
+
+.toast {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 90;
+  max-width: 360px;
+  padding: 11px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--text);
+  color: var(--inverse);
+  font-weight: 700;
+}
+
+.filteredOut {
+  display: none !important;
+}
+
+@media (max-width: 860px) {
+  .topBar {
+    align-items: flex-start;
+    padding: 12px 16px;
+  }
+
+  .topActions {
+    align-items: flex-end;
+    flex-direction: column;
+  }
+
+  .masterControl > span:first-child {
+    display: none;
+  }
+
+  .workspace {
+    grid-template-columns: 1fr;
+    padding: 16px;
+  }
+
+  .sidebar {
+    position: static;
+    max-height: none;
+  }
+
+  #categoryNav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .summary {
+    position: static;
+    justify-items: start;
+    margin-top: 18px;
+  }
+
+  .buttonGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .passwordPanel {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .passwordFields {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+  }
+}
+
+@media (forced-colors: active) {
+  .settingsSection,
+  .tools,
+  .intro,
+  .masterControl,
+  .optionRow,
+  button,
+  input,
+  textarea {
+    border: 1px solid CanvasText;
+  }
+}

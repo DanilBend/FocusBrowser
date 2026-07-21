@@ -1,0 +1,1073 @@
+diff --git a/chrome/browser/ui/webui/onboarding/onboarding_handler.cc b/chrome/browser/ui/webui/onboarding/onboarding_handler.cc
+index fd5e7fbe8246a107e665009077a0d54dc16b5776..f78329437ef5f89228acd33ea60c0ca2984b93cb 100644
+--- a/chrome/browser/ui/webui/onboarding/onboarding_handler.cc
++++ b/chrome/browser/ui/webui/onboarding/onboarding_handler.cc
+@@ -9,11 +9,17 @@
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/values.h"
+ #include "chrome/browser/browser_process.h"
++#include "chrome/browser/content_settings/host_content_settings_map_factory.h"
+ #include "chrome/browser/extensions/webstore_install_with_prompt.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_attributes_storage.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+ #include "chrome/browser/profiles/profiles_state.h"
++#include "chrome/common/pref_names.h"
++#include "components/bookmarks/common/bookmark_pref_names.h"
++#include "components/content_settings/core/browser/host_content_settings_map.h"
++#include "components/content_settings/core/common/content_settings.h"
++#include "components/content_settings/core/common/content_settings_types.h"
+ #include "extensions/browser/webstore_install_result.h"
+ #include "components/focus_services/pref_names.h"
+ #include "components/focus_services/schema.h"
+@@ -101,6 +107,10 @@ void OnboardingMessageHandler::RegisterMessages() {
+       "acceptLatestSchema",
+       base::BindRepeating(&OnboardingMessageHandler::HandleAcceptSchema,
+                           base::Unretained(this)));
++  web_ui()->RegisterMessageCallback(
++      "applyFocusSettings",
++      base::BindRepeating(&OnboardingMessageHandler::HandleApplyFocusSettings,
++                          base::Unretained(this)));
+   web_ui()->RegisterMessageCallback(
+       "getProfileName",
+       base::BindRepeating(&OnboardingMessageHandler::HandleGetProfileName,
+@@ -279,3 +289,36 @@ void OnboardingMessageHandler::HandleSetPreference(
+ void OnboardingMessageHandler::HandleAcceptSchema(const base::ListValue&) {
+   focus::AcceptCurrentSchema(*pref_service_);
+ }
++
++void OnboardingMessageHandler::HandleApplyFocusSettings(
++    const base::ListValue& args) {
++  CHECK_EQ(2U, args.size());
++  const auto& callback_id = args[0].GetString();
++
++  if (!args[1].is_dict()) {
++    return RejectJavascriptCallback(callback_id, "settings must be a dict");
++  }
++
++  const auto& settings = args[1].GetDict();
++  const std::optional<bool> quiet_notifications =
++      settings.FindBool("quietNotifications");
++  const std::optional<bool> minimal_interface =
++      settings.FindBool("minimalInterface");
++  if (!quiet_notifications || !minimal_interface) {
++    return RejectJavascriptCallback(callback_id, "invalid focus settings");
++  }
++
++  auto* content_settings =
++      HostContentSettingsMapFactory::GetForProfile(profile_);
++  content_settings->SetDefaultContentSetting(
++      ContentSettingsType::NOTIFICATIONS,
++      *quiet_notifications ? CONTENT_SETTING_BLOCK : CONTENT_SETTING_ASK);
++
++  if (*minimal_interface) {
++    pref_service_->SetBoolean(prefs::kShowHomeButton, false);
++    pref_service_->SetBoolean(bookmarks::prefs::kShowBookmarkBar, false);
++  }
++
++  AllowJavascript();
++  ResolveJavascriptCallback(callback_id, {});
++}
+diff --git a/chrome/browser/ui/webui/onboarding/onboarding_handler.h b/chrome/browser/ui/webui/onboarding/onboarding_handler.h
+index 3c529076059f6db92febe3f243fd2c5f17c2f544..8595ccc1c2686e05628cdefae3198b6625666a6a 100644
+--- a/chrome/browser/ui/webui/onboarding/onboarding_handler.h
++++ b/chrome/browser/ui/webui/onboarding/onboarding_handler.h
+@@ -37,6 +37,7 @@ class OnboardingMessageHandler : public content::WebUIMessageHandler,
+   base::DictValue GetPreferencesDict();
+   void HandleGetPreferences(const base::ListValue& args);
+   void HandleAcceptSchema(const base::ListValue& args);
++  void HandleApplyFocusSettings(const base::ListValue& args);
+   void HandleSetPreference(const base::ListValue& args);
+   void HandleGetProfileName(const base::ListValue& args);
+   void HandleSetProfileName(const base::ListValue& args);
+diff --git a/components/focus_onboarding/focus_onboarding_strings.grdp b/components/focus_onboarding/focus_onboarding_strings.grdp
+index f9cf6df1e48318e36ef61e723d32809416dc4909..d270fe4d5a8acbac1131255b8609f7c8322c519d 100644
+--- a/components/focus_onboarding/focus_onboarding_strings.grdp
++++ b/components/focus_onboarding/focus_onboarding_strings.grdp
+@@ -1,14 +1,14 @@
+ <grit-part>
+ 
+ <message name="IDS_FOCUS_ONBOARDING_PAGE_TITLE" desc="The title of the Focus setup onboarding page.">
+-  Focus Setup
++  Focus Browser Setup
+ </message>
+ 
+ <message name="IDS_FOCUS_ONBOARDING_BUTTON_USE_DEFAULTS" desc="Button label that skips detailed setup and applies the default onboarding choices.">
+-  Use defaults
++  Use focus preset
+ </message>
+ <message name="IDS_FOCUS_ONBOARDING_BUTTON_CONFIGURE" desc="Button label that starts the detailed onboarding setup flow.">
+-  Configure
++  Set up focus
+ </message>
+ <message name="IDS_FOCUS_ONBOARDING_BUTTON_NEXT" desc="Button label to continue to the next onboarding step.">
+   Next
+@@ -17,7 +17,7 @@
+   Back
+ </message>
+ <message name="IDS_FOCUS_ONBOARDING_BUTTON_LETS_GO" desc="Button label that finishes onboarding and opens the browser.">
+-  Let's go!
++  Start focusing
+ </message>
+ 
+ <message name="IDS_FOCUS_ONBOARDING_PARTNER_TITLE" desc="Badge title shown for partner services in onboarding.">
+@@ -29,11 +29,26 @@ the development of Focus.
+ </message>
+ 
+ <message name="IDS_FOCUS_ONBOARDING_WELCOME_GREETING" desc="Main greeting on the first onboarding screen.">
+-  Meet Focus
++  Focus on what matters.
+ </message>
+ <message name="IDS_FOCUS_ONBOARDING_WELCOME_BODY" desc="Introductory body text on the first onboarding screen.">
+-  Configure your browser just the way you want it, or use
+-the default preset with best privacy and comfort.
++  Focus Browser keeps the web out of the way, so your attention stays
++with the work in front of you.
++</message>
++<message name="IDS_FOCUS_ONBOARDING_WELCOME_EYEBROW" desc="Short product label above the first onboarding heading.">
++  Focus Browser - Built for deep work
++</message>
++<message name="IDS_FOCUS_ONBOARDING_WELCOME_FEATURES_LABEL" desc="Accessible label for the focus benefits listed on the welcome screen.">
++  Focus Browser benefits
++</message>
++<message name="IDS_FOCUS_ONBOARDING_WELCOME_FEATURE_QUIET" desc="Welcome screen benefit describing fewer interruptions.">
++  Quiet by default
++</message>
++<message name="IDS_FOCUS_ONBOARDING_WELCOME_FEATURE_CLEAN" desc="Welcome screen benefit describing a clean interface.">
++  Less visual noise
++</message>
++<message name="IDS_FOCUS_ONBOARDING_WELCOME_FEATURE_INTENT" desc="Welcome screen benefit describing intentional work.">
++  Built for deep work
+ </message>
+ <message name="IDS_FOCUS_ONBOARDING_WELCOME_TERMS_NOTE" desc="Legal note prefix before privacy policy and terms links.">
+   By continuing, you agree to the
+@@ -48,15 +63,37 @@ the default preset with best privacy and comfort.
+   terms of use
+ </message>
+ <message name="IDS_FOCUS_ONBOARDING_WELCOME_FOOTER" desc="Footer text explaining that setup can be skipped but Focus services require consent.">
+-  You can skip setup and come back later, but Focus services won't work without it.
++  Your choices stay under your control and can be changed anytime in Settings.
++</message>
++
++<message name="IDS_FOCUS_ONBOARDING_FOCUS_TITLE" desc="Title of the onboarding step for focus-oriented defaults.">
++  Choose your focus preset
++</message>
++<message name="IDS_FOCUS_ONBOARDING_FOCUS_SUBTITLE" desc="Subtitle of the onboarding step for focus-oriented defaults.">
++  Start with fewer interruptions and less visual noise. You can change these choices later.
++</message>
++<message name="IDS_FOCUS_ONBOARDING_FOCUS_QUIET_TITLE" desc="Title of the option to block website notification prompts.">
++  Quiet notifications
++</message>
++<message name="IDS_FOCUS_ONBOARDING_FOCUS_QUIET_DESC" desc="Description of the option to block website notification prompts.">
++  Block websites from interrupting your work with notification requests.
++</message>
++<message name="IDS_FOCUS_ONBOARDING_FOCUS_MINIMAL_TITLE" desc="Title of the option to use a minimal browser interface.">
++  Minimal interface
++</message>
++<message name="IDS_FOCUS_ONBOARDING_FOCUS_MINIMAL_DESC" desc="Description of the option to use a minimal browser interface.">
++  Hide the Home button and bookmarks bar. Your bookmarks remain available in the menu.
++</message>
++<message name="IDS_FOCUS_ONBOARDING_FOCUS_NOTE" desc="Note below focus preset options explaining that choices are reversible.">
++  Recommended for focused work. Nothing is permanent - all options remain available in Settings.
+ </message>
+ 
+ <message name="IDS_FOCUS_ONBOARDING_FINISH_TITLE" desc="Title on the final onboarding screen.">
+-  Ready to browse?
++  Your focus space is ready
+ </message>
+ <message name="IDS_FOCUS_ONBOARDING_FINISH_BODY" desc="Body text on the final onboarding screen.">
+-  The setup is complete, thank you for choosing Focus.
+-Time to enjoy the Internet again.
++  Focus Browser is configured. Open a task, clear the noise,
++and make meaningful progress.
+ </message>
+ 
+ <message name="IDS_FOCUS_ONBOARDING_SERVICES_TITLE" desc="Title of the onboarding screen for Focus services consent.">
+diff --git a/components/focus_onboarding/index.html b/components/focus_onboarding/index.html
+index 326bffe64642a28c9629b3cfb22fbad7a7431490..d6649cf8879497967006f9730c99a1d61b2f9c85 100644
+--- a/components/focus_onboarding/index.html
++++ b/components/focus_onboarding/index.html
+@@ -5,7 +5,7 @@
+     <meta charset="UTF-8" />
+     <link rel="icon" type="image/png" href="/favicon.png" />
+     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+-    <title>Focus Setup</title>
++    <title>Focus Browser Setup</title>
+ </head>
+ 
+ <body>
+diff --git a/components/focus_onboarding/src/app.css b/components/focus_onboarding/src/app.css
+index fde38a64b810490b897c3690d09c9944355d5b3f..0480f69518e0f5473b3ab3c1b9b06ec9b103eedd 100644
+--- a/components/focus_onboarding/src/app.css
++++ b/components/focus_onboarding/src/app.css
+@@ -4,7 +4,7 @@
+     font-weight: 500;
+     letter-spacing: -0.01rem;
+ 
+-    color: #ffffff;
++    color: #f7f7f8;
+ 
+     font-synthesis: none;
+     text-rendering: optimizeLegibility;
+@@ -13,33 +13,32 @@
+ 
+     user-select: none;
+ 
+-    --primary: #0d1c64;
+-    --secondary: #475a7f;
++    --primary: #f7f7f8;
++    --secondary: #a1a1aa;
+ 
+     --white: #ffffff;
+ 
+-    --focus-blue: #3450d1;
+-    --focus-blue-hover: #3a58db;
+-    --focus-blue-press: #304bc2;
++    --focus-blue: #f4f4f5;
++    --focus-blue-hover: #ffffff;
++    --focus-blue-press: #d4d4d8;
+ 
+     color: var(--primary);
+ 
+-    --background: #fbfcff;
++    --background: #050505;
+ 
+-    --bg-gradient-start: #e3e8ff;
+-    --bg-gradient-end: #f4f7ff;
+-    --bg-gradient-end-rgb: 244, 247, 255;
++    --bg-gradient-start: #141414;
++    --bg-gradient-end: #050505;
++    --bg-gradient-end-rgb: 5, 5, 5;
+ 
+-    --tooltip-bg: rgb(234, 237, 253);
+-    --tooltip-shadow: rgba(155, 166, 216, 0.5);
++    --tooltip-bg: #1b1b1d;
++    --tooltip-shadow: rgba(0, 0, 0, 0.55);
+ 
+-    --background-gradient: linear-gradient(
+-        180deg,
+-        var(--bg-gradient-start) 0%,
+-        var(--bg-gradient-end) 100%
+-    );
++    --background-gradient:
++        radial-gradient(circle at 50% -20%, rgba(255, 255, 255, 0.12), transparent 42%),
++        radial-gradient(circle at 85% 90%, rgba(255, 255, 255, 0.045), transparent 30%),
++        var(--background);
+ 
+-    --focus-elevated: 52, 80, 209;
++    --focus-elevated: 255, 255, 255;
+     --focus-elevated-5: rgba(var(--focus-elevated), 0.05);
+     --focus-elevated-7: rgba(var(--focus-elevated), 0.07);
+     --focus-elevated-10: rgba(var(--focus-elevated), 0.1);
+@@ -57,26 +56,6 @@
+     );
+ }
+ 
+-@media (prefers-color-scheme: dark) {
+-    :root {
+-        --primary: #e3e6f2;
+-        --secondary: #8f9bcb;
+-
+-        --white: var(--primary);
+-
+-        --background: #0e1123;
+-
+-        --tooltip-bg: rgb(29, 42, 93);
+-        --tooltip-shadow: rgba(20, 35, 95, 0.5);
+-
+-        --bg-gradient-start: #151932;
+-        --bg-gradient-end: #2d3c7f;
+-        --bg-gradient-end-rgb: 45, 60, 127;
+-
+-        --focus-elevated: 179, 190, 236;
+-    }
+-}
+-
+ html {
+     background: var(--background);
+ }
+@@ -90,6 +69,18 @@ body {
+     overflow: hidden;
+ }
+ 
++body::before {
++    content: '';
++    position: fixed;
++    inset: 0;
++    pointer-events: none;
++    opacity: 0.24;
++    background-image: linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
++        linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
++    background-size: 48px 48px;
++    mask-image: radial-gradient(circle at center, black, transparent 75%);
++}
++
+ *::-webkit-scrollbar {
+     display: none;
+ }
+@@ -167,7 +158,8 @@ button, .button {
+ 
+     font-size: 16px;
+     padding: 11px 18px;
+-    border-radius: 12px;
++    border-radius: 14px;
++    border: 1px solid rgba(255, 255, 255, 0.08);
+ 
+     transition: 0.2s background-color, 0.2s transform, 0.2s opacity;
+     will-change: transform;
+@@ -186,8 +178,9 @@ button, .button {
+     }
+ 
+     &.primary {
+-        color: var(--white);
++        color: #09090b;
+         background-color: var(--focus-blue);
++        box-shadow: 0 8px 28px rgba(255, 255, 255, 0.08);
+ 
+         &:hover {
+             background-color: var(--focus-blue-hover);
+@@ -201,8 +194,9 @@ button, .button {
+     &.big {
+         width: -webkit-fill-available;
+         text-align: left;
+-        border-radius: 24px;
++        border-radius: 20px;
+         padding: 16px 21px;
++        background: rgba(255, 255, 255, 0.045);
+ 
+         &:hover {
+             &:active {
+@@ -224,7 +218,7 @@ button, .button {
+     }
+ 
+     &.selected {
+-        box-shadow: 0 0 0 2px var(--primary) inset;
++        box-shadow: 0 0 0 1.5px var(--primary) inset;
+     }
+ 
+     & svg {
+@@ -266,7 +260,7 @@ a:focus-visible {
+ }
+ 
+ .scrollable-page {
+-    max-width: 600px;
++    max-width: 680px;
+     overflow-x: scroll;
+     overflow-y: visible;
+     /* accommodation for outline */
+@@ -285,6 +279,20 @@ a:focus-visible {
+     align-items: center;
+ }
+ 
++@media (max-width: 720px) {
++    h1 {
++        font-size: clamp(38px, 10vw, 52px);
++    }
++
++    h2 {
++        font-size: 28px;
++    }
++
++    .scrollable-page {
++        width: calc(100vw - 32px);
++    }
++}
++
+ @keyframes page-in {
+     from {
+         translate: 0 30px;
+diff --git a/components/focus_onboarding/src/components/PageNavigation.svelte b/components/focus_onboarding/src/components/PageNavigation.svelte
+index 52bd89ea3494a97ad6f55c525ca9325ed276b941..2afcb414a80f1b7d07417a0c4f814b62d7ec3c9b 100644
+--- a/components/focus_onboarding/src/components/PageNavigation.svelte
++++ b/components/focus_onboarding/src/components/PageNavigation.svelte
+@@ -1,12 +1,14 @@
+ <script lang="ts">
+     import { s } from "../lib/strings";
+     import { SvelteSet } from "svelte/reactivity";
+-    import { acceptLatestSchema, askToBeDefault, importProfile, setPref } from "../lib/browser";
++    import { acceptLatestSchema, applyFocusSettings, askToBeDefault, importProfile, setPref } from "../lib/browser";
+     import {
+         nextPage,
+         previousPage,
+         currentPage,
+         userChoseFocusAsDefault,
++        quietNotifications,
++        minimalInterface,
+         selectedProfiles,
+         previouslyImportedProfiles,
+     } from "../lib/onboarding-flow";
+@@ -24,6 +26,13 @@
+ 
+     const doNext = async () => {
+         switch ($currentPage) {
++        case "FocusSetup":
++            await applyFocusSettings({
++                quietNotifications: $quietNotifications,
++                minimalInterface: $minimalInterface,
++            });
++            break;
++
+         case "FocusServices":
+             // if the user pressed "next" on the FocusServices page,
+             // then we mark consent (having seen the page) as true
+diff --git a/components/focus_onboarding/src/lib/browser/focus.ts b/components/focus_onboarding/src/lib/browser/focus.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..33112181bb0badd061a09717d0dcb3fd6cf75758
+--- /dev/null
++++ b/components/focus_onboarding/src/lib/browser/focus.ts
+@@ -0,0 +1,12 @@
++// Copyright 2026 The Focus Browser Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++import * as cr from "../cr";
++
++export type FocusSettings = {
++    quietNotifications: boolean;
++    minimalInterface: boolean;
++};
++
++export const applyFocusSettings = async (
++    settings: FocusSettings,
++): Promise<void> => {
++    await cr.sendWithPromise('applyFocusSettings', settings);
++};
+diff --git a/components/focus_onboarding/src/lib/browser/index.ts b/components/focus_onboarding/src/lib/browser/index.ts
+index a54aa77c5aa48cdf2b70dadd4332a2a0e4ba08df..b39d35d3b3a409289e5ba1d853bef4786411cb66 100644
+--- a/components/focus_onboarding/src/lib/browser/index.ts
++++ b/components/focus_onboarding/src/lib/browser/index.ts
+@@ -4,5 +4,6 @@ export * from "./importer";
+ export * from "./extensions";
+ export * from "./is-default";
+ export * from "./search-engines";
++export * from "./focus";
+ 
+ export { setup } from "./setup";
+diff --git a/components/focus_onboarding/src/lib/onboarding-flow.ts b/components/focus_onboarding/src/lib/onboarding-flow.ts
+index 64a5cd5721690edf5f0e74b07a5b309db2825f6b..c9cf9c8ac2bc3da7fa972e0aa5f3b335a0799e13 100644
+--- a/components/focus_onboarding/src/lib/onboarding-flow.ts
++++ b/components/focus_onboarding/src/lib/onboarding-flow.ts
+@@ -6,6 +6,7 @@ import { canBeDefaultBrowser, importableProfiles, isDefaultBrowser } from "./bro
+ 
+ export const flow = [
+     "Welcome",
++    "FocusSetup",
+     "FocusServices",
+     "SearchEngine",
+     "DataImport",
+@@ -68,5 +69,7 @@ export const previousPage = () => {
+ }
+ 
+ export const userChoseFocusAsDefault = writable(true);
++export const quietNotifications = writable(true);
++export const minimalInterface = writable(true);
+ export const selectedProfiles = writable(new SvelteSet<number>());
+ export const previouslyImportedProfiles = writable(new SvelteSet<number>());
+diff --git a/components/focus_onboarding/src/pages/FocusSetup.svelte b/components/focus_onboarding/src/pages/FocusSetup.svelte
+new file mode 100644
+index 0000000000000000000000000000000000000000..d218235b2bb8645a12e9b7d6014290e61dd3c9a7
+--- /dev/null
++++ b/components/focus_onboarding/src/pages/FocusSetup.svelte
+@@ -0,0 +1,145 @@
++<!-- Copyright 2026 The Focus Browser Authors
++     You can use, redistribute, and/or modify this source code under
++     the terms of the GPL-3.0 license that can be found in the LICENSE file. -->
++
++<script lang="ts">
++    import { s } from "../lib/strings";
++    import {
++        currentPage,
++        minimalInterface,
++        quietNotifications,
++    } from "../lib/onboarding-flow";
++
++    import PageHeader from "../components/PageHeader.svelte";
++    import IconLockStar from "../icons/tabler/IconLockStar.svelte";
++    import IconCheck from "../icons/tabler/IconCheck.svelte";
++
++    const visible = $derived($currentPage === "FocusSetup");
++</script>
++
++<div id="focus-page" class="onboarding-page" class:visible>
++    <div id="focus-page-container" class="scrollable-page">
++        <PageHeader
++            title={s.focus.title}
++            subtitle={s.focus.subtitle}
++            Icon={IconLockStar}
++        />
++
++        <div id="focus-options" class="page-content">
++            <button
++                class="focus-option"
++                class:selected={$quietNotifications}
++                role="switch"
++                aria-checked={$quietNotifications}
++                onclick={() => $quietNotifications = !$quietNotifications}
++            >
++                <span class="option-check"><IconCheck /></span>
++                <span class="option-copy">
++                    <h4>{s.focus.quietTitle}</h4>
++                    <p>{s.focus.quietDesc}</p>
++                </span>
++            </button>
++
++            <button
++                class="focus-option"
++                class:selected={$minimalInterface}
++                role="switch"
++                aria-checked={$minimalInterface}
++                onclick={() => $minimalInterface = !$minimalInterface}
++            >
++                <span class="option-check"><IconCheck /></span>
++                <span class="option-copy">
++                    <h4>{s.focus.minimalTitle}</h4>
++                    <p>{s.focus.minimalDesc}</p>
++                </span>
++            </button>
++
++            <p id="focus-note">{s.focus.note}</p>
++        </div>
++    </div>
++</div>
++
++<style>
++    #focus-page {
++        justify-content: flex-start;
++        visibility: hidden;
++
++        &.visible {
++            visibility: visible;
++            animation: page-in 0.3s 0.05s backwards;
++        }
++
++        &:not(.visible) {
++            animation: page-out 0.2s forwards;
++        }
++    }
++
++    #focus-page-container {
++        width: min(680px, calc(100vw - 32px));
++    }
++
++    #focus-options {
++        width: 100%;
++        gap: 12px;
++    }
++
++    .focus-option {
++        width: 100%;
++        padding: 20px;
++        display: grid;
++        grid-template-columns: 38px 1fr;
++        align-items: start;
++        gap: 15px;
++        text-align: left;
++        border-radius: 20px;
++        color: var(--primary);
++        background: rgba(255, 255, 255, 0.035);
++        border: 1px solid rgba(255, 255, 255, 0.08);
++        box-shadow: none;
++
++        &:hover {
++            background: rgba(255, 255, 255, 0.06);
++        }
++
++        &.selected {
++            background: rgba(255, 255, 255, 0.075);
++            border-color: rgba(255, 255, 255, 0.34);
++            box-shadow: 0 16px 45px rgba(0, 0, 0, 0.2);
++        }
++    }
++
++    .option-check {
++        width: 36px;
++        height: 36px;
++        display: grid;
++        place-items: center;
++        border-radius: 12px;
++        color: transparent;
++        background: rgba(255, 255, 255, 0.07);
++        border: 1px solid rgba(255, 255, 255, 0.11);
++        transition: 0.2s color, 0.2s background, 0.2s transform;
++    }
++
++    .selected .option-check {
++        color: #09090b;
++        background: #f4f4f5;
++        transform: scale(1.03);
++    }
++
++    .option-check :global(svg) {
++        width: 18px;
++        height: 18px;
++    }
++
++    .option-copy {
++        display: flex;
++        flex-direction: column;
++        gap: 7px;
++    }
++
++    .option-copy p {
++        line-height: 1.45;
++    }
++
++    #focus-note {
++        margin-top: 8px;
++        color: #71717a;
++        font-size: 13px;
++    }
++</style>
+diff --git a/components/focus_onboarding/src/pages/Welcome.svelte b/components/focus_onboarding/src/pages/Welcome.svelte
+index 2b3752e029245cd1440a26ebd99ce29963bf562a..1e281937f4f7a5dee0c0264714460ce3de91111f 100644
+--- a/components/focus_onboarding/src/pages/Welcome.svelte
++++ b/components/focus_onboarding/src/pages/Welcome.svelte
+@@ -1,25 +1,26 @@
+ <script lang="ts">
+     import { s } from "../lib/strings";
+-    import { setPref, acceptLatestSchema } from "../lib/browser";
++    import { applyFocusSettings, setPref, acceptLatestSchema } from "../lib/browser";
+     import { currentPage, nextPage } from "../lib/onboarding-flow";
+ 
+-    import OuterLink from "../components/OuterLink.svelte";
+-
+     import FocusLogo from "../icons/FocusLogo.svelte";
+     import IconCheck from "../icons/tabler/IconCheck.svelte";
+     import IconArrowRight from "../icons/tabler/IconArrowRight.svelte";
+ 
+-    const useDefaults = async () => {
++    const useFocusPreset = async () => {
+         acceptLatestSchema();
+-        await setPref('services.user_consented', true);
++        await Promise.all([
++            applyFocusSettings({
++                quietNotifications: true,
++                minimalInterface: true,
++            }),
++            setPref('services.user_consented', true),
++        ]);
+         await setPref('completed_onboarding', true);
+         window.open("chrome://newtab", "_self");
+     }
+ 
+     const visible = $derived($currentPage === "Welcome");
+-
+-    const privacyUrl = "https://focus.computer/privacy";
+-    const termsUrl = "https://focus.computer/terms";
+ </script>
+ 
+ <div
+@@ -27,52 +28,46 @@
+     class="onboarding-page"
+     class:visible
+ >
+-    <div id="welcome-page-container">
+-        <div id="welcome-top">
+-            <div id="welcome-logo-text">
+-                <div id="welcome-logo">
+-                    <FocusLogo />
+-                </div>
+-                <div id="welcome-text">
+-                    <h1 id="welcome-greet">
+-                        {s.welcome.greeting}
+-                    </h1>
+-                    <p id="welcome-body">
+-                        {s.welcome.body}
+-                    </p>
+-                </div>
+-            </div>
+-            <div id="welcome-buttons" class="action-buttons">
+-                <button onclick={useDefaults}>
+-                    <IconCheck />
+-                    {s.button.useDefaults}
+-                </button>
+-                <button class="primary" onclick={nextPage}>
+-                    <IconArrowRight />
+-                    {s.button.configure}
+-                </button>
++    <div id="welcome-shell">
++        <div id="welcome-mark" aria-hidden="true">
++            <FocusLogo />
++        </div>
++
++        <div id="welcome-copy">
++            <div id="welcome-eyebrow">
++                <span class="status-dot"></span>
++                {s.welcome.eyebrow}
+             </div>
++            <h1 id="welcome-greet">{s.welcome.greeting}</h1>
++            <p id="welcome-body">{s.welcome.body}</p>
++        </div>
++
++        <div id="focus-signals" aria-label={s.welcome.featuresLabel}>
++            <span><IconCheck /> {s.welcome.featureQuiet}</span>
++            <span><IconCheck /> {s.welcome.featureClean}</span>
++            <span><IconCheck /> {s.welcome.featureIntent}</span>
+         </div>
+-        <div id="welcome-footer">
+-            <p id="legal-note">
+-                {s.welcome.termsNote}
+-                <OuterLink href={privacyUrl}>
+-                    {s.welcome.termsPrivacy}
+-                </OuterLink>
+-                {s.welcome.termsAnd}
+-                <OuterLink href={termsUrl}>
+-                    {s.welcome.termsUse}
+-                </OuterLink>.
+-            </p>
+-
+-            <p>{s.welcome.footer}</p>
++
++        <div id="welcome-buttons" class="action-buttons">
++            <button class="preset" onclick={useFocusPreset}>
++                <IconCheck />
++                {s.button.useDefaults}
++            </button>
++            <button class="primary" onclick={nextPage}>
++                {s.button.configure}
++                <IconArrowRight />
++            </button>
+         </div>
++
++        <p id="welcome-footer">{s.welcome.footer}</p>
+     </div>
+ </div>
+ 
+ <style>
+     #welcome-page {
+         visibility: hidden;
++        padding: 24px;
++        box-sizing: border-box;
+ 
+         &.visible {
+             visibility: visible;
+@@ -84,100 +79,183 @@
+         }
+     }
+ 
+-    #welcome-top,
+-    #welcome-text,
+-    #welcome-logo-text {
++    #welcome-shell {
++        width: min(880px, calc(100vw - 48px));
+         display: flex;
+         flex-direction: column;
++        align-items: center;
++        gap: 28px;
++        position: relative;
++    }
++
++    #welcome-mark {
++        width: 86px;
++        height: 86px;
++        display: grid;
++        place-items: center;
++        border-radius: 24px;
++        background: #000;
++        border: 1px solid rgba(255, 255, 255, 0.14);
++        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55),
++            0 0 0 8px rgba(255, 255, 255, 0.025);
+     }
+ 
+-    #welcome-page-container {
+-        max-width: 700px;
++    #welcome-mark :global(svg) {
++        height: 54px;
++        width: 54px;
+     }
+ 
+-    #welcome-top,
+-    #welcome-logo-text {
+-        height: 100%;
+-        gap: 32px;
++    #welcome-copy {
++        display: flex;
++        flex-direction: column;
++        align-items: center;
++        gap: 16px;
++        max-width: 820px;
++    }
++
++    #welcome-eyebrow {
++        display: inline-flex;
++        align-items: center;
++        gap: 9px;
++        color: #d4d4d8;
++        font-size: 13px;
++        line-height: 1;
++        letter-spacing: 0.12em;
++        text-transform: uppercase;
++    }
++
++    .status-dot {
++        width: 7px;
++        height: 7px;
++        border-radius: 50%;
++        background: #f4f4f5;
++        box-shadow: 0 0 18px rgba(255, 255, 255, 0.8);
++    }
++
++    #welcome-greet {
++        max-width: 820px;
++        font-size: clamp(52px, 7vw, 82px);
++        line-height: 0.98;
++        letter-spacing: -0.065em;
++        text-wrap: balance;
++    }
++
++    #welcome-body {
++        max-width: 660px;
++        font-size: 20px;
++        line-height: 1.5;
++        text-wrap: balance;
++    }
++
++    #focus-signals {
++        display: flex;
+         justify-content: center;
++        flex-wrap: wrap;
++        gap: 10px;
++    }
++
++    #focus-signals span {
++        display: inline-flex;
+         align-items: center;
++        gap: 7px;
++        padding: 9px 13px;
++        border-radius: 999px;
++        color: #d4d4d8;
++        background: rgba(255, 255, 255, 0.04);
++        border: 1px solid rgba(255, 255, 255, 0.08);
++        font-size: 13px;
+     }
+ 
+-    #welcome-logo-text,
+-    #welcome-text {
+-        gap: 16px
++    #focus-signals :global(svg) {
++        width: 15px;
++        height: 15px;
+     }
+ 
+-    #welcome-logo-text {
+-        max-width: 600px;
++    #welcome-buttons {
++        margin-top: 4px;
+     }
+ 
+-    #welcome-logo :global(svg) {
+-        height: 64px;
+-        width: 64px;
++    #welcome-buttons button {
++        min-height: 48px;
++        padding-inline: 22px;
++        border-radius: 999px;
++    }
++
++    #welcome-buttons .preset {
++        color: #e4e4e7;
++        background: rgba(255, 255, 255, 0.055);
++    }
++
++    #welcome-footer {
++        color: #71717a;
++        font-size: 12px;
+     }
+ 
+     .visible {
+-        #welcome-logo {
+-            animation: intro-logo 0.6s;
+-            animation-delay: 0.6s;
++        #welcome-mark {
++            animation: intro-logo 0.55s 0.15s both;
+         }
+ 
++        #welcome-eyebrow,
+         #welcome-greet,
+         #welcome-body,
++        #focus-signals,
+         #welcome-buttons,
+         #welcome-footer {
+-            animation: intro-in 0.35s;
++            animation: intro-in 0.4s both;
+         }
+ 
+-        #welcome-greet {
+-            animation-delay: 0.9s;
++        #welcome-eyebrow { animation-delay: 0.35s; }
++        #welcome-greet { animation-delay: 0.42s; }
++        #welcome-body { animation-delay: 0.5s; }
++        #focus-signals { animation-delay: 0.58s; }
++        #welcome-buttons { animation-delay: 0.66s; }
++        #welcome-footer { animation-delay: 0.74s; }
++    }
++
++    @media (max-width: 640px) {
++        #welcome-shell {
++            gap: 20px;
+         }
+ 
+-        #welcome-body {
+-            animation-delay: 1s;
++        #welcome-mark {
++            width: 72px;
++            height: 72px;
++            border-radius: 20px;
+         }
+ 
+-        #welcome-buttons {
+-            animation-delay: 1.1s;
++        #welcome-mark :global(svg) {
++            width: 44px;
++            height: 44px;
+         }
+ 
+-        #welcome-footer {
+-            animation-delay: 1.3s;
++        #welcome-greet {
++            font-size: clamp(44px, 13vw, 64px);
+         }
+ 
+-        #welcome-logo,
+-        #welcome-greet,
+-        #welcome-body,
+-        #welcome-buttons,
+-        #welcome-footer {
+-            animation-fill-mode: both;
+-            will-change: translate, filter, opacity;
++        #welcome-body {
++            font-size: 17px;
+         }
+-    }
+ 
+-    #welcome-text p {
+-        font-size: 20px;
+-    }
++        #focus-signals {
++            display: none;
++        }
+ 
+-    #welcome-footer {
+-        bottom: 32px;
+-        position: absolute;
+-        display: flex;
+-        justify-content: center;
+-        flex-direction: column;
+-        width: 100%;
+-        left: 0;
+-    }
++        #welcome-buttons {
++            width: min(420px, 100%);
++            flex-direction: column-reverse;
++        }
+ 
+-    #welcome-footer p {
+-        font-size: 12px;
++        #welcome-buttons button {
++            width: 100%;
++            justify-content: center;
++        }
+     }
+ 
+     @media (prefers-reduced-motion) {
+         #welcome-page.visible * {
+-            animation-delay: 0.2s;
+-            animation-duration: 0.5s;
++            animation-delay: 0s;
++            animation-duration: 0.15s;
+         }
+     }
+ </style>
+diff --git a/components/focus_onboarding/src/pages/index.ts b/components/focus_onboarding/src/pages/index.ts
+index e97d6e823da2dc22f5a4cf04f7c20f2b8d6af482..167d3efc0ddac9cf1a43ffd30a9051bc1bf87ffa 100644
+--- a/components/focus_onboarding/src/pages/index.ts
++++ b/components/focus_onboarding/src/pages/index.ts
+@@ -1,4 +1,5 @@
+ export { default as Welcome } from "./Welcome.svelte";
++export { default as FocusSetup } from "./FocusSetup.svelte";
+ export { default as FocusServices } from "./FocusServices.svelte";
+ export { default as SearchEngine } from "./SearchEngine.svelte";
+ export { default as DataImport } from "./DataImport.svelte";
+diff --git a/components/focus_onboarding/public/favicon.png b/components/focus_onboarding/public/favicon.png
+index d28c28a847ce0a67e83a0f181dd06b24450a1ac2..a7fb06dc81ff7e0c774d8916df472eddfde8cfa5 100644
+GIT binary patch
+literal 592
+zcmeAS@N?(olHy`uVBq!ia0vp^4Is?H1|$#LC7xzrU=sIqaSW-r_4aOHUbBG!TVinG
+zf9>7u9#O7b55E4pZ}WZOs~&OY&gve+XAU~{|5%tB7!(*d7!cHjxtHfZkb3s#-PBWs
+zGTwFX51(G}JT;ulk%2okyyJlCf`)=>hC{3lyBHoVUB5%v!t=byeY1vFm%>lwNi)1$
+z$QU9TA6e1Opw)HX^Vc@U5aIo+zr1Byp|Y>}OD@w2rG2x%d}0g{xF1<{lOe3ze`1_b
+z!_-g0N2hZw_-+0Dp>g9A?gQD8j1%-3r0p0LtQuB_?Vl?1%WT4rUgjTZU*i?yY-Yb>
+zyw_PQE?B_1A*orN;paidJBslEtV};#4yoHe{&l~EDPk!j;~&+Te;zh;?4GCEaeBJ5
+zJa_)~8!QDM-HOk>ob9+fPe=H@-lP4JPg(>X$1-p}o?oKgQZZv|F#}(t0b_?a!^?B*
+z3intP;uw~2H~i>en78ZS@_j~jlaKzM<M2Y#@rXFzg3J4p1sw!`9%+{oa;<rx7<i=r
+z4ztpUawm=;<_*7mL7{mdj?v=(@#Y2MjdsW03N>6|SW_o_;A=dC00RpHqXUCkgCXM%
+zRue{W$Zud20f{OoGn{AeVc<9*3y+Z;23C-2pr!=o3?>lc6H~!obD*{@ybtyZ=Kq<^
+z;K6ag%bYPzNubr6;ayZtGLQT*kUVmPf_Sw*S<lqZX?d5r)|vqbJYD@<);T3K0RWi>
+B-AVue
+
+delta 1439
+zcmV;Q1z`Hn1f~m+8Gi!+008vhk@)}s0De$RR7C&)05nk1G*HqwP|q|_(lt=hG*Hnr
+zP|!0_(KJxeG*HttP|q|_(KS%fHBit%P|q+>&oofdHBiwtP|-9{(f|MdO=j2T>G|^X
+z{LItyL0i<Br|4&V-GGtejGg7Pz3!&6>)GD+bcf)-$njcn+JCdX?Tww~rn2g1eB4@b
+z*-H(@ssI206m(KfQvlz;AdsK$a8S=cK!DGm5D>3mFs>!?<NyE!!%0LzRCwCN)md(X
+zKoA7bo?$0=uLc5!gy4_d|AfJkvv_18rySs2pj$JgY8m6jQMO)NYX%`WW?=1Zoki(E
+z{$LaP3I1K;$A25SM`}Y%B}nfWk4c%|SMV$*7kDx%3NZt-mk~Z@;@{5x3bRSP8{cm*
+zBjYVQA23_Fw!+L3CV$f<agPN=P5@>Xeg`qYBCK3IVIiM)!GM-`HF);n2WU#wJ_jv*
+zECJQ4o)zz4Ss83W$_u@yK?=`(7=zQ6`lZXkiRluodVl??Xh88rBmv=6sG|mBB_d$7
+z>MB7IIe_t|u4hm@vITN=^`OKOfl;Ze1|^aVltLXXC>h&>ojQ)71hNC=MI9$l0<oaf
+z>Hx>G3p9GI0LO{}<w(|m%Y1NNF1ZcEFc7_jhBEcDEhPwg{|go^P%uqI#^T#$6F-V$
+zTJ#DK{(rLv7k+`@7y~W=s_D`o=t`&RM*+Lj3`7bu#+5OUfmq4Bk{AN1F@D(Ug+V~G
+zKVbZFw-i)?l;y_r`20b(?+jd51<HURZBPfnX&Wk?Fa)G}?aFnt$3Pl*p)CnSypqj9
+zaA?Ob^d*6TH%>ARscAQ6q1Xa;#%BviRLe^{CV#ADAVW~vFtqY0Vn$dJsF=b}WgLKz
+zl;aoTnn1^#_%(gaw&#6u4zCFiH1f>xlyw~nV@)7IWzhQ|7_zQw<i%0EK_$|g;~}xo
+zXo~_T4DzdEljGOuivm5u;GX^*<t;25446~_jn1&!u*=Vzef(Qa#@A4X_6U{s{K!Ct
+zEq`}&Jq{*S@9U#Ug+(>pjuL`HKqx!>a7!UL1q7-QE?A292?%{a!4W)%fCSQAyk9`5
+z3>!OmegWaOJA&sD@CR~8@qPiDG91Bk3fO`42hT4cOVb3d!GWU%42}3*z1b}%2m?_#
+zVu4Ok>(83-tDs2R_kY1UqciG+Y~%of-+#3iYjQH=ob2u-v9vEBPAnok^(w;jC)`?5
+zS?goSyLCJ2B!L0|;W0!RPyir229-#l0Qk@2f)s%8SoBzeN5I0%lRMvRzLK3JUVvoQ
+zKCJE?bSw*0kOC8)Dj)p0Bucnn=dy7DJ9g*yF%d=gw#RN|y0m6hy){#SHG|A)X@4@O
+zNr&c?(NqlC^SoIBCA0i&K%tDXX_%CnmOo`88a5*+UKUbSKu86}bdllB%ofw(L1mbl
+z4{D}$R<sN%BX0TaQEj!=DH|0~SdUSxYn<PPtW{he9{6)|)V%``*PCOBLRzv^Wz(@r
+zVzvO@{^Ztk5|YlJdd4&f&X22hkAGJ3_=H;*o-H6!k~=57#uK|?wLV;$+<x(t#(xh)
+zZ~k;U+Q;k8p6`cmU>LlG!zGBL{;`8tp#?<xtrx;Y8<|4=V+S!4K0(xct|5G|p|Y&G
+z^+J4!DIugaw_b?N@C}VvOQ%%bXkZREwaUGAWkdLY+IsbyZ`7u(cj*y;)_>THu@q+<
+zg1EJIr-b5m(cB)zgmLTdcL+wRif|@l8E_B|4T5_ca`C8l_-QMj24Fp=K_}pg(3ZJ)
+zWI3T881J~<q;BBwg}X5S9^=U8ne|Jy!SjWYsY|`%Oa({K^CCEbuo3jP3Z4_Z!|?l+
+tP2kTKtIPO5VR)DE|HWeFe;67!{vQH}*$d9OgO&gQ002ovPDHLkV1gTHt?>W=
+
+diff --git a/components/focus_onboarding/src/icons/FocusLogo.svelte b/components/focus_onboarding/src/icons/FocusLogo.svelte
+index 0c0f9aa..57fdf22 100644
+--- a/components/focus_onboarding/src/icons/FocusLogo.svelte
++++ b/components/focus_onboarding/src/icons/FocusLogo.svelte
+@@ -1 +1,30 @@
+-<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M152.62 237.85L128 256L103.38 237.85L114.568 151.248L45.05 204.22L17 192L20.425 161.635L101.128 128L20.425 94.365L17 64L45.05 51.78L114.568 104.752L103.38 18.15L128 0L152.62 18.15L141.432 104.752L210.95 51.78L239 64L235.575 94.365L154.872 128L235.575 161.635L239 192L210.95 204.22L141.432 151.248L152.62 237.85Z" fill="currentColor"/></svg>
++<svg
++    width="256"
++    height="256"
++    viewBox="0 0 256 256"
++    fill="none"
++    xmlns="http://www.w3.org/2000/svg"
++>
++    <rect width="256" height="256" fill="#000000" />
++    <path
++        d="M62 84C71 62 98 51 126 43C153 35 180 29 198 31"
++        stroke="#ffffff"
++        stroke-width="31"
++        stroke-linecap="round"
++        stroke-linejoin="round"
++    />
++    <path
++        d="M116 57C108 91 98 127 89 163C82 190 75 215 79 226"
++        stroke="#ffffff"
++        stroke-width="31"
++        stroke-linecap="round"
++        stroke-linejoin="round"
++    />
++    <path
++        d="M79 151C108 135 140 121 169 111"
++        stroke="#ffffff"
++        stroke-width="30"
++        stroke-linecap="round"
++        stroke-linejoin="round"
++    />
++</svg>

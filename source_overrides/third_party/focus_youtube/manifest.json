@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "name": "FocusYoutube",
+  "short_name": "FocusYoutube",
+  "description": "Встроенная защита Focus Browser от отвлекающих элементов YouTube.",
+  "author": "Focus Browser",
+  "version": "1.6.9.1",
+  "minimum_chrome_version": "120",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtIXNW75EjyFIHCzc3NIg98OzoZUvwM4S3zyZ/JTgGqQ8Bcrs4TMYQ++kK3j/RkpiRyN2vPPEeqXRTvGQ9Ctz/m6x7yjuzUnAQak+RzevufMk+sI+NGxVxDJbAP/KO3GiNCgzLLt70Y3OBhE2fWzrciXnNmpX6jxLU6uWrWWs/F/qHU8l97i8rwU0RuIyfsZ5lvSA+lNAhDq7V7BeHGj5T3F+Pi7JbhWpNHZQA+Lh45QdEvuT91kXoiSYmu/ujGYHMMeWXyS8nSW2VaSV008WRzMlDkF7VlyKMPj7ZCpp9O4eMzGLaepk431b+TL3Nlj5c0qs5LA2dRvL379c77tzMwIDAQAB",
+  "icons": {
+    "16": "images/icon-16.png",
+    "32": "images/icon-32.png",
+    "48": "images/icon-48.png",
+    "128": "images/icon-128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "images/icon-16.png",
+      "32": "images/icon-32.png",
+      "48": "images/icon-48.png",
+      "128": "images/icon-128.png"
+    },
+    "default_popup": "popup.html",
+    "default_title": "FocusYoutube — режим без отвлечений"
+  },
+  "background": {
+    "service_worker": "background/events.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://m.youtube.com/*"
+      ],
+      "css": [
+        "content-script/main.css"
+      ],
+      "js": [
+        "shared/utils.js",
+        "shared/main.js",
+        "content-script/main.js"
+      ],
+      "all_frames": true,
+      "run_at": "document_start"
+    }
+  ],
+  "permissions": [
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://m.youtube.com/*"
+  ]
+}

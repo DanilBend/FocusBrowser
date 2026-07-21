@@ -1,0 +1,32 @@
+* text=auto
+*.patch linguist-language=C++ eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.ts text eol=lf
+*.svelte text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.gn text eol=lf
+*.gni text eol=lf
+*.grd text eol=lf
+*.grdp text eol=lf
+*.xml text eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.nsi text eol=crlf
+*.png binary
+*.ico binary
+*.gif binary
+*.jpg binary
+*.jpeg binary
+*.woff2 binary
+*.wasm binary
+*.mp3 binary
+*.mp4 binary

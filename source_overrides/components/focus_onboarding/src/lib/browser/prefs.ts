@@ -1,0 +1,42 @@
+import { readonly, writable } from "svelte/store";
+import * as cr from "../cr";
+
+export type Preferences = {
+    'completed_onboarding': boolean,
+    'ui.motion_enabled': boolean,
+    'services.bangs': boolean,
+    'services.enabled': boolean,
+    'services.ext_proxy': boolean,
+    'services.origin_override': string,
+    'services.user_consented': boolean,
+    'services.spellcheck_files': boolean,
+    'services.browser_updates': boolean,
+    'services.ublock_assets': boolean,
+};
+
+export type PrefKey = keyof Preferences;
+
+const _preferences = writable({} as Preferences);
+export const setup = () => {
+    cr.sendWithPromise<Preferences>('getPrefs').then(
+        prefs => _preferences.set(prefs)
+    );
+
+    cr.addWebUiListener(
+        'focus-prefs-changed',
+        (prefs: Preferences) => _preferences.set(prefs)
+    );
+}
+
+export const preferences = readonly(_preferences);
+
+export const setPref = async <
+    Key extends PrefKey,
+    Value extends Preferences[PrefKey]
+>(name: Key, value: Value): Promise<void> => {
+    await cr.sendWithPromise('setPref', name, value);
+}
+
+export const acceptLatestSchema = () => {
+    chrome.send("acceptLatestSchema");
+}

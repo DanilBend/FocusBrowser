@@ -1,0 +1,52 @@
+# Chromium checkout, compiled output and downloaded toolchains.
+/build/
+/.gcs_entries
+/resources/generated/
+/focus-chromium/resources/generated/
+/focus-chromium/build/
+/focus-chromium/devutils/i18n-data/
+
+# Local verification output. Keep only the small root-level QA scripts.
+/qa/**
+!/qa/*.mjs
+!/qa/*.ps1
+!/qa/README.md
+/backups/
+/publish/
+
+# Browser profiles and runtime state must never enter source control.
+**/User Data/
+**/*-profile/
+**/profiles/
+**/Crashpad/
+**/Cookies
+**/History
+**/Login Data
+**/Web Data
+**/Preferences
+**/Secure Preferences
+
+# Generated release artifacts belong in GitHub Releases, not Git history.
+*.exe
+*.msi
+*.dll
+*.pdb
+*.ilk
+*.dmp
+*.7z
+*.zip
+*.crx
+*.log
+*.tmp
+
+# Local caches and editor files.
+__pycache__/
+*.py[cod]
+.venv/
+.coverage
+.pytest_cache/
+.vs/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

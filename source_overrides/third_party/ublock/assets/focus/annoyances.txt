@@ -1,0 +1,12 @@
+! Title: Focus - Annoyances
+! Last modified: %timestamp%
+! Expires: 5 days
+! Description: Focus-specific fixes for filterlists used by Focus.
+! Homepage: https://github.com/imputnet/focus-services
+! License: https://github.com/imputnet/focus-services/blob/main/LICENSE
+!
+! All filters should include a GitHub comment explaining why
+! they are not in upstream filterlists.
+
+! https://github.com/easylist/easylist/issues/22583
+search.brave.com##dialog:has(.promo-content)

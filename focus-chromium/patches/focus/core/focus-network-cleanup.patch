@@ -1,0 +1,173 @@
+diff --git a/components/focus_services/focus_services_helpers.h b/components/focus_services/focus_services_helpers.h
+--- a/components/focus_services/focus_services_helpers.h
++++ b/components/focus_services/focus_services_helpers.h
+@@ -13,10 +13,10 @@
+ namespace focus {
+ 
+ const char kFocusDefaultOrigin[] =
+-    "https://services.focus.imput.net";
++    "https://focus-services-disabled.invalid";
+ 
+ const char kFocusDummyOrigin[] =
+-    "https://focus-services-are-disabled.qjz9zk";
++    "https://focus-services-disabled.invalid";
+ 
+ bool ShouldAccessServices(const PrefService& prefs);
+ 
+diff --git a/components/focus_services/focus_services_helpers.cc b/components/focus_services/focus_services_helpers.cc
+--- a/components/focus_services/focus_services_helpers.cc
++++ b/components/focus_services/focus_services_helpers.cc
+@@ -28,7 +28,6 @@
+ #endif
+ 
+ #if defined(UPDATES_SUPPORTED)
+-constexpr std::string_view kUpdateBaseUrl = "https://updates.focus.computer/";
+ constexpr const char kUpdatePath[] =
+ #if BUILDFLAG(IS_MAC)
+     "mac/appcast-" CPU_ARCH_STR ".xml";
+@@ -145,15 +144,15 @@ GURL GetBrowserUpdateURL(const PrefService& prefs) {
+ 
+ #if defined(UPDATES_SUPPORTED)
+   const auto* command_line = base::CommandLine::ForCurrentProcess();
+-  std::string baseUrl(kUpdateBaseUrl);
+   if (command_line->HasSwitch(focus::kUpdateServerUrlCommandLine)) {
+-    baseUrl =
+-        command_line->GetSwitchValueASCII(focus::kUpdateServerUrlCommandLine);
++    std::optional<GURL> base_url = GetValidUserOverridenURL(
++        command_line->GetSwitchValueASCII(focus::kUpdateServerUrlCommandLine));
++    if (base_url) {
++      return base_url->Resolve(kUpdatePath);
++    }
+   }
+-  return GURL(baseUrl).Resolve(kUpdatePath);
+-#else
++#endif
+   return GetDummyURL();
+-#endif
+ }
+ 
+ GURL GetComponentUpdateURL(const PrefService* prefs) {
+diff --git a/chrome/browser/extensions/updater/chrome_extension_downloader_factory.cc b/chrome/browser/extensions/updater/chrome_extension_downloader_factory.cc
+--- a/chrome/browser/extensions/updater/chrome_extension_downloader_factory.cc
++++ b/chrome/browser/extensions/updater/chrome_extension_downloader_factory.cc
+@@ -53,7 +53,6 @@ ChromeExtensionDownloaderFactory::CreateForURLLoaderFactory(
+     manifest_query_params += "&testrequest=1";
+   }
+   downloader->set_manifest_query_params(manifest_query_params);
+-  downloader->set_ping_enabled_domain("focus.computer");
+   return downloader;
+ }
+ 
+diff --git a/chrome/browser/resources/settings/privacy_page/services_page.html b/chrome/browser/resources/settings/privacy_page/services_page.html
+--- a/chrome/browser/resources/settings/privacy_page/services_page.html
++++ b/chrome/browser/resources/settings/privacy_page/services_page.html
+@@ -142,7 +142,7 @@
+     </div>
+     <cr-input
+         id="focusOriginOverride"
+-        placeholder="https://services.focus.imput.net"
++        placeholder="https://your-focus-services.example"
+         value="[[prefs.focus.services.origin_override.value]]"
+         pattern="https://.*"
+         on-keydown="onOriginOverrideKeydown_"
+diff --git a/third_party/ublock/about.html b/third_party/ublock/about.html
+--- a/third_party/ublock/about.html
++++ b/third_party/ublock/about.html
+@@ -15,11 +15,6 @@
+ 
+ <div class="body">
+     <div id="aboutNameVer" class="li"></div>
+-    <div class="li">Focus fork:</div>
+-    <div class="liul">
+-        <div class="li"><a href="https://focus.computer/privacy" data-i18n="aboutPrivacyPolicy"></a></div>
+-        <div class="li"><a href="https://github.com/imputnet/uBlock" data-i18n="aboutCode"></a></div>
+-    </div>
+     <div class="li">Upstream:</div>
+     <div class="liul">
+         <div class="li">Copyright &copy; Raymond Hill 2014-present</div>
+diff --git a/components/focus_onboarding/src/pages/Welcome.svelte b/components/focus_onboarding/src/pages/Welcome.svelte
+--- a/components/focus_onboarding/src/pages/Welcome.svelte
++++ b/components/focus_onboarding/src/pages/Welcome.svelte
+@@ -1,6 +1,6 @@
+ <script lang="ts">
+     import { s } from "../lib/strings";
+-    import { applyFocusSettings, setPref, acceptLatestSchema } from "../lib/browser";
++    import { applyFocusSettings, setPref } from "../lib/browser";
+     import { currentPage, nextPage } from "../lib/onboarding-flow";
+ 
+     import FocusLogo from "../icons/FocusLogo.svelte";
+@@ -8,13 +8,13 @@
+     import IconArrowRight from "../icons/tabler/IconArrowRight.svelte";
+ 
+     const useFocusPreset = async () => {
+-        acceptLatestSchema();
+         await Promise.all([
+             applyFocusSettings({
+                 quietNotifications: true,
+                 minimalInterface: true,
+             }),
+-            setPref('services.user_consented', true),
++            setPref('services.enabled', false),
++            setPref('services.user_consented', false),
+         ]);
+         await setPref('completed_onboarding', true);
+         window.open("chrome://newtab", "_self");
+diff --git a/components/focus_onboarding/src/components/PageNavigation.svelte b/components/focus_onboarding/src/components/PageNavigation.svelte
+--- a/components/focus_onboarding/src/components/PageNavigation.svelte
++++ b/components/focus_onboarding/src/components/PageNavigation.svelte
+@@ -1,7 +1,7 @@
+ <script lang="ts">
+     import { s } from "../lib/strings";
+     import { SvelteSet } from "svelte/reactivity";
+-    import { acceptLatestSchema, applyFocusSettings, askToBeDefault, importProfile, setPref } from "../lib/browser";
++    import { applyFocusSettings, askToBeDefault, importProfile, setPref } from "../lib/browser";
+     import {
+         nextPage,
+         previousPage,
+@@ -27,17 +27,14 @@
+     const doNext = async () => {
+         switch ($currentPage) {
+         case "FocusSetup":
+-            await applyFocusSettings({
+-                quietNotifications: $quietNotifications,
+-                minimalInterface: $minimalInterface,
+-            });
+-            break;
+-
+-        case "FocusServices":
+-            // if the user pressed "next" on the FocusServices page,
+-            // then we mark consent (having seen the page) as true
+-            await setPref("services.user_consented", true);
+-            acceptLatestSchema();
++            await Promise.all([
++                applyFocusSettings({
++                    quietNotifications: $quietNotifications,
++                    minimalInterface: $minimalInterface,
++                }),
++                setPref("services.enabled", false),
++                setPref("services.user_consented", false),
++            ]);
+             break;
+ 
+         case "DefaultBrowser":
+diff --git a/components/focus_onboarding/src/lib/onboarding-flow.ts b/components/focus_onboarding/src/lib/onboarding-flow.ts
+--- a/components/focus_onboarding/src/lib/onboarding-flow.ts
++++ b/components/focus_onboarding/src/lib/onboarding-flow.ts
+@@ -7,7 +7,6 @@
+ export const flow = [
+     "Welcome",
+     "FocusSetup",
+-    "FocusServices",
+     "SearchEngine",
+     "DataImport",
+     "PasswordManager",
+diff --git a/components/focus_onboarding/src/pages/index.ts b/components/focus_onboarding/src/pages/index.ts
+--- a/components/focus_onboarding/src/pages/index.ts
++++ b/components/focus_onboarding/src/pages/index.ts
+@@ -1,6 +1,5 @@
+ export { default as Welcome } from "./Welcome.svelte";
+ export { default as FocusSetup } from "./FocusSetup.svelte";
+-export { default as FocusServices } from "./FocusServices.svelte";
+ export { default as SearchEngine } from "./SearchEngine.svelte";
+ export { default as DataImport } from "./DataImport.svelte";
+ export { default as PasswordManager } from "./PasswordManager.svelte";

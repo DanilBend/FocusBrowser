@@ -1,0 +1,218 @@
+--- a/chrome/install_static/chromium_install_modes.h
++++ b/chrome/install_static/chromium_install_modes.h
+@@ -17,14 +17,14 @@ namespace install_static {
+ 
+ // The brand-specific company name to be included as a component of the install
+ // and user data directory paths. May be empty if no such dir is to be used.
+-inline constexpr wchar_t kCompanyPathName[] = L"";
++inline constexpr wchar_t kCompanyPathName[] = L"FocusBrowser";
+ 
+ // The brand-specific product name to be included as a component of the install
+ // and user data directory paths.
+-inline constexpr wchar_t kProductPathName[] = L"Chromium";
++inline constexpr wchar_t kProductPathName[] = L"Focus Browser";
+ 
+ // The brand-specific safe browsing client name.
+-inline constexpr char kSafeBrowsingName[] = "chromium";
++inline constexpr char kSafeBrowsingName[] = "focus_browser";
+ 
+ // Note: This list of indices must be kept in sync with the brand-specific
+ // resource strings in chrome/installer/util/prebuild/create_string_rc.
+@@ -44,46 +44,50 @@ inline constexpr auto kInstallModes = st
+             L"",  // Empty install_suffix for the primary install mode.
+         .logo_suffix = L"",  // No logo suffix for the primary install mode.
+         .app_guid =
+             L"",  // Empty app_guid since no integration with Google Update.
+-        .base_app_name = L"Chromium",              // A distinct base_app_name.
+-        .base_app_id = L"Chromium",                // A distinct base_app_id.
+-        .browser_prog_id_prefix = L"ChromiumHTM",  // Browser ProgID prefix.
++        .base_app_name = L"Focus Browser",          // A distinct base_app_name.
++        .base_app_id = L"FocusBrowser",             // A distinct base_app_id.
++        // Windows app registration reserves space for a user-specific suffix
++        // and requires this prefix to be at most 11 characters.  Keeping it
++        // short prevents the default-browser registration path from
++        // overflowing its fixed ProgID buffer.
++        .browser_prog_id_prefix = L"FocusHTM",  // Browser ProgID prefix.
+         .browser_prog_id_description =
+-            L"Chromium HTML Document",  // Browser ProgID description.
+-        .direct_launch_url_scheme = "chromium",
+-        .pdf_prog_id_prefix = L"ChromiumPDF",  // PDF ProgID prefix.
++            L"Focus Browser HTML Document",  // Browser ProgID description.
++        .direct_launch_url_scheme = "focus",
++        .pdf_prog_id_prefix = L"FocusPDF",  // PDF ProgID prefix.
+         .pdf_prog_id_description =
+-            L"Chromium PDF Document",  // PDF ProgID description.
++            L"Focus Browser PDF Document",  // PDF ProgID description.
+         .active_setup_guid =
+-            L"{7D2B3E1D-D096-4594-9D8F-A6667F12E0AC}",  // Active Setup
++            L"{804F038E-E7CA-433E-8B84-020E9CE4DF27}",  // Active Setup
+                                                         // GUID.
+-        .toast_activator_clsid = {0x635EFA6F,
+-                                  0x08D6,
+-                                  0x4EC9,
+-                                  {0xBD, 0x14, 0x8A, 0x0F, 0xDE, 0x97, 0x51,
+-                                   0x59}},  // Toast Activator CLSID.
++        .toast_activator_clsid = {0x27C0E483,
++                                  0x8DFE,
++                                  0x42B9,
++                                  {0x99, 0x67, 0xFE, 0x3A, 0x09, 0x74, 0x01,
++                                   0x93}},  // Toast Activator CLSID.
+-        .elevator_clsid = {0xD133B120,
+-                           0x6DB4,
+-                           0x4D6B,
+-                           {0x8B, 0xFE, 0x83, 0xBF, 0x8C, 0xA1, 0xB1,
+-                            0xB0}},  // Elevator CLSID.
++        .elevator_clsid = {0x8D56AE75,
++                           0x0461,
++                           0x4777,
++                           {0x86, 0x4D, 0x4E, 0xAD, 0x4B, 0x6D, 0x97,
++                            0x0D}},  // Elevator CLSID.
+-        .elevator_iid = {0xbb19a0e5,
+-                         0xc6,
+-                         0x4966,
+-                         {0x94, 0xb2, 0x5a, 0xfe, 0xc6, 0xfe, 0xd9,
+-                          0x3a}},  // IElevator IID and TypeLib
++        .elevator_iid = {0x48CB63FB,
++                         0x6150,
++                         0x4BEB,
++                         {0xBD, 0xFC, 0xE4, 0xB0, 0x18, 0xDD, 0x9B,
++                          0x2A}},  // IElevator IID and TypeLib
+-        // {BB19A0E5-00C6-4966-94B2-5AFEC6FED93A}.
++        // {48CB63FB-6150-4BEB-BDFC-E4B018DD9B2A}.
+-        .tracing_service_clsid = {0x83f69367,
+-                                  0x442d,
+-                                  0x447f,
+-                                  {0x8b, 0xcc, 0x0e, 0x3f, 0x97, 0xbe, 0x9c,
+-                                   0xf2}},  // SystemTraceSession CLSID.
++        .tracing_service_clsid = {0xAD55692B,
++                                  0x40DF,
++                                  0x4CA0,
++                                  {0x82, 0x5F, 0x47, 0x21, 0xA4, 0x6F, 0x50,
++                                   0x2F}},  // SystemTraceSession CLSID.
+-        .tracing_service_iid = {0xa3fd580a,
+-                                0xffd4,
+-                                0x4075,
+-                                {0x91, 0x74, 0x75, 0xd0, 0xb1, 0x99, 0xd3,
+-                                 0xcb}},  // ISystemTraceSessionChromium IID and
++        .tracing_service_iid = {0xCF944A40,
++                                0xDDF1,
++                                0x4942,
++                                {0xAC, 0x4D, 0x0E, 0x1D, 0x2B, 0x5A, 0xF3,
++                                 0x1B}},  // ISystemTraceSessionChromium IID and
+                                           // TypeLib
+         .default_channel_name =
+             L"",  // Empty default channel name since no update integration.
+         .channel_strategy = ChannelStrategy::UNSUPPORTED,
+--- a/chrome/installer/mini_installer/mini_installer_constants.cc
++++ b/chrome/installer/mini_installer/mini_installer_constants.cc
+@@ -12,7 +12,7 @@ namespace mini_installer {
+ // The target name of the installer extracted from resources.
+ const wchar_t kSetupExe[] = L"setup.exe";
+ // The prefix of the chrome archive resource.
+-const wchar_t kChromeArchivePrefix[] = L"chrome";
++const wchar_t kChromeArchivePrefix[] = L"focus_browser";
+ // The prefix of the installer resource.
+ const wchar_t kSetupPrefix[] = L"setup";
+ 
+--- a/chrome/installer/setup/installer_crash_reporter_client.cc
++++ b/chrome/installer/setup/installer_crash_reporter_client.cc
+@@ -103,7 +103,7 @@ bool InstallerCrashReporterClient::Repor
+       L"SOFTWARE\\Policies\\Google\\Chrome";
+ #else
+   static const wchar_t kRegistryChromePolicyKey[] =
+-      L"SOFTWARE\\Policies\\Chromium";
++      L"SOFTWARE\\Policies\\FocusBrowser";
+ #endif
+   static const wchar_t kMetricsReportingEnabled[] = L"MetricsReportingEnabled";
+ 
+--- a/components/policy/tools/generate_policy_source.py
++++ b/components/policy/tools/generate_policy_source.py
+@@ -28,7 +28,7 @@ from xml.sax.saxutils import escape as x
+ 
+ CHROME_POLICY_KEY = 'SOFTWARE\\\\Policies\\\\Google\\\\Chrome'
+ CHROME_FOR_TESTING_POLICY_KEY = CHROME_POLICY_KEY + ' for Testing'
+-CHROMIUM_POLICY_KEY = 'SOFTWARE\\\\Policies\\\\Chromium'
++CHROMIUM_POLICY_KEY = 'SOFTWARE\\\\Policies\\\\FocusBrowser'
+ PLATFORM_STRINGS = {
+     'chrome_frame': ['win'],
+     'chrome_os': ['chrome_os'],
+--- a/chrome/installer/setup/setup_constants.cc
++++ b/chrome/installer/setup/setup_constants.cc
+@@ -7,14 +7,14 @@
+ namespace installer {
+ 
+ // Elements that make up install paths.
+-const wchar_t kChromeArchive[] = L"chrome.7z";
+-const wchar_t kChromeCompressedArchive[] = L"chrome.packed.7z";
++const wchar_t kChromeArchive[] = L"focus_browser.7z";
++const wchar_t kChromeCompressedArchive[] = L"focus_browser.packed.7z";
+ const char kVisualElements[] = "VisualElements";
+ const wchar_t kVisualElementsManifest[] = L"chrome.VisualElementsManifest.xml";
+ 
+ // Sub directory of install source package under install temporary directory.
+ const wchar_t kInstallSourceDir[] = L"source";
+-const wchar_t kInstallSourceChromeDir[] = L"Chrome-bin";
++const wchar_t kInstallSourceChromeDir[] = L"FocusBrowser-bin";
+ 
+ const wchar_t kMediaPlayerRegPath[] =
+     L"Software\\Microsoft\\MediaPlayer\\ShimInclusionList";
+--- a/chrome/installer/util/logging_installer.cc
++++ b/chrome/installer/util/logging_installer.cc
+@@ -126,7 +126,7 @@ base::FilePath GetLogFilePath(const inst
+ #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+       FILE_PATH_LITERAL("chrome_installer.log");
+ #else  // BUILDFLAG(CHROMIUM_BRANDING)
+-      FILE_PATH_LITERAL("chromium_installer.log");
++      FILE_PATH_LITERAL("focus_browser_installer.log");
+ #endif
+ 
+   // Fallback to current directory if getting the secure or temp directory
+--- a/chrome/tools/build/win/create_installer_archive.py
++++ b/chrome/tools/build/win/create_installer_archive.py
+@@ -25,7 +25,7 @@ ARCHIVE_DIR = "installer_archive"
+ # suffix to uncompressed full archive file, appended to options.output_name
+ ARCHIVE_SUFFIX = ".7z"
+ BSDIFF_EXEC = "bsdiff.exe"
+-CHROME_DIR = "Chrome-bin"
++CHROME_DIR = "FocusBrowser-bin"
+ CHROME_PATCH_FILE_SUFFIX = "_patch"  # prefixed by options.output_name
+ 
+ # compressed full archive suffix, will be prefixed by options.output_name
+@@ -724,7 +724,7 @@ def _ParseOptions():
+         '{BSDIFF|ZUCCHINI}.')
+     parser.add_option('-n',
+                       '--output_name',
+-                      default='chrome',
++                      default='focus_browser',
+                       help='Name used to prefix names of generated archives.')
+     parser.add_option('--enable_hidpi',
+                       default='0',
+--- a/components/policy/tools/template_writers/writer_configuration.py
++++ b/components/policy/tools/template_writers/writer_configuration.py
+@@ -27,21 +27,21 @@ def GetConfigurationForBuild(defines):
+   if '_chromium' in defines:
+     config = {
+         'build': 'chromium',
+-        'app_name': 'Chromium',
++        'app_name': 'Focus Browser',
+         'doc_url': 'https://chromeenterprise.google/policies/',
+         'frame_name': 'Chromium Frame',
+         'os_name': 'ChromiumOS',
+         'webview_name': 'Chromium WebView',
+         'win_config': {
+             'win': {
+-                'reg_mandatory_key_name': 'Software\\Policies\\Chromium',
++                'reg_mandatory_key_name': 'Software\\Policies\\FocusBrowser',
+                 'reg_recommended_key_name':
+-                'Software\\Policies\\Chromium\\Recommended',
++                'Software\\Policies\\FocusBrowser\\Recommended',
+                 'mandatory_category_path': ['chromium'],
+                 'recommended_category_path': ['chromium_recommended'],
+                 'category_path_strings': {
+-                    'chromium': 'Chromium',
+-                    'chromium_recommended': 'Chromium - {doc_recommended}',
++                    'chromium': 'Focus Browser',
++                    'chromium_recommended': 'Focus Browser - {doc_recommended}',
+                 },
+                 'namespace': 'Chromium.Policies.Chromium',
+             },

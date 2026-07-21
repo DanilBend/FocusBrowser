@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Медитация · Focus Browser</title>
+    <link rel="stylesheet" href="meditation.css">
+    <script type="module" src="strings.m.js"></script>
+    <script type="module" src="meditation.js"></script>
+  </head>
+  <body>
+    <main class="page-shell">
+      <header class="topbar">
+        <div class="brand" aria-label="Focus Browser">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 256 256" focusable="false">
+              <circle cx="128" cy="128" r="88" stroke-width="11"></circle>
+              <circle cx="128" cy="128" r="37" stroke-width="10"></circle>
+              <path d="M128 64V84M172 128H192M128 172V192M64 128H84"
+                    stroke-width="10" stroke-linecap="round"></path>
+              <circle class="brand-mark-dot" cx="128" cy="128" r="12"></circle>
+            </svg>
+          </span>
+          <span>Focus Browser</span>
+        </div>
+        <div class="section-name">
+          <span class="section-dot" aria-hidden="true"></span>
+          Медитация
+        </div>
+      </header>
+
+      <section class="hero" aria-labelledby="page-title">
+        <p class="eyebrow">Пауза для ясного ума</p>
+        <h1 id="page-title">Остановитесь.<br>Верните внимание.</h1>
+        <p class="hero-copy">
+          Несколько спокойных минут помогают убрать лишний шум и снова
+          сосредоточиться на главном.
+        </p>
+      </section>
+
+      <section class="video-card" aria-labelledby="video-title">
+        <div class="video-copy">
+          <p class="card-label">Практика дыхания</p>
+          <h2 id="video-title">
+            Учу вас дышать: успех, власть, сила. Измени свою жизнь навсегда.
+            Мориарти.
+          </h2>
+          <p class="video-description">
+            Устройтесь удобно, уберите уведомления и оставьте себе это время
+            без переключений.
+          </p>
+        </div>
+
+        <div class="player-frame">
+          <div id="privacy-gate" class="privacy-gate">
+            <div class="breathing-orb" aria-hidden="true">
+              <span>вдох</span>
+            </div>
+            <div class="privacy-copy">
+              <h3>Начните медитацию, когда будете готовы</h3>
+              <p>
+                Focus Browser откроет оригинальное видео в YouTube. Так оно
+                воспроизводится без ошибки встроенного плеера; сервис сможет
+                получить ваш IP-адрес и сведения об устройстве.
+              </p>
+            </div>
+            <button id="load-video" class="primary-action" type="button">
+              Открыть видео и начать
+            </button>
+          </div>
+        </div>
+
+        <div class="video-footer">
+          <p id="connection-status" class="connection-status" aria-live="polite">
+          </p>
+          <a class="secondary-action"
+             href="https://www.youtube.com/watch?v=R2K7ZHsnypI"
+             target="_blank"
+             rel="noopener noreferrer"
+             referrerpolicy="no-referrer">
+            Открыть на YouTube
+            <span aria-hidden="true">↗</span>
+          </a>
+        </div>
+      </section>
+
+      <footer class="page-footer">
+        <span>Дышите медленнее. Делайте только одно дело.</span>
+        <span class="private-note">Без фоновой загрузки видео</span>
+      </footer>
+    </main>
+  </body>
+</html>

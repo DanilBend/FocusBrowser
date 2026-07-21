@@ -1,0 +1,347 @@
+--- a/chrome/app/settings_strings.grdp
++++ b/chrome/app/settings_strings.grdp
+@@ -1718,6 +1718,21 @@
+     <message name="IDS_SETTINGS_FOCUS_SERVICES_DESCRIPTION" desc="Description of the controls available on the Focus Browser services settings page">
+       Manage what Focus Browser services are allowed in your browser
+     </message>
++    <message name="IDS_SETTINGS_FOCUS_CRASH_REPORTING_TITLE" desc="Title of the setting that controls crash reporting">
++      Crash reporting
++    </message>
++    <message name="IDS_SETTINGS_FOCUS_CRASH_REPORTING_DESCRIPTION" desc="Description of the setting that controls crash reporting">
++      Choose whether Focus Browser can ask to send crash reports or send them automatically. Disabling reports will delete all pending reports.
++    </message>
++    <message name="IDS_SETTINGS_FOCUS_CRASH_REPORTING_DISABLED" desc="Crash reporting option that disables prompts and submissions">
++      Disabled
++    </message>
++    <message name="IDS_SETTINGS_FOCUS_CRASH_REPORTING_ASK" desc="Crash reporting option that prompts after a crash">
++      Ask after a crash
++    </message>
++    <message name="IDS_SETTINGS_FOCUS_CRASH_REPORTING_AUTOMATIC" desc="Crash reporting option that automatically submits reports">
++      Send automatically
++    </message>
+     <message name="IDS_SETTINGS_FOCUS_SCHEMA_NOTICE_TITLE" desc="Title of the alert shown when Focus Browser services have a change in behavior">
+       Updates to Focus Browser services:
+     </message>
+--- a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
++++ b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+@@ -2349,6 +2349,15 @@ void AddPrivacyStrings(content::WebUIDat
+       {"securityPageDescription", IDS_SETTINGS_SECURITY_DESCRIPTION_NORMAL},
+       {"focusServicesTitle", IDS_SETTINGS_FOCUS_SERVICES},
+       {"focusServicesDescription", IDS_SETTINGS_FOCUS_SERVICES_DESCRIPTION},
++      {"focusCrashReportingTitle",
++       IDS_SETTINGS_FOCUS_CRASH_REPORTING_TITLE},
++      {"focusCrashReportingDescription",
++       IDS_SETTINGS_FOCUS_CRASH_REPORTING_DESCRIPTION},
++      {"focusCrashReportingDisabled",
++       IDS_SETTINGS_FOCUS_CRASH_REPORTING_DISABLED},
++      {"focusCrashReportingAsk", IDS_SETTINGS_FOCUS_CRASH_REPORTING_ASK},
++      {"focusCrashReportingAutomatic",
++       IDS_SETTINGS_FOCUS_CRASH_REPORTING_AUTOMATIC},
+       {"focusServicesSetupPendingText", IDS_SETTINGS_FOCUS_SERVICES_SETUP_PENDING_TEXT},
+       {"focusServicesSetupPendingButton", IDS_SETTINGS_FOCUS_SERVICES_SETUP_PENDING_BUTTON},
+       {"focusServicesToggle", IDS_SETTINGS_FOCUS_SERVICES_TOGGLE},
+--- a/chrome/browser/resources/settings/privacy_page/services_page.html
++++ b/chrome/browser/resources/settings/privacy_page/services_page.html
+@@ -112,6 +112,21 @@
+         </cr-collapse>
+     </div>
+     </template>
++    <div class="cr-row hr">
++      <div class="flex label-wrapper" aria-hidden="true">
++        <div class="label">$i18n{focusCrashReportingTitle}</div>
++        <div class="cr-secondary-text label">
++          $i18n{focusCrashReportingDescription}
++        </div>
++      </div>
++      <settings-dropdown-menu id="crashReportingControl"
++        label="$i18n{focusCrashReportingTitle}"
++        pref="[[crashReportingPref_]]"
++        menu-options="[[crashReportingOptions_]]"
++        no-set-pref
++        on-settings-control-change="onCrashReportingChange_">
++      </settings-dropdown-menu>
++    </div>
+ </div>
+ 
+ 
+--- a/chrome/browser/resources/settings/privacy_page/services_page.ts
++++ b/chrome/browser/resources/settings/privacy_page/services_page.ts
+@@ -2,6 +2,7 @@
+ // You can use, redistribute, and/or modify this source code under
+ // the terms of the GPL-3.0 license that can be found in the LICENSE file.
+ 
++import '../controls/settings_dropdown_menu.js';
+ import '../controls/settings_toggle_button.js';
+ import '../settings_page/settings_subpage.js';
+ import 'chrome://resources/cr_elements/cr_button/cr_button.js';
+@@ -14,14 +15,33 @@ import {PrefsMixin} from '/shared/settin
+ import {HelpBubbleMixin} from 'chrome://resources/cr_components/help_bubble/help_bubble_mixin.js';
+ import type {CrInputElement} from 'chrome://resources/cr_elements/cr_input/cr_input.js';
+ import {I18nMixin} from 'chrome://resources/cr_elements/i18n_mixin.js';
++import {WebUiListenerMixin} from 'chrome://resources/cr_elements/web_ui_listener_mixin.js';
++import {sendWithPromise} from 'chrome://resources/js/cr.js';
++import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
+ import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+ 
++import type {
++  DropdownMenuOptionList,
++  SettingsDropdownMenuElement,
++} from '../controls/settings_dropdown_menu.js';
+ import type {FocusServicesChangeHandler} from './changelog_proxy.js';
+ import {FocusServicesChangeHandlerImpl} from './changelog_proxy.js';
+ import {getTemplate} from './services_page.html.js';
+ 
+ const SettingsFocusServicesPageElementBase =
+-    HelpBubbleMixin(I18nMixin(PrefsMixin(PolymerElement)));
++    HelpBubbleMixin(WebUiListenerMixin(
++        I18nMixin(PrefsMixin(PolymerElement))));
++
++enum CrashReportingMode {
++  DISABLED = -1,
++  ASK = 0,
++  AUTOMATIC = 1,
++}
++
++interface FocusCrashReportingState {
++  mode: CrashReportingMode;
++  managed: boolean;
++}
+ 
+ export class SettingsFocusServicesPageElement extends
+     SettingsFocusServicesPageElementBase {
+@@ -40,10 +60,39 @@ export class SettingsFocusServicesPageE
+     return {
+       ignoreChecked_: Boolean,
+       changes_: Array,
++      crashReportingOptions_: {
++        type: Array,
++        readOnly: true,
++        value: () => [
++          {
++            value: CrashReportingMode.DISABLED,
++            name: loadTimeData.getString('focusCrashReportingDisabled'),
++          },
++          {
++            value: CrashReportingMode.ASK,
++            name: loadTimeData.getString('focusCrashReportingAsk'),
++          },
++          {
++            value: CrashReportingMode.AUTOMATIC,
++            name: loadTimeData.getString('focusCrashReportingAutomatic'),
++          },
++        ],
++      },
++      crashReportingPref_: {
++        type: Object,
++        value: () => ({
++          key: '',
++          type: chrome.settingsPrivate.PrefType.NUMBER,
++          value: CrashReportingMode.ASK,
++        }),
++      },
+     };
+   }
+ 
+   declare private changes_: string[];
++  declare private crashReportingOptions_: DropdownMenuOptionList;
++  declare private crashReportingPref_:
++      chrome.settingsPrivate.PrefObject<number>;
+   declare private ignoreChecked_: boolean;
+ 
+   private toOrigin(thing: string) {
+@@ -71,6 +120,30 @@ export class SettingsFocusServicesPageE
+   override ready() {
+     super.ready();
+     this.requestChangelog();
++    const update = (state: FocusCrashReportingState) =>
++        this.setCrashReportingState_(state);
++    this.addWebUiListener('focus-crash-reporting-change', update);
++    sendWithPromise<FocusCrashReportingState>('getFocusCrashReporting')
++        .then(update);
++  }
++
++  private setCrashReportingState_(state: FocusCrashReportingState) {
++    const pref: chrome.settingsPrivate.PrefObject<number> = {
++      key: '',
++      type: chrome.settingsPrivate.PrefType.NUMBER,
++      value: state.mode,
++    };
++    if (state.managed) {
++      pref.enforcement = chrome.settingsPrivate.Enforcement.ENFORCED;
++      pref.controlledBy = chrome.settingsPrivate.ControlledBy.USER_POLICY;
++    }
++    this.crashReportingPref_ = pref;
++  }
++
++  private onCrashReportingChange_(event: Event) {
++    const control = event.target as SettingsDropdownMenuElement;
++    const mode = Number.parseInt(control.getSelectedValue(), 10);
++    chrome.send('setFocusCrashReportingMode', [mode]);
+   }
+ 
+   protected onOriginOverrideKeydown_(event: KeyboardEvent) {
+--- /dev/null
++++ b/chrome/browser/ui/webui/settings/focus_crash_reporting_handler.cc
+@@ -0,0 +1,83 @@
++// Copyright 2026 The Focus Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#include "chrome/browser/ui/webui/settings/focus_crash_reporting_handler.h"
++
++#include "base/functional/bind.h"
++#include "base/values.h"
++#include "chrome/browser/browser_process.h"
++#include "chrome/browser/crash_upload_list/focus_crash_reporting.h"
++#include "chrome/common/pref_names.h"
++#include "components/metrics/metrics_pref_names.h"
++#include "content/public/browser/web_ui.h"
++
++namespace settings {
++
++FocusCrashReportingHandler::FocusCrashReportingHandler() = default;
++FocusCrashReportingHandler::~FocusCrashReportingHandler() = default;
++
++void FocusCrashReportingHandler::RegisterMessages() {
++  web_ui()->RegisterMessageCallback(
++      "getFocusCrashReporting",
++      base::BindRepeating(&FocusCrashReportingHandler::HandleGetState,
++                          base::Unretained(this)));
++  web_ui()->RegisterMessageCallback(
++      "setFocusCrashReportingMode",
++      base::BindRepeating(&FocusCrashReportingHandler::HandleSetMode,
++                          base::Unretained(this)));
++}
++
++void FocusCrashReportingHandler::OnJavascriptAllowed() {
++  pref_member_ = std::make_unique<IntegerPrefMember>();
++  pref_member_->Init(
++      prefs::kFocusCrashReportingMode, g_browser_process->local_state(),
++      base::BindRepeating(&FocusCrashReportingHandler::OnPrefChanged,
++                          base::Unretained(this)));
++  policy_pref_member_ = std::make_unique<BooleanPrefMember>();
++  policy_pref_member_->Init(
++      metrics::prefs::kMetricsReportingEnabled,
++      g_browser_process->local_state(),
++      base::BindRepeating(&FocusCrashReportingHandler::OnPrefChanged,
++                          base::Unretained(this)));
++}
++
++void FocusCrashReportingHandler::OnJavascriptDisallowed() {
++  policy_pref_member_.reset();
++  pref_member_.reset();
++}
++
++base::DictValue FocusCrashReportingHandler::CreateState() const {
++  CHECK(pref_member_);
++  const bool managed = focus::UploadsDisabledByPolicy();
++  const focus::CrashReportingMode mode =
++      managed ? focus::CrashReportingMode::kDisabled
++              : focus::GetCrashReportingMode();
++
++  return base::DictValue()
++      .Set("mode", static_cast<int>(mode))
++      .Set("managed", managed);
++}
++
++void FocusCrashReportingHandler::HandleGetState(const base::ListValue& args) {
++  AllowJavascript();
++  CHECK_EQ(args.size(), 1u);
++  ResolveJavascriptCallback(args[0], CreateState());
++}
++
++void FocusCrashReportingHandler::HandleSetMode(const base::ListValue& args) {
++  CHECK_EQ(args.size(), 1u);
++
++  const int mode = args[0].GetInt();
++  if (!focus::IsValidCrashReportingMode(mode)) {
++    return;
++  }
++  focus::SetCrashReportingMode(
++      static_cast<focus::CrashReportingMode>(mode));
++}
++
++void FocusCrashReportingHandler::OnPrefChanged() {
++  FireWebUIListener("focus-crash-reporting-change", CreateState());
++}
++
++}  // namespace settings
+--- /dev/null
++++ b/chrome/browser/ui/webui/settings/focus_crash_reporting_handler.h
+@@ -0,0 +1,39 @@
++// Copyright 2026 The Focus Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_WEBUI_SETTINGS_FOCUS_CRASH_REPORTING_HANDLER_H_
++#define CHROME_BROWSER_UI_WEBUI_SETTINGS_FOCUS_CRASH_REPORTING_HANDLER_H_
++
++#include <memory>
++
++#include "chrome/browser/ui/webui/settings/settings_page_ui_handler.h"
++#include "components/prefs/pref_member.h"
++
++namespace settings {
++
++class FocusCrashReportingHandler : public SettingsPageUIHandler {
++ public:
++  FocusCrashReportingHandler();
++  FocusCrashReportingHandler(const FocusCrashReportingHandler&) = delete;
++  FocusCrashReportingHandler& operator=(const FocusCrashReportingHandler&) =
++      delete;
++  ~FocusCrashReportingHandler() override;
++
++  void RegisterMessages() override;
++  void OnJavascriptAllowed() override;
++  void OnJavascriptDisallowed() override;
++
++ private:
++  base::DictValue CreateState() const;
++  void HandleGetState(const base::ListValue& args);
++  void HandleSetMode(const base::ListValue& args);
++  void OnPrefChanged();
++
++  std::unique_ptr<IntegerPrefMember> pref_member_;
++  std::unique_ptr<BooleanPrefMember> policy_pref_member_;
++};
++
++}  // namespace settings
++
++#endif  // CHROME_BROWSER_UI_WEBUI_SETTINGS_FOCUS_CRASH_REPORTING_HANDLER_H_
+--- a/chrome/browser/ui/webui/settings/settings_ui.cc
++++ b/chrome/browser/ui/webui/settings/settings_ui.cc
+@@ -71,6 +71,7 @@
+ #include "chrome/browser/ui/webui/settings/font_handler.h"
+ #include "chrome/browser/ui/webui/settings/glic_handler.h"
+ #include "chrome/browser/ui/webui/settings/hats_handler.h"
++#include "chrome/browser/ui/webui/settings/focus_crash_reporting_handler.h"
+ #include "chrome/browser/ui/webui/settings/import_data_handler.h"
+ #include "chrome/browser/ui/webui/settings/metrics_reporting_handler.h"
+ #include "chrome/browser/ui/webui/settings/on_startup_handler.h"
+@@ -264,6 +265,7 @@ SettingsUI::SettingsUI(content::WebUI* w
+ 
+   AddSettingsPageUIHandler(
+       std::make_unique<MediaDevicesSelectionHandler>(profile));
++  AddSettingsPageUIHandler(std::make_unique<FocusCrashReportingHandler>());
+ #if BUILDFLAG(GOOGLE_CHROME_BRANDING) && !BUILDFLAG(IS_CHROMEOS)
+   AddSettingsPageUIHandler(std::make_unique<MetricsReportingHandler>());
+ #endif
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -523,6 +523,7 @@ static_library("ui") {
+     "//components/metrics:content",
+     "//components/metrics/debug",
+     "//components/metrics/debug:resources",
++    "//components/metrics:metrics_pref_names",
+     "//components/metrics/private_metrics",
+     "//components/metrics/structured/buildflags",
+     "//components/metrics_services_manager",
+@@ -1293,6 +1294,8 @@ static_library("ui") {
+       "webui/settings/glic_handler.h",
+       "webui/settings/hats_handler.cc",
+       "webui/settings/hats_handler.h",
++      "webui/settings/focus_crash_reporting_handler.cc",
++      "webui/settings/focus_crash_reporting_handler.h",
+       "webui/settings/import_data_handler.cc",
+       "webui/settings/import_data_handler.h",
+       "webui/settings/languages_handler.cc",
