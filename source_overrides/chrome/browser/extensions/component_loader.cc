@@ -39,8 +39,8 @@
 #include "chrome/grit/component_extension_resources.h"
 #include "chrome/grit/generated_resources.h"
 #include "components/crx_file/id_util.h"
-#include "components/version_info/version_info.h"
 #include "components/extstore_fixups/resources/grit/extstore_fixups_resources.h"
+#include "components/version_info/version_info.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/common/content_switches.h"
 #include "extensions/browser/extension_file_task_runner.h"
@@ -58,12 +58,12 @@
 #include "extensions/common/manifest_constants.h"
 #include "pdf/buildflags.h"
 #include "printing/buildflags/buildflags.h"
-#include "ui/accessibility/accessibility_features.h"
-#include "ui/base/l10n/l10n_util.h"
-#include "ui/base/resource/resource_bundle.h"
 #include "third_party/focus_text_motion/resources/grit/focus_text_motion_resources.h"
 #include "third_party/focus_youtube/resources/grit/focus_youtube_resources.h"
 #include "third_party/ublock/resources/grit/ublock_resources.h"
+#include "ui/accessibility/accessibility_features.h"
+#include "ui/base/l10n/l10n_util.h"
+#include "ui/base/resource/resource_bundle.h"
 
 #if BUILDFLAG(IS_CHROMEOS)
 #include "ash/constants/ash_features.h"
@@ -459,18 +459,13 @@ void ComponentLoader::AddUBlock() {
   using namespace extension_l10n_util;
   ComponentExtensionInfo& info = component_extensions_.back();
   std::string error;
-  bool localized = LocalizeExtension(info.root_directory, &info.manifest,
-                      GzippedMessagesPermission::kAllowForTrustedSource,
-                      &error, true);
+  bool localized = LocalizeExtension(
+      info.root_directory, &info.manifest,
+      GzippedMessagesPermission::kAllowForTrustedSource, &error, true);
 
   if (!localized) {
     LOG(ERROR) << "Failed to localize uBlock: " << error;
   }
-}
-
-void ComponentLoader::AddFocusTextMotion() {
-  Add(IDR_FOCUS_TEXT_MOTION_MANIFEST_JSON,
-      base::FilePath(FILE_PATH_LITERAL("focus_text_motion")));
 }
 
 void ComponentLoader::AddFocusYoutube() {
@@ -560,7 +555,6 @@ void ComponentLoader::AddDefaultComponentExtensions(
 
   if (!skip_session_components) {
     AddWebStoreApp();
-    AddFocusTextMotion();
     AddFocusYoutube();
     AddExtstoreFixups();
 #if BUILDFLAG(IS_CHROMEOS)

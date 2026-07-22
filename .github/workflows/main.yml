@@ -5,7 +5,7 @@
 # % jinja2 main.yml.j2 -o main.yml
 #
 
-name: Build and release binaries
+name: Сборка и выпуск бинарных файлов
 on:
   workflow_dispatch:
     inputs:

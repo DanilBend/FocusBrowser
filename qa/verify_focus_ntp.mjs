@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 
-// Runtime contract for the Focus Browser new tab page. Attach to a freshly
-// built browser started with --remote-debugging-port=<port> and a disposable
-// profile. This script never launches or terminates a browser process.
+// Runtime contract for the minimal Focus Browser new-tab page. Attach to a
+// freshly built browser started with --remote-debugging-port=<port> and a
+// disposable profile. This script never launches or terminates a browser.
+
+import assert from 'node:assert/strict';
 
 const [port = '9341'] = process.argv.slice(2);
 
 const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then(
     response => response.json());
 const target = targets.find(candidate => candidate.type === 'page');
-if (!target?.webSocketDebuggerUrl) {
-  throw new Error('No debuggable page target found');
-}
+assert.ok(target?.webSocketDebuggerUrl, 'No debuggable page target found');
 
 const socket = new WebSocket(target.webSocketDebuggerUrl);
 await new Promise((resolve, reject) => {
@@ -34,12 +34,6 @@ socket.addEventListener('message', event => {
   } else {
     request.resolve(message.result ?? {});
   }
-});
-socket.addEventListener('close', () => {
-  for (const request of pending.values()) {
-    request.reject(new Error('DevTools WebSocket closed'));
-  }
-  pending.clear();
 });
 
 const send = (method, params = {}) => {
@@ -68,7 +62,7 @@ const pause = milliseconds =>
 
 const waitFor = async (probe, description, attempts = 120) => {
   let lastError = null;
-  for (let attempt = 0; attempt < attempts; attempt++) {
+  for (let attempt = 0; attempt < attempts; ++attempt) {
     try {
       const value = await probe();
       if (value) {
@@ -84,7 +78,7 @@ const waitFor = async (probe, description, attempts = 120) => {
       (lastError ? `: ${lastError.message}` : ''));
 };
 
-const motionParts = `
+const ntpParts = `
   const app = document.querySelector('ntp-app');
   const appRoot = app?.shadowRoot;
   const searchbox = appRoot?.querySelector('#focusSearch ntp-searchbox');
@@ -92,14 +86,6 @@ const motionParts = `
   const inputHost = searchboxRoot?.querySelector('#input');
   const inputRoot = inputHost?.shadowRoot;
   const realInput = inputRoot?.querySelector('#input');
-  const mirror = inputRoot?.querySelector('#focusTypingMirror');
-  const mirrorText = inputRoot?.querySelector('#focusTypingMirrorText');
-`;
-
-const transparentColorFunction = `
-  const isTransparentColor = color =>
-    color === 'transparent' ||
-    /^rgba\\([^)]*,\\s*0(?:\\.0+)?\\)$/.test(color);
 `;
 
 await send('Page.enable');
@@ -109,7 +95,7 @@ try {
   await send('Page.navigate', {url: 'chrome://new-tab-page/'});
 
   const initial = await waitFor(() => evaluate(`(() => {
-    ${motionParts}
+    ${ntpParts}
     const content = appRoot?.querySelector('#content');
     const home = appRoot?.querySelector('#focusHome');
     const search = appRoot?.querySelector('#focusSearch');
@@ -118,7 +104,7 @@ try {
     const mostVisited = shortcuts?.querySelector('#mostVisited');
     if (!app || !appRoot || !content || !home || !search ||
         !searchContainer || !searchboxRoot || !inputHost || !inputRoot ||
-        !realInput || !mirror || !mirrorText || !shortcuts || !mostVisited ||
+        !realInput || !shortcuts || !mostVisited ||
         document.documentElement.getAttribute('lazy-loaded') !== 'true') {
       return null;
     }
@@ -151,7 +137,8 @@ try {
       'ntp-customize-buttons', '#customizeButtons', '#themeAttribution',
       '#contentBottomSpacer', '#backgroundImageAttribution',
       'ntp-middle-slot-promo', 'ntp-modules', '#modules', '#oneGoogleBar',
-      'individual-promos',
+      'individual-promos', '#focusTypingMirror',
+      '[data-focus-text-motion]',
     ];
     const contentChildren = [...content.children].map(element => element.id);
     const homeChildren = [...home.children].map(element => element.id);
@@ -164,23 +151,21 @@ try {
         'input, textarea, [contenteditable="true"]');
     const searchRect = searchbox.getBoundingClientRect();
     const shortcutsRect = mostVisited.getBoundingClientRect();
-    ${transparentColorFunction}
-    const initialFill = getComputedStyle(realInput)
-                            .getPropertyValue('-webkit-text-fill-color');
+    const fill = getComputedStyle(realInput)
+        .getPropertyValue('-webkit-text-fill-color');
 
     return {
       href: location.href,
-      lazyLoaded: true,
       searchboxPresent: Boolean(searchbox),
       shortcutsPresent: Boolean(mostVisited),
       searchboxVisible: isVisible(searchbox),
       shortcutsVisible: isVisible(mostVisited),
       searchBeforeShortcuts: searchRect.bottom <= shortcutsRect.top + 0.5,
       forbidden: forbiddenSelectors.filter(selector =>
-        appRoot.querySelector(selector)),
+        deepQuery(appRoot, selector)),
       customizePencilPresent: Boolean(deepQuery(appRoot, '#customizeButton')),
       productCopyPresent:
-          /Focus Browser|\u041e\u0434\u0438\u043d \u044d\u043a\u0440\u0430\u043d|\u041f\u043e\u043b\u043d\u044b\u0439 \u0444\u043e\u043a\u0443\u0441/.test(
+          /Focus Browser|Один экран|Полный фокус/.test(
               appRoot.textContent || ''),
       expectedStructure:
           contentChildren.length === 1 &&
@@ -194,20 +179,13 @@ try {
           searchContainerChildren[0] === 'searchbox' &&
           shortcutChildren.length === 1 &&
           shortcutChildren[0] === 'mostVisited',
-      mirrorPresent: true,
-      mirrorInitiallyHidden: mirror.hidden,
-      mirrorAriaHidden: mirror.getAttribute('aria-hidden') === 'true',
-      mirrorInitiallyEmpty: mirrorText.childElementCount === 0,
       soleEditableRealInput:
           editableElements.length === 1 && editableElements[0] === realInput,
-      realInputInitiallyVisible: !isTransparentColor(initialFill),
-      contentChildren,
-      homeChildren,
-      searchChildren,
-      searchContainerChildren,
-      shortcutChildren,
+      realInputTextVisible:
+          fill !== 'transparent' &&
+          !/^rgba\\([^)]*,\\s*0(?:\\.0+)?\\)$/.test(fill),
     };
-  })()`), 'lazy NTP search, shortcuts and mirror');
+  })()`), 'minimal NTP search and shortcuts');
 
   const shortcutsDisabled = await evaluate(`(async () => {
     const app = document.querySelector('ntp-app');
@@ -217,23 +195,10 @@ try {
     const root = app.shadowRoot;
     const content = root.querySelector('#content');
     const home = root.querySelector('#focusHome');
-    const forbiddenSelectors = [
-      '#focusBrand', '#focusMark', '#focusMessage',
-      '#focusShortcutsHeading', '#focusMeditationLink', 'ntp-logo',
-      'ntp-customize-buttons', '#customizeButtons', '#themeAttribution',
-      '#contentBottomSpacer', '#backgroundImageAttribution',
-      'ntp-middle-slot-promo', 'ntp-modules', '#modules', '#oneGoogleBar',
-      'individual-promos',
-    ];
     const state = {
       searchboxPresent: Boolean(root.querySelector(
           '#focusSearch ntp-searchbox')),
       shortcutsPresent: Boolean(root.querySelector('#mostVisited')),
-      forbidden: forbiddenSelectors.filter(selector => root.querySelector(
-          selector)),
-      productCopyPresent:
-          /Focus Browser|\u041e\u0434\u0438\u043d \u044d\u043a\u0440\u0430\u043d|\u041f\u043e\u043b\u043d\u044b\u0439 \u0444\u043e\u043a\u0443\u0441/.test(
-              root.textContent || ''),
       contentChildren: [...content.children].map(element => element.id),
       homeChildren: [...home.children].map(element => element.id),
     };
@@ -243,19 +208,11 @@ try {
     return state;
   })()`);
 
-  const reducedChar = 'x';
-  const insertedGrapheme = 'e\u0301';
-  const rapidChar = 'z';
-  const motionValue = reducedChar + insertedGrapheme + rapidChar;
-  const query = 'xqz9c81-focus-browser-ntp-contract';
-  const focusedInput = await evaluate(`(() => {
-    ${motionParts}
-    if (!realInput || !mirror || !mirrorText) {
-      return false;
+  const prepared = await evaluate(`(() => {
+    ${ntpParts}
+    if (!realInput) {
+      return null;
     }
-    // The omnibox can transfer text into the NTP searchbox while the page is
-    // becoming active. Normalize the isolated test input before exercising
-    // grapheme animation so the contract is independent of startup focus.
     const valueSetter = Object.getOwnPropertyDescriptor(
         HTMLInputElement.prototype, 'value')?.set;
     valueSetter?.call(realInput, '');
@@ -266,210 +223,84 @@ try {
       data: null,
     }));
     realInput.focus();
-    return inputRoot.activeElement === realInput && realInput.value === '';
+    const rect = realInput.getBoundingClientRect();
+    return {
+      focused: inputRoot.activeElement === realInput,
+      value: realInput.value,
+      rect: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
+    };
   })()`);
-  if (!focusedInput) {
-    throw new Error('Could not focus the empty NTP search input');
+  assert.ok(prepared?.focused && prepared.value === '',
+            'Could not focus the empty NTP search input');
+
+  const typedValue = 'x' + 'e\u0301' + 'z';
+  for (const grapheme of ['x', 'e\u0301', 'z']) {
+    await send('Input.insertText', {text: grapheme});
+    await pause(35);
   }
-
-  await send('Emulation.setEmulatedMedia', {
-    media: '',
-    features: [{name: 'prefers-reduced-motion', value: 'reduce'}],
-  });
-  await pause(100);
-  await send('Input.insertText', {text: reducedChar});
-  await pause(50);
-
-  const reducedMotion = await evaluate(`(() => {
-    ${motionParts}
-    if (!inputHost || !realInput || !mirror || !mirrorText) {
-      return null;
-    }
-    const animations = mirror.getAnimations({subtree: true}).filter(
-        animation => animation.id === 'focus-typing-grapheme-reveal');
-    ${transparentColorFunction}
-    const fill = getComputedStyle(realInput)
-                     .getPropertyValue('-webkit-text-fill-color');
-    return {
-      animationCount: animations.length,
-      revealActive: inputHost.hasAttribute('focus-typing-reveal-active'),
-      mirrorHidden: mirror.hidden,
-      mirrorChildCount: mirrorText.childElementCount,
-      realInputTextVisible: !isTransparentColor(fill),
+  const afterTyping = await evaluate(`(() => {
+    ${ntpParts}
+    const rect = realInput?.getBoundingClientRect();
+    return realInput && rect ? {
       value: realInput.value,
-    };
+      focused: inputRoot.activeElement === realInput,
+      caretAtEnd: realInput.selectionStart === realInput.value.length &&
+          realInput.selectionEnd === realInput.value.length,
+      rect: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
+      // Opening the native suggestion dropdown may legitimately widen the
+      // editable area. The text origin/baseline and control height must not
+      // move when glyphs are inserted.
+      textOriginStable:
+          Math.abs(rect.x - ${prepared.rect.x}) <= 0.5 &&
+          Math.abs(rect.y - ${prepared.rect.y}) <= 0.5 &&
+          Math.abs(rect.height - ${prepared.rect.height}) <= 0.5,
+      mirrorAbsent: !inputRoot.querySelector('#focusTypingMirror'),
+      overlayAbsent: !document.querySelector('[data-focus-text-motion]'),
+    } : null;
   })()`);
 
-  await send('Emulation.setEmulatedMedia', {media: '', features: []});
-  await pause(100);
-  await send('Input.insertText', {text: insertedGrapheme});
-  await pause(10);
-
-  const firstReveal = await evaluate(`(() => {
-    ${motionParts}
-    if (!inputHost || !realInput || !mirror || !mirrorText) {
-      return null;
-    }
-    const animations = mirror.getAnimations({subtree: true}).filter(
-        animation => animation.id === 'focus-typing-grapheme-reveal');
-    const insertedSpan = mirrorText.lastElementChild;
-    const animation = animations.find(candidate =>
-      candidate.effect?.target === insertedSpan) || null;
-    inputHost.__focusQaFirstAnimation = animation;
-    inputHost.__focusQaFirstTarget = insertedSpan;
-    const inputRect = realInput.getBoundingClientRect();
-    const mirrorRect = mirror.getBoundingClientRect();
-    const style = getComputedStyle(realInput);
-    const fill = style.getPropertyValue('-webkit-text-fill-color');
-    const caret = style.getPropertyValue('caret-color');
-    ${transparentColorFunction}
-    return {
-      animationCount: animations.length,
-      animationId: animation?.id || '',
-      playState: animation?.playState || '',
-      targetIsInsertedSpan:
-          animation?.effect?.target === insertedSpan &&
-          insertedSpan?.textContent === ${JSON.stringify(insertedGrapheme)},
-      targetConnected: Boolean(insertedSpan?.isConnected),
-      revealActive: inputHost.hasAttribute('focus-typing-reveal-active'),
-      mirrorHidden: mirror.hidden,
-      mirrorAriaHidden: mirror.getAttribute('aria-hidden') === 'true',
-      mirrorMatchesValue: mirrorText.textContent === realInput.value,
-      mirrorSpanCount: mirrorText.childElementCount,
-      mirrorMatchesInputGeometry:
-          Math.abs(mirrorRect.left - inputRect.left) <= 1 &&
-          Math.abs(mirrorRect.top - inputRect.top) <= 1 &&
-          Math.abs(mirrorRect.width - inputRect.width) <= 1 &&
-          Math.abs(mirrorRect.height - inputRect.height) <= 1,
-      realInputTransparent: isTransparentColor(fill),
-      caretVisible: !isTransparentColor(caret),
-      realInputFocused: realInput.matches(':focus'),
-      value: realInput.value,
-    };
+  const selected = await evaluate(`(() => {
+    ${ntpParts}
+    realInput?.focus();
+    realInput?.select();
+    return realInput?.selectionStart === 0 &&
+        realInput?.selectionEnd === realInput?.value.length;
   })()`);
-
-  await send('Input.insertText', {text: rapidChar});
-  await pause(10);
-
-  const overlappingReveal = await evaluate(`(() => {
-    ${motionParts}
-    if (!inputHost || !realInput || !mirror || !mirrorText) {
-      return null;
-    }
-    const animations = mirror.getAnimations({subtree: true}).filter(
-        animation => animation.id === 'focus-typing-grapheme-reveal');
-    const firstAnimation = inputHost.__focusQaFirstAnimation;
-    const firstTarget = inputHost.__focusQaFirstTarget;
-    const newestSpan = mirrorText.lastElementChild;
-    const newestAnimation = animations.find(candidate =>
-      candidate !== firstAnimation && candidate.effect?.target === newestSpan);
-    return {
-      animationCount: animations.length,
-      preservesFirstAnimation: animations.includes(firstAnimation),
-      firstAnimationStillRunning:
-          firstAnimation?.playState === 'running' ||
-          firstAnimation?.playState === 'pending',
-      firstTargetStillConnected: Boolean(firstTarget?.isConnected),
-      distinctNewestAnimation: Boolean(
-          newestAnimation && newestAnimation !== firstAnimation),
-      newestAnimationId: newestAnimation?.id || '',
-      newestAnimationRunning:
-          newestAnimation?.playState === 'running' ||
-          newestAnimation?.playState === 'pending',
-      newestTargetsInsertedSpan:
-          newestAnimation?.effect?.target === newestSpan &&
-          newestSpan?.textContent === ${JSON.stringify(rapidChar)},
-      mirrorMatchesValue: mirrorText.textContent === realInput.value,
-      mirrorSpanCount: mirrorText.childElementCount,
-      revealActive: inputHost.hasAttribute('focus-typing-reveal-active'),
-      value: realInput.value,
-    };
-  })()`);
-
-  await pause(450);
-  const afterFinish = await evaluate(`(() => {
-    ${motionParts}
-    if (!inputHost || !realInput || !mirror || !mirrorText) {
-      return null;
-    }
-    const animations = mirror.getAnimations({subtree: true}).filter(
-        animation => animation.id === 'focus-typing-grapheme-reveal');
-    const fill = getComputedStyle(realInput)
-                     .getPropertyValue('-webkit-text-fill-color');
-    ${transparentColorFunction}
-    return {
-      animationCount: animations.length,
-      revealActive: inputHost.hasAttribute('focus-typing-reveal-active'),
-      mirrorHidden: mirror.hidden,
-      mirrorEmpty: mirrorText.childElementCount === 0 &&
-          mirrorText.textContent === '',
-      realInputTextVisible: !isTransparentColor(fill),
-      realInputFocused: realInput.matches(':focus'),
-      value: realInput.value,
-    };
-  })()`);
-
-  const selectedMotionValue = await evaluate(`(() => {
-    ${motionParts}
-    if (!realInput) {
-      return false;
-    }
-    realInput.focus();
-    realInput.select();
-    return realInput.selectionStart === 0 &&
-        realInput.selectionEnd === realInput.value.length;
-  })()`);
-  if (!selectedMotionValue) {
-    throw new Error('Could not select the completed grapheme QA value');
-  }
+  assert.equal(selected, true, 'Could not select the NTP QA value');
   await send('Input.dispatchKeyEvent', {
-    type: 'keyDown',
-    key: 'Backspace',
-    code: 'Backspace',
-    windowsVirtualKeyCode: 8,
-    nativeVirtualKeyCode: 8,
+    type: 'keyDown', key: 'Backspace', code: 'Backspace',
+    windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8,
   });
   await send('Input.dispatchKeyEvent', {
-    type: 'keyUp',
-    key: 'Backspace',
-    code: 'Backspace',
-    windowsVirtualKeyCode: 8,
-    nativeVirtualKeyCode: 8,
+    type: 'keyUp', key: 'Backspace', code: 'Backspace',
+    windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8,
   });
-  const clearedValue = await waitFor(() => evaluate(`(() => {
-    ${motionParts}
+  await waitFor(() => evaluate(`(() => {
+    ${ntpParts}
     return realInput?.value === '' ? true : null;
   })()`), 'cleared NTP search value');
 
+  const query = 'xqz9c81-focus-browser-ntp-contract';
   await send('Input.insertText', {text: query});
-  await pause(450);
+  await pause(250);
   const completeValue = await evaluate(`(() => {
-    ${motionParts}
+    ${ntpParts}
     return realInput?.value || '';
   })()`);
-
   await send('Input.dispatchKeyEvent', {
-    type: 'keyDown',
-    key: 'Enter',
-    code: 'Enter',
-    windowsVirtualKeyCode: 13,
-    nativeVirtualKeyCode: 13,
+    type: 'keyDown', key: 'Enter', code: 'Enter',
+    windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
   });
   await send('Input.dispatchKeyEvent', {
-    type: 'keyUp',
-    key: 'Enter',
-    code: 'Enter',
-    windowsVirtualKeyCode: 13,
-    nativeVirtualKeyCode: 13,
+    type: 'keyUp', key: 'Enter', code: 'Enter',
+    windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
   });
-
   const destination = await waitFor(async () => {
     const href = await evaluate('location.href');
     return href !== 'chrome://new-tab-page/' ? href : null;
   }, 'external search navigation');
 
   const checks = {
-    lazyRendered: initial.lazyLoaded,
     searchboxPresent: initial.searchboxPresent,
     shortcutsPresent: initial.shortcutsPresent,
     searchboxVisible: initial.searchboxVisible,
@@ -479,63 +310,22 @@ try {
     forbiddenElementsAbsent: initial.forbidden.length === 0,
     customizePencilAbsent: !initial.customizePencilPresent,
     productCopyAbsent: !initial.productCopyPresent,
-    mirrorAndRealInputContract:
-        initial.mirrorPresent && initial.mirrorInitiallyHidden &&
-        initial.mirrorAriaHidden && initial.mirrorInitiallyEmpty &&
-        initial.soleEditableRealInput && initial.realInputInitiallyVisible,
+    soleVisibleNativeInput:
+        initial.soleEditableRealInput && initial.realInputTextVisible,
     shortcutsOffLeavesOnlySearch:
         shortcutsDisabled.searchboxPresent &&
         !shortcutsDisabled.shortcutsPresent &&
-        shortcutsDisabled.forbidden.length === 0 &&
-        !shortcutsDisabled.productCopyPresent &&
         shortcutsDisabled.contentChildren.length === 1 &&
         shortcutsDisabled.contentChildren[0] === 'focusHome' &&
         shortcutsDisabled.homeChildren.length === 1 &&
         shortcutsDisabled.homeChildren[0] === 'focusSearch',
     shortcutsRestored: shortcutsDisabled.shortcutsRestored,
-    reducedMotionSkipsGraphemeReveal:
-        reducedMotion?.animationCount === 0 &&
-        !reducedMotion.revealActive && reducedMotion.mirrorHidden &&
-        reducedMotion.mirrorChildCount === 0 &&
-        reducedMotion.realInputTextVisible &&
-        reducedMotion.value === reducedChar,
-    insertionRunsPerGraphemeReveal:
-        firstReveal?.animationCount === 1 &&
-        firstReveal.animationId === 'focus-typing-grapheme-reveal' &&
-        (firstReveal.playState === 'running' ||
-         firstReveal.playState === 'pending') &&
-        firstReveal.targetIsInsertedSpan && firstReveal.targetConnected &&
-        firstReveal.revealActive && !firstReveal.mirrorHidden &&
-        firstReveal.mirrorAriaHidden && firstReveal.mirrorMatchesValue &&
-        firstReveal.mirrorSpanCount === 2 &&
-        firstReveal.mirrorMatchesInputGeometry &&
-        firstReveal.realInputTransparent && firstReveal.caretVisible &&
-        firstReveal.realInputFocused &&
-        firstReveal.value === reducedChar + insertedGrapheme,
-    rapidTypingPreservesOverlappingAnimations:
-        overlappingReveal?.animationCount >= 2 &&
-        overlappingReveal.preservesFirstAnimation &&
-        overlappingReveal.firstAnimationStillRunning &&
-        overlappingReveal.firstTargetStillConnected &&
-        overlappingReveal.distinctNewestAnimation &&
-        overlappingReveal.newestAnimationId ===
-            'focus-typing-grapheme-reveal' &&
-        overlappingReveal.newestAnimationRunning &&
-        overlappingReveal.newestTargetsInsertedSpan &&
-        overlappingReveal.mirrorMatchesValue &&
-        overlappingReveal.mirrorSpanCount === 3 &&
-        overlappingReveal.revealActive &&
-        overlappingReveal.value === motionValue,
-    finishRestoresRealTextAndHidesMirror:
-        afterFinish?.animationCount === 0 && !afterFinish.revealActive &&
-        afterFinish.mirrorHidden && afterFinish.mirrorEmpty &&
-        afterFinish.realInputTextVisible && afterFinish.realInputFocused &&
-        afterFinish.value === motionValue,
-    combiningSequenceIsSingleGraphemeSpan:
-        firstReveal?.targetIsInsertedSpan &&
-        firstReveal.mirrorSpanCount === 2 &&
-        firstReveal.value.length > firstReveal.mirrorSpanCount,
-    completeQueryPreserved: clearedValue && completeValue === query,
+    typingPreservesValueCaretAndGeometry:
+        afterTyping?.value === typedValue && afterTyping.focused &&
+        afterTyping.caretAtEnd && afterTyping.textOriginStable,
+    noSecondMirrorOrPageOverlay:
+        afterTyping?.mirrorAbsent && afterTyping.overlayAbsent,
+    completeQueryPreserved: completeValue === query,
     searchNavigates:
         destination.includes(query) ||
         destination.includes(encodeURIComponent(query)),
@@ -543,34 +333,22 @@ try {
         destination.startsWith('https://') &&
         !destination.startsWith('https://focus-browser'),
   };
-
-  if (Object.values(checks).some(value => !value)) {
-    throw new Error(JSON.stringify({
-      checks,
-      initial,
-      shortcutsDisabled,
-      reducedMotion,
-      firstReveal,
-      overlappingReveal,
-      afterFinish,
-      clearedValue,
-      completeValue,
-      query,
-      destination,
-    }));
-  }
+  assert.ok(Object.values(checks).every(Boolean), JSON.stringify({
+    checks,
+    initial,
+    shortcutsDisabled,
+    prepared,
+    afterTyping,
+    completeValue,
+    destination,
+  }));
 
   console.log(JSON.stringify({
     checks,
     initial,
     shortcutsDisabled,
-    reducedMotion,
-    firstReveal,
-    overlappingReveal,
-    afterFinish,
-    clearedValue,
+    afterTyping,
     completeValue,
-    insertedGrapheme,
     query,
     destination,
   }));

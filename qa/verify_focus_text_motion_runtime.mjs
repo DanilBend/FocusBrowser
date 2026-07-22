@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 
-// Runtime smoke test for the built-in Focus Text Motion component. It uses a
-// disposable profile and a local fixture only.
+// Runtime smoke test for Blink-native Focus text edit motion. It covers single
+// insertion, a multi-grapheme paste payload, Backspace, and Delete using a
+// disposable profile, a local fixture, DOM/caret probes, and screenshot hashes.
+// No page overlay, extension worker, network service, OS clipboard, or
+// persistent browser profile is involved.
 
 import assert from 'node:assert/strict';
 import {spawn, spawnSync} from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import {createServer} from 'node:http';
 import os from 'node:os';
@@ -25,6 +29,8 @@ assert.ok(fs.existsSync(chromePath), [
 
 const delay = milliseconds =>
   new Promise(resolve => setTimeout(resolve, milliseconds));
+const digest = base64 => crypto.createHash('sha256')
+    .update(Buffer.from(base64, 'base64')).digest('hex');
 
 async function waitFor(probe, description, timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
@@ -95,28 +101,149 @@ class CdpSession {
 
 const fixtureHtml = `<!doctype html>
 <meta charset="utf-8">
-<title>Focus Text Motion QA</title>
+<title>Focus native text reveal QA</title>
 <style>
-  body { font: 18px/1.4 system-ui; padding: 20px; }
-  input, textarea, [contenteditable] {
-    display: block; width: 460px; min-height: 32px; margin: 12px;
+  * { animation: none !important; transition: none !important; }
+  html, body { margin: 0; background: #181a1b; color: white; }
+  body { padding: 20px; }
+  .qa {
+    box-sizing: border-box;
+    display: block;
+    width: 420px;
+    height: 64px;
+    margin: 12px;
+    border: 0;
+    border-radius: 0;
+    padding: 10px 14px;
+    outline: 0;
+    overflow: hidden;
+    background: #101112;
+    color: #f4f4f4;
+    caret-color: transparent;
+    font: 42px/44px Consolas, monospace;
+    white-space: pre;
   }
-  iframe { width: 520px; height: 100px; }
+  textarea.qa { resize: none; }
+  iframe { display: block; width: 470px; height: 100px; border: 0; }
 </style>
-<input id="text" type="text">
-<input id="search" type="search">
-<input id="email" type="email">
-<input id="url" type="url">
-<input id="tel" type="tel">
-<input id="number" type="number">
-<input id="password" type="password">
-<textarea id="textarea"></textarea>
-<div id="editable" contenteditable="true"></div>
-<div id="ime" contenteditable="true"></div>
-<iframe id="frame" src="/frame"></iframe>`;
+<input id="input" class="qa" autocomplete="off" spellcheck="false">
+<input id="password" type="password" class="qa" autocomplete="new-password">
+<textarea id="textarea" class="qa" autocomplete="off" spellcheck="false"></textarea>
+<div id="editable" class="qa" contenteditable="true" spellcheck="false"></div>
+<div id="openHost"></div>
+<div id="closedHost"></div>
+<iframe id="frame" src="/frame"></iframe>
+<script>
+  const prefix = 'Stable';
 
-const frameHtml = `<!doctype html><meta charset="utf-8">
-<input id="frameInput" type="text" style="font:18px system-ui;width:420px">`;
+  const openRoot = document.querySelector('#openHost').attachShadow({mode: 'open'});
+  openRoot.innerHTML = '<style>.qa{box-sizing:border-box;display:block;width:420px;height:64px;margin:12px;border:0;border-radius:0;padding:10px 14px;outline:0;overflow:hidden;background:#101112;color:#f4f4f4;caret-color:transparent;font:42px/44px Consolas,monospace;white-space:pre}</style><input id="input" class="qa" autocomplete="off" spellcheck="false">';
+
+  const closedRoot = document.querySelector('#closedHost').attachShadow({mode: 'closed'});
+  closedRoot.innerHTML = openRoot.innerHTML;
+  const closedInput = closedRoot.querySelector('#input');
+
+  function prepareInput(element, value = prefix, caret = value.length) {
+    element.value = value;
+    element.focus();
+    element.setSelectionRange(caret, caret);
+  }
+
+  function prepareEditable(element, value = prefix, caret = value.length) {
+    element.textContent = value;
+    element.focus();
+    const range = document.createRange();
+    const text = element.firstChild;
+    if (text) {
+      range.setStart(text, Math.min(caret, text.length));
+    } else {
+      range.setStart(element, 0);
+    }
+    range.collapse(true);
+    const selection = getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function selectionOffset(element, node, offset) {
+    if (!node || (node !== element && !element.contains(node))) {
+      return null;
+    }
+    const range = element.ownerDocument.createRange();
+    range.selectNodeContents(element);
+    range.setEnd(node, offset);
+    return range.toString().length;
+  }
+
+  function state(element) {
+    const rect = element.getBoundingClientRect();
+    if ('value' in element && typeof element.selectionStart === 'number') {
+      return {
+        value: element.value,
+        selectionStart: element.selectionStart,
+        selectionEnd: element.selectionEnd,
+        rect: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
+      };
+    }
+    const selection = element.ownerDocument.getSelection();
+    return {
+      value: element.textContent,
+      selectionStart: selectionOffset(
+          element, selection?.anchorNode, selection?.anchorOffset || 0),
+      selectionEnd: selectionOffset(
+          element, selection?.focusNode, selection?.focusOffset || 0),
+      rect: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
+    };
+  }
+
+  function geometry(element, frameElement = null, stablePrefix = prefix) {
+    const rect = element.getBoundingClientRect();
+    const frameRect = frameElement?.getBoundingClientRect() || {left: 0, top: 0};
+    const style = element.ownerDocument.defaultView.getComputedStyle(element);
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    context.font = style.font;
+    const prefixWidth = context.measureText(stablePrefix).width;
+    const left = frameRect.left + rect.left;
+    const top = frameRect.top + rect.top;
+    const paddingLeft = parseFloat(style.paddingLeft) || 0;
+    return {
+      full: {
+        x: Math.floor(left),
+        y: Math.floor(top),
+        width: Math.ceil(rect.width),
+        height: Math.ceil(rect.height),
+      },
+      // Exclude the final two pixels to avoid antialiasing from the newly
+      // inserted glyph at the range boundary.
+      prefix: {
+        x: Math.floor(left + paddingLeft),
+        y: Math.floor(top + 4),
+        width: Math.max(1, Math.floor(prefixWidth - 2)),
+        height: Math.max(1, Math.ceil(rect.height - 8)),
+      },
+    };
+  }
+
+  window.qa = {
+    prepareInput,
+    prepareEditable,
+    state,
+    geometry,
+    openInput: openRoot.querySelector('#input'),
+    closedInput,
+    prefix,
+  };
+</script>`;
+
+const frameHtml = `<!doctype html>
+<meta charset="utf-8">
+<style>
+  * { animation: none !important; transition: none !important; }
+  html, body { margin: 0; background: #181a1b; }
+  .qa { box-sizing:border-box;display:block;width:420px;height:64px;margin:12px;border:0;border-radius:0;padding:10px 14px;outline:0;overflow:hidden;background:#101112;color:#f4f4f4;caret-color:transparent;font:42px/44px Consolas,monospace;white-space:pre; }
+</style>
+<input id="input" class="qa" autocomplete="off" spellcheck="false">`;
 
 const server = createServer((request, response) => {
   response.writeHead(200, {
@@ -135,11 +262,15 @@ const address = server.address();
 assert.ok(address && typeof address !== 'string');
 const fixtureUrl = `http://127.0.0.1:${address.port}/`;
 const profileDir = fs.mkdtempSync(
-    path.join(os.tmpdir(), 'focus-text-motion-qa-'));
+    path.join(os.tmpdir(), 'focus-native-text-motion-qa-'));
 const devToolsPortFile = path.join(profileDir, 'DevToolsActivePort');
 const browser = spawn(chromePath, [
   `--user-data-dir=${profileDir}`,
   '--remote-debugging-port=0',
+  '--headless=new',
+  '--window-size=900,900',
+  '--force-device-scale-factor=1',
+  '--hide-scrollbars',
   '--no-first-run',
   '--no-default-browser-check',
   '--disable-background-networking',
@@ -148,12 +279,10 @@ const browser = spawn(chromePath, [
 ], {stdio: 'ignore'});
 
 let session = null;
-let workerSession = null;
-let originalMotionPreference = null;
 const results = [];
 
-async function evaluateIn(cdp, expression) {
-  const result = await cdp.send('Runtime.evaluate', {
+async function evaluate(expression) {
+  const result = await session.send('Runtime.evaluate', {
     expression,
     awaitPromise: true,
     returnByValue: true,
@@ -164,46 +293,212 @@ async function evaluateIn(cdp, expression) {
   return result.result?.value;
 }
 
-const evaluate = expression => evaluateIn(session, expression);
-
-async function readMotionPreference() {
-  return workerEvaluate(`new Promise(resolve =>
-    chrome.settingsPrivate.getPref(
-        'focus.ui.motion_enabled', pref => resolve(pref?.value === true)))`);
+async function capture(clip) {
+  const result = await session.send('Page.captureScreenshot', {
+    format: 'png',
+    fromSurface: true,
+    captureBeyondViewport: false,
+    clip: {...clip, scale: 1},
+  });
+  return digest(result.data);
 }
 
-async function setMotionPreference(enabled) {
-  const success = await workerEvaluate(`new Promise(resolve =>
-    chrome.settingsPrivate.setPref(
-        'focus.ui.motion_enabled', ${enabled}, '', resolve))`);
-  assert.equal(success, true, `failed to set motion preference to ${enabled}`);
-  await waitFor(
-      async () => (await readMotionPreference()) === enabled,
-      `native motion preference=${enabled}`, 3000);
+async function sampleInsertion(spec, expectMotion = true) {
+  await evaluate(spec.prepare);
+  await delay(35);
+  const geometry = await evaluate(spec.geometry);
+  await session.send('Input.insertText', {text: 'F'});
+
+  const requestedTimes = [0, 24, 55, 95, 220, 300];
+  const started = Date.now();
+  const samples = [];
+  for (const requestedMs of requestedTimes) {
+    await delay(Math.max(0, started + requestedMs - Date.now()));
+    const full = await capture(geometry.full);
+    const prefix = await capture(geometry.prefix);
+    samples.push({elapsedMs: Date.now() - started, full, prefix});
+  }
+
+  const fullHashes = samples.map(sample => sample.full);
+  const prefixHashes = samples.map(sample => sample.prefix);
+  const uniqueFull = new Set(fullHashes).size;
+  const uniquePrefix = new Set(prefixHashes).size;
+  assert.equal(uniquePrefix, 1,
+               `${spec.name}: pre-existing glyph pixels moved or faded`);
+  if (expectMotion) {
+    assert.ok(uniqueFull >= 2,
+              `${spec.name}: inserted glyph did not produce transient paint`);
+    assert.equal(fullHashes.at(-1), fullHashes.at(-2),
+                 `${spec.name}: settle did not finish after 220 ms`);
+  } else {
+    assert.equal(uniqueFull, 1,
+                 `${spec.name}: reduced motion did not suppress reveal`);
+  }
+
+  results.push({
+    target: spec.name,
+    expectedMotion: expectMotion,
+    uniqueFullFrames: uniqueFull,
+    stablePrefixFrames: uniquePrefix,
+    samples: samples.map(sample => ({
+      elapsedMs: sample.elapsedMs,
+      full: sample.full.slice(0, 12),
+      prefix: sample.prefix.slice(0, 12),
+    })),
+  });
 }
 
-const workerEvaluate = expression => evaluateIn(workerSession, expression);
+function assertTextState(state, expectedValue, expectedCaret, label) {
+  assert.equal(state?.value, expectedValue, `${label}: value was not committed`);
+  assert.equal(
+      state?.selectionStart, expectedCaret,
+      `${label}: selection start did not move immediately`);
+  assert.equal(
+      state?.selectionEnd, expectedCaret,
+      `${label}: selection end did not move immediately`);
+}
 
-const mainActive = () => evaluate(`Number(
-  document.querySelector('[data-focus-text-motion]')?.
-      getAttribute('data-focus-motion-active') || 0)`);
-const frameActive = () => evaluate(`Number(
-  document.querySelector('#frame').contentDocument.
-      querySelector('[data-focus-text-motion]')?.
-      getAttribute('data-focus-motion-active') || 0)`);
+function assertStableRect(actual, expected, label) {
+  for (const key of ['x', 'y', 'width', 'height']) {
+    assert.ok(
+        Math.abs(actual[key] - expected[key]) < 0.01,
+        `${label}: field geometry changed (${key})`);
+  }
+}
 
-async function typeAndObserve(selector, text, activeProbe = mainActive) {
-  await evaluate(`(() => {
-    const target = ${selector};
-    target.focus();
-    if ('value' in target) target.value = '';
-    else target.textContent = '';
-  })()`);
-  await session.send('Input.insertText', {text});
-  const count = await waitFor(
-      async () => (await activeProbe()) > 0 ? await activeProbe() : 0,
-      `glyph animation for ${selector}`, 3000);
-  results.push({target: selector, activeGlyphs: count});
+async function dispatchEditingKey(key, code, windowsVirtualKeyCode) {
+  const event = {key, code, windowsVirtualKeyCode, nativeVirtualKeyCode: windowsVirtualKeyCode};
+  await session.send('Input.dispatchKeyEvent', {type: 'rawKeyDown', ...event});
+  await session.send('Input.dispatchKeyEvent', {type: 'keyUp', ...event});
+}
+
+async function sampleEditMotion({
+  name,
+  operation,
+  prepare,
+  state,
+  geometry,
+  action,
+  initialValue,
+  initialCaret,
+  expectedValue,
+  expectedCaret,
+  requestedTimes,
+  minimumTransientFrames = 3,
+}) {
+  await evaluate(prepare);
+  await delay(35);
+  const clip = await evaluate(geometry);
+  const before = await evaluate(state);
+  assertTextState(before, initialValue, initialCaret, `${name} initial state`);
+
+  const started = Date.now();
+  await action();
+  const immediate = await evaluate(state);
+  const immediateElapsedMs = Date.now() - started;
+  assertTextState(
+      immediate, expectedValue, expectedCaret, `${name} immediate state`);
+  assertStableRect(immediate.rect, before.rect, `${name} immediate state`);
+
+  // Capture several full-field frames back-to-back before the prefix crop and
+  // scheduled sampling add latency. The settle curve is intentionally fast;
+  // these rapid frames make the transient-paint assertion deterministic even
+  // on a busy machine while still checking value/caret after every capture.
+  const rapidSamples = [];
+  for (let index = 0; index < 3; ++index) {
+    const full = await capture(clip.full);
+    const currentState = await evaluate(state);
+    assertTextState(
+        currentState, expectedValue, expectedCaret,
+        `${name} rapid frame ${index + 1}`);
+    assertStableRect(
+        currentState.rect, before.rect, `${name} rapid frame ${index + 1}`);
+    rapidSamples.push({
+      elapsedMs: Date.now() - started,
+      full,
+      value: currentState.value,
+      caret: currentState.selectionEnd,
+    });
+  }
+
+  const samples = [];
+  for (const requestedMs of requestedTimes) {
+    await delay(Math.max(0, started + requestedMs - Date.now()));
+    const full = await capture(clip.full);
+    const prefix = await capture(clip.prefix);
+    const currentState = await evaluate(state);
+    assertTextState(
+        currentState, expectedValue, expectedCaret,
+        `${name} frame at ${requestedMs} ms`);
+    assertStableRect(
+        currentState.rect, before.rect, `${name} frame at ${requestedMs} ms`);
+    samples.push({
+      elapsedMs: Date.now() - started,
+      full,
+      prefix,
+      value: currentState.value,
+      caret: currentState.selectionEnd,
+    });
+  }
+
+  const fullHashes = [
+    ...rapidSamples.map(sample => sample.full),
+    ...samples.map(sample => sample.full),
+  ];
+  const prefixHashes = samples.map(sample => sample.prefix);
+  const uniqueFull = new Set(fullHashes).size;
+  const uniquePrefix = new Set(prefixHashes).size;
+  assert.equal(
+      uniquePrefix, 1,
+      `${name}: stable prefix moved, faded, or was repainted differently`);
+  if (uniqueFull < minimumTransientFrames) {
+    console.error(JSON.stringify({
+      diagnostic: 'insufficient transient frames',
+      name,
+      minimumTransientFrames,
+      uniqueFullFrames: uniqueFull,
+      samples: samples.map(sample => ({
+        elapsedMs: sample.elapsedMs,
+        full: sample.full.slice(0, 12),
+        prefix: sample.prefix.slice(0, 12),
+      })),
+    }, null, 2));
+  }
+  assert.ok(
+      uniqueFull >= minimumTransientFrames,
+      `${name}: expected multiple transient paint frames, got ${uniqueFull}`);
+  assert.equal(
+      fullHashes.at(-1), fullHashes.at(-2),
+      `${name}: final paint did not stabilize`);
+
+  const finalState = await evaluate(state);
+  assertTextState(finalState, expectedValue, expectedCaret, `${name} final state`);
+  assertStableRect(finalState.rect, before.rect, `${name} final state`);
+
+  results.push({
+    target: name,
+    operation,
+    expectedMotion: true,
+    immediateCommitObservedAfterMs: immediateElapsedMs,
+    initialValue,
+    expectedValue,
+    expectedCaret,
+    uniqueFullFrames: uniqueFull,
+    stablePrefixFrames: uniquePrefix,
+    rapidSamples: rapidSamples.map(sample => ({
+      elapsedMs: sample.elapsedMs,
+      full: sample.full.slice(0, 12),
+      value: sample.value,
+      caret: sample.caret,
+    })),
+    samples: samples.map(sample => ({
+      elapsedMs: sample.elapsedMs,
+      full: sample.full.slice(0, 12),
+      prefix: sample.prefix.slice(0, 12),
+      value: sample.value,
+      caret: sample.caret,
+    })),
+  });
 }
 
 try {
@@ -224,142 +519,168 @@ try {
   await session.send('Runtime.enable');
   await session.send('Page.enable');
   await waitFor(
-      () => evaluate("document.readyState === 'complete'"),
-      'fixture document');
-  await delay(500);
+      () => evaluate("document.readyState === 'complete' && !!document.querySelector('#frame').contentDocument?.querySelector('#input')"),
+      'fixture and frame document');
+  await delay(150);
 
-  const workerTarget = await waitFor(async () => {
-    const targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
-    return targets.find(target =>
-      target.type === 'service_worker' &&
-      target.url ===
-          'chrome-extension://ajekofejbbjbbkdfnlghakcilbfdmofc/background.js');
-  }, 'Focus Text Motion service worker', 5000);
-  workerSession = new CdpSession(workerTarget.webSocketDebuggerUrl);
-  await workerSession.connect();
-  await workerSession.send('Runtime.enable');
-  originalMotionPreference = await readMotionPreference();
-  assert.equal(originalMotionPreference, true,
-               'fresh profile motion preference must default to true');
+  assert.equal(await evaluate(
+      "document.querySelector('[data-focus-text-motion]') === null"), true,
+  'native implementation must not inject a page overlay');
 
-  for (const [selector, text] of [
-    ["document.querySelector('#text')", 'Focus'],
-    ["document.querySelector('#search')", 'search'],
-    ["document.querySelector('#email')", 'a@b.co'],
-    ["document.querySelector('#url')", 'https://focus.test'],
-    ["document.querySelector('#tel')", '+373'],
-    ["document.querySelector('#number')", '42'],
-    ["document.querySelector('#textarea')", 'water'],
-    ["document.querySelector('#editable')", 'flow'],
-  ]) {
-    await typeAndObserve(selector, text);
-    if (selector === "document.querySelector('#text')") {
-      const overlayGeometry = await evaluate(`(() => {
-        const host = document.querySelector('[data-focus-text-motion]');
-        const rect = host.getBoundingClientRect();
-        const style = getComputedStyle(host);
-        return {
-          display: style.display,
-          visibility: style.visibility,
-          width: rect.width,
-          height: rect.height,
-          viewportWidth: innerWidth,
-          viewportHeight: innerHeight,
-        };
-      })()`);
-      assert.notEqual(overlayGeometry.display, 'none');
-      assert.equal(overlayGeometry.visibility, 'visible');
-      assert.ok(overlayGeometry.width >= overlayGeometry.viewportWidth - 1);
-      assert.ok(overlayGeometry.height >= overlayGeometry.viewportHeight - 1);
-      results.push({target: 'overlay viewport', ...overlayGeometry});
-    }
-    await delay(380);
+  const specs = [
+    {
+      name: 'input',
+      prepare: "qa.prepareInput(document.querySelector('#input'))",
+      geometry: "qa.geometry(document.querySelector('#input'))",
+    },
+    {
+      name: 'textarea',
+      prepare: "qa.prepareInput(document.querySelector('#textarea'))",
+      geometry: "qa.geometry(document.querySelector('#textarea'))",
+    },
+    {
+      name: 'password input',
+      prepare: "qa.prepareInput(document.querySelector('#password'))",
+      geometry: "qa.geometry(document.querySelector('#password'))",
+    },
+    {
+      name: 'contenteditable',
+      prepare: "qa.prepareEditable(document.querySelector('#editable'))",
+      geometry: "qa.geometry(document.querySelector('#editable'))",
+    },
+    {
+      name: 'open shadow input',
+      prepare: 'qa.prepareInput(qa.openInput)',
+      geometry: 'qa.geometry(qa.openInput)',
+    },
+    {
+      name: 'closed shadow input',
+      prepare: 'qa.prepareInput(qa.closedInput)',
+      geometry: 'qa.geometry(qa.closedInput)',
+    },
+    {
+      name: 'same-origin iframe input',
+      prepare: "qa.prepareInput(document.querySelector('#frame').contentDocument.querySelector('#input'))",
+      geometry: "qa.geometry(document.querySelector('#frame').contentDocument.querySelector('#input'), document.querySelector('#frame'))",
+    },
+  ];
+
+  for (const spec of specs) {
+    await sampleInsertion(spec);
   }
 
-  await typeAndObserve(
-      "document.querySelector('#password')", 'private');
-  const passwordResult = results.at(-1);
-  assert.equal(passwordResult.activeGlyphs, 1,
-               'password must animate one generic bullet only');
-  assert.equal(await evaluate(`document.querySelector(
-      '[data-focus-text-motion]').shadowRoot === null`), true,
-  'animation overlay must use a closed shadow root');
-  await delay(380);
+  // Exercise the same native editing pipeline with a paste-sized payload and
+  // real Backspace/Delete key events. Input.insertText is deliberately used
+  // for the paste payload so this isolated test never reads or overwrites the
+  // user's real OS clipboard.
+  const editableSpecs = [
+    {
+      name: 'input',
+      target: "document.querySelector('#input')",
+      prepareFunction: 'prepareInput',
+    },
+    {
+      name: 'textarea',
+      target: "document.querySelector('#textarea')",
+      prepareFunction: 'prepareInput',
+    },
+    {
+      name: 'contenteditable',
+      target: "document.querySelector('#editable')",
+      prepareFunction: 'prepareEditable',
+    },
+  ];
+  const expressionFor = (spec, functionName, ...args) =>
+    `qa.${functionName}(${spec.target},${args.map(arg => JSON.stringify(arg)).join(',')})`;
+  const stateFor = spec => `qa.state(${spec.target})`;
+  const geometryFor = (spec, stablePrefix) =>
+    `qa.geometry(${spec.target},null,${JSON.stringify(stablePrefix)})`;
 
-  await typeAndObserve(
-      "document.querySelector('#frame').contentDocument.querySelector('#frameInput')",
-      'frame', frameActive);
-  await delay(380);
+  const pastePrefix = 'Stable';
+  const pastePayload = 'A\u{1F469}\u200D\u{1F4BB}\u0411';
+  const pasteExpected = pastePrefix + pastePayload;
+  const pasteTimes = [0, 28, 60, 100, 150, 230, 340, 440];
 
-  await evaluate(`(() => {
-    const target = document.querySelector('#ime');
-    target.focus();
-    target.dispatchEvent(new CompositionEvent(
-        'compositionstart', {bubbles: true, data: ''}));
-    target.textContent = 'Ж';
-    const range = document.createRange();
-    range.selectNodeContents(target);
-    range.collapse(false);
-    const selection = getSelection();
-    selection.removeAllRanges();
-    selection.addRange(range);
-    target.dispatchEvent(new CompositionEvent(
-        'compositionend', {bubbles: true, data: 'Ж'}));
-  })()`);
-  const imeCount = await waitFor(
-      async () => (await mainActive()) > 0 ? await mainActive() : 0,
-      'IME commit glyph animation', 3000);
-  results.push({target: 'IME composition commit', activeGlyphs: imeCount});
-  await delay(380);
+  const deletionPrefix = 'StableA';
+  const deletedGrapheme = '\u{1F469}\u200D\u{1F4BB}';
+  const deletionTail = '\u0411Z';
+  const deletionInitial = deletionPrefix + deletedGrapheme + deletionTail;
+  const deletionExpected = deletionPrefix + deletionTail;
+  const deleteTimes = [0, 24, 55, 95, 230, 330];
 
-  await setMotionPreference(false);
-  await delay(100);
-  assert.equal(await mainActive(), 0);
-  await evaluate(`(() => {
-    const target = document.querySelector('#text');
-    target.value = '';
-    target.focus();
-  })()`);
-  await session.send('Input.insertText', {text: 'disabled'});
-  await delay(120);
-  assert.equal(await mainActive(), 0,
-               'native pref=false must suppress glyph animation live');
-  results.push({target: 'native pref=false (live)', activeGlyphs: 0});
+  for (const spec of editableSpecs) {
+    await sampleEditMotion({
+      name: `${spec.name} multi-grapheme paste payload`,
+      operation: 'multi-grapheme paste payload via native Input.insertText',
+      prepare: expressionFor(
+          spec, spec.prepareFunction, pastePrefix, pastePrefix.length),
+      state: stateFor(spec),
+      geometry: geometryFor(spec, pastePrefix),
+      action: () => session.send('Input.insertText', {text: pastePayload}),
+      initialValue: pastePrefix,
+      initialCaret: pastePrefix.length,
+      expectedValue: pasteExpected,
+      expectedCaret: pasteExpected.length,
+      requestedTimes: pasteTimes,
+    });
 
-  await setMotionPreference(true);
-  await delay(100);
-  await evaluate(`(() => {
-    const target = document.querySelector('#text');
-    target.value = '';
-    target.focus();
-  })()`);
-  await session.send('Input.insertText', {text: 'enabled'});
-  const liveEnabledCount = await waitFor(
-      async () => (await mainActive()) > 0 ? await mainActive() : 0,
-      'native pref=true live glyph animation', 3000);
-  results.push({
-    target: 'native pref=true (live)',
-    activeGlyphs: liveEnabledCount,
-  });
-  await delay(380);
+    await sampleEditMotion({
+      name: `${spec.name} Backspace grapheme deletion`,
+      operation: 'Backspace deletes one Unicode grapheme',
+      prepare: expressionFor(
+          spec, spec.prepareFunction, deletionInitial,
+          deletionPrefix.length + deletedGrapheme.length),
+      state: stateFor(spec),
+      geometry: geometryFor(spec, deletionPrefix),
+      action: () => dispatchEditingKey('Backspace', 'Backspace', 8),
+      initialValue: deletionInitial,
+      initialCaret: deletionPrefix.length + deletedGrapheme.length,
+      expectedValue: deletionExpected,
+      expectedCaret: deletionPrefix.length,
+      requestedTimes: deleteTimes,
+    });
+
+    await sampleEditMotion({
+      name: `${spec.name} Delete grapheme deletion`,
+      operation: 'Delete removes one Unicode grapheme',
+      prepare: expressionFor(
+          spec, spec.prepareFunction, deletionInitial, deletionPrefix.length),
+      state: stateFor(spec),
+      geometry: geometryFor(spec, deletionPrefix),
+      action: () => dispatchEditingKey('Delete', 'Delete', 46),
+      initialValue: deletionInitial,
+      initialCaret: deletionPrefix.length,
+      expectedValue: deletionExpected,
+      expectedCaret: deletionPrefix.length,
+      requestedTimes: deleteTimes,
+    });
+  }
 
   await session.send('Emulation.setEmulatedMedia', {
     features: [{name: 'prefers-reduced-motion', value: 'reduce'}],
   });
-  await delay(100);
-  await evaluate("document.querySelector('#text').focus()");
-  await session.send('Input.insertText', {text: 'x'});
-  await delay(100);
-  assert.equal(await mainActive(), 0,
-               'reduced-motion must suppress glyph animation');
-  results.push({target: 'prefers-reduced-motion', activeGlyphs: 0});
+  await delay(80);
+  await sampleInsertion({
+    name: 'prefers-reduced-motion',
+    prepare: "qa.prepareInput(document.querySelector('#input'))",
+    geometry: "qa.geometry(document.querySelector('#input'))",
+  }, false);
 
   const report = {
     ok: true,
     executable: chromePath,
-    fixture: 'local HTTP only',
-    nativePreferenceLiveToggle: 'false => 0, true => animated',
-    cleanup: 'Browser.close then exact spawned PID tree fallback',
+    implementation: 'Blink native range paint',
+    fixture: 'local HTTP only; disposable profile',
+    invariants: [
+      'inserted glyph produces transient paint frames',
+      'multi-grapheme paste payload produces multiple transient paint frames',
+      'Backspace and Delete commit value and caret before animation sampling',
+      'Backspace and Delete remove one complete Unicode grapheme',
+      'pre-existing prefix stays pixel-stable',
+      'field geometry stays stable throughout paint-only motion',
+      'no DOM overlay is injected',
+      'prefers-reduced-motion suppresses the reveal',
+    ],
     results,
   };
   if (reportPath) {
@@ -367,20 +688,9 @@ try {
   }
   console.log(JSON.stringify(report, null, 2));
 } finally {
-  if (workerSession && typeof originalMotionPreference === 'boolean') {
-    try {
-      await setMotionPreference(originalMotionPreference);
-    } catch {
-      // The disposable profile is removed below even if the worker exited.
-    }
-  }
-  workerSession?.close();
   if (session) {
     try {
-      await Promise.race([
-        session.send('Browser.close'),
-        delay(1500),
-      ]);
+      await Promise.race([session.send('Browser.close'), delay(1500)]);
     } catch {
       // Fall through to the exact-PID tree cleanup below.
     }
@@ -400,7 +710,7 @@ try {
     }
   }
   await new Promise(resolve => server.close(resolve));
-  await delay(200);
+  await delay(100);
   fs.rmSync(profileDir, {
     recursive: true,
     force: true,

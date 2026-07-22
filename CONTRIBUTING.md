@@ -1,34 +1,37 @@
-# Contributing
+# Участие в разработке
 
-Thanks for helping improve Focus Browser.
+<p><strong>Русский</strong> · <a href="CONTRIBUTING.en.md">English</a></p>
 
-## Before opening a pull request
+Спасибо, что помогаете улучшать Focus Browser.
 
-1. Keep changes focused and do not commit `build/`, browser profiles, logs,
-   archives or compiled binaries.
-2. Preserve third-party copyright and license notices.
-3. Do not add private keys, tokens, cookies, profile data or machine-specific
-   paths.
-4. Run the lightweight checks:
+## Перед созданием pull request
+
+1. Делайте изменение узким и законченным. Не добавляйте в Git каталог
+   `build/`, профили браузера, журналы, архивы и собранные бинарные файлы.
+2. Сохраняйте уведомления об авторских правах и лицензиях сторонних
+   компонентов.
+3. Не добавляйте закрытые ключи, токены, cookies, данные профиля и пути,
+   зависящие от конкретного компьютера.
+4. Выполните быстрые проверки:
 
 ```powershell
 python build_support/test_release_configuration.py
 node .github/actions/stage/release-version.test.js
 ```
 
-For browser UI changes, also run the relevant scripts under `qa/` with a
-disposable `--user-data-dir` and attach screenshots to the pull request.
+Для изменений интерфейса также запустите подходящие сценарии из `qa/` с
+одноразовым `--user-data-dir` и приложите к pull request снимки экрана.
 
-## Pull requests
+## Pull request
 
-Describe what changed, why it changed, how it affects users and exactly which
-checks were run. Large unrelated rewrites should be split into separate pull
-requests.
+Опишите, что и зачем изменено, как это повлияет на пользователей и какие
+проверки были выполнены. Большие несвязанные изменения разделяйте на несколько
+pull request.
 
-## Licensing
+## Лицензирование
 
-By contributing GPL-covered project code, you agree that your contribution is
-available under GPL-3.0. Do not contribute third-party material unless its
-license is compatible and the required notices are included. The
-Unhook-derived FocusYoutube directory is governed separately; changes to that
-material require permission consistent with its component terms.
+Добавляя проектный код, охватываемый GPL, вы соглашаетесь распространять свой
+вклад по GPL-3.0. Не добавляйте сторонние материалы без совместимой лицензии и
+необходимых уведомлений. Каталог FocusYoutube, содержащий материалы на основе
+Unhook, регулируется отдельно; изменения в нём требуют разрешения, совместимого
+с условиями этого компонента.

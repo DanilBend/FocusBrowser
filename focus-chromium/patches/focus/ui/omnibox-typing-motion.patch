@@ -10,56 +10,11 @@ index 05615e7..bc58d88 100644
        "//components/history_embeddings/content",
        "//components/history_embeddings/core",
        "//components/lens",
-diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.h b/chrome/browser/ui/views/location_bar/location_bar_view.h
-index 015b1e1..22af0b5 100644
---- a/chrome/browser/ui/views/location_bar/location_bar_view.h
-+++ b/chrome/browser/ui/views/location_bar/location_bar_view.h
-@@ -289,6 +289,16 @@ class LocationBarView
-   void OnOmniboxFocused();
-   void OnOmniboxBlurred();
- 
-+  // Starts the reusable text-reveal animation for a committed omnibox edit.
-+  // Caret-only changes never reach this method.
-+  void OnOmniboxInputEdited();
-+
-+  // Exposes the current reveal state to the omnibox text painter. The
-+  // animation is owned here so the profile motion preference has one native
-+  // source of truth.
-+  bool IsOmniboxTypingAnimationRunning() const;
-+  double GetOmniboxTypingAnimationValue() const;
-+
-   // Called when omnibox view receives mouse notifications relevant to hover.
-   // |is_hovering| should be true when mouse is in omnibox; false when exited.
-   void OnOmniboxHovered(bool is_hovering);
-@@ -353,6 +363,13 @@ class LocationBarView
-   // Updates the background on a theme change, or dropdown state change.
-   void RefreshBackground();
- 
-+  // Returns whether Focus-specific native transitions may run for this
-+  // profile and accessibility environment.
-+  bool ShouldAnimateFocusMotion() const;
-+
-+  // Stops running Focus motion immediately when the preference changes.
-+  void OnFocusMotionPreferenceChanged();
-+
-   // Updates the visibility state of the Content Blocked icons to reflect what
-   // is actually blocked on the current page. Returns true if the visibility
-   // of at least one of the views in |content_setting_views_| changed.
-@@ -609,6 +626,9 @@ class LocationBarView
-   // Animation to change whole location bar background color on hover.
-   gfx::SlideAnimation hover_animation_{this};
- 
-+  // A single animation object reused for every committed omnibox text reveal.
-+  gfx::SlideAnimation typing_animation_{this};
-+
-   // Whether we're in popup mode (i.e. location bar is situated within a popup
-   // window). This value also controls whether the location bar is read-only.
-   const bool is_popup_mode_;
 diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.cc b/chrome/browser/ui/views/location_bar/location_bar_view.cc
-index 7865b06..50877a3 100644
+index 7865b06..c929749 100644
 --- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
 +++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
-@@ -118,6 +119,7 @@
+@@ -118,6 +118,7 @@
  #include "components/contextual_search/input_state_model.h"
  #include "components/dom_distiller/core/dom_distiller_features.h"
  #include "components/favicon/content/content_favicon_driver.h"
@@ -79,62 +34,10 @@ index 7865b06..50877a3 100644
    }
  
    run_omnibox_context_menu_callback_ =
-@@ -564,6 +570,9 @@ void LocationBarView::Init() {
-   Update(nullptr);
- 
-   hover_animation_.SetSlideDuration(base::Milliseconds(200));
-+  // Word-like glyph reveals should be visible without making fast typing feel
-+  // sluggish. SlideAnimation supplies an ease-out curve by default.
-+  typing_animation_.SetSlideDuration(base::Milliseconds(210));
- 
-   is_initialized_ = true;
- }
-@@ -2007,17 +2016,20 @@ void LocationBarView::ClearInPopupStateTransition() {
- }
- 
- void LocationBarView::AnimationProgressed(const gfx::Animation* animation) {
--  DCHECK_EQ(animation, &hover_animation_);
-+  DCHECK(animation == &hover_animation_ || animation == &typing_animation_);
-   RefreshBackground();
-+  if (animation == &typing_animation_ && omnibox_view_) {
-+    omnibox_view_->SchedulePaint();
-+  }
- }
- 
- void LocationBarView::AnimationEnded(const gfx::Animation* animation) {
--  DCHECK_EQ(animation, &hover_animation_);
-+  DCHECK(animation == &hover_animation_ || animation == &typing_animation_);
-   AnimationProgressed(animation);
- }
- 
- void LocationBarView::AnimationCanceled(const gfx::Animation* animation) {
--  DCHECK_EQ(animation, &hover_animation_);
-+  DCHECK(animation == &hover_animation_ || animation == &typing_animation_);
-   AnimationProgressed(animation);
- }
- 
-@@ -2086,12 +2098,53 @@ void LocationBarView::OnOmniboxBlurred() {
+@@ -2086,12 +2092,37 @@ void LocationBarView::OnOmniboxBlurred() {
    location_icon_view_->Update(false, false);
  }
  
-+void LocationBarView::OnOmniboxInputEdited() {
-+  typing_animation_.Reset();
-+  if (!is_initialized_ || is_popup_mode_ || !ShouldAnimateFocusMotion()) {
-+    RefreshBackground();
-+    return;
-+  }
-+
-+  typing_animation_.Show();
-+}
-+
-+bool LocationBarView::IsOmniboxTypingAnimationRunning() const {
-+  return typing_animation_.is_animating();
-+}
-+
-+double LocationBarView::GetOmniboxTypingAnimationValue() const {
-+  return typing_animation_.GetCurrentValue();
-+}
-+
 +bool LocationBarView::ShouldAnimateFocusMotion() const {
 +  return profile_ &&
 +         profile_->GetPrefs()->GetBoolean(prefs::kFocusMotionEnabled) &&
@@ -145,7 +48,9 @@ index 7865b06..50877a3 100644
 +}
 +
 +void LocationBarView::OnFocusMotionPreferenceChanged() {
-+  typing_animation_.Reset();
++  if (omnibox_view_) {
++    omnibox_view_->CancelFocusTypingReveals();
++  }
 +  const bool should_show_hover =
 +      IsMouseHovered() && omnibox_view_ && !omnibox_view_->HasFocus();
 +  hover_animation_.Reset(should_show_hover ? 1.0 : 0.0);
@@ -172,145 +77,28 @@ index 7865b06..50877a3 100644
    } else {
      hover_animation_.Hide();
    }
-diff --git a/chrome/browser/ui/views/omnibox/omnibox_view_views.cc b/chrome/browser/ui/views/omnibox/omnibox_view_views.cc
-index df62dbb..dcf48a8 100644
---- a/chrome/browser/ui/views/omnibox/omnibox_view_views.cc
-+++ b/chrome/browser/ui/views/omnibox/omnibox_view_views.cc
-@@ -708,7 +708,30 @@ void OmniboxViewViews::OnPaint(gfx::Canvas* canvas) {
+diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.h b/chrome/browser/ui/views/location_bar/location_bar_view.h
+index 015b1e1..c4ed3b3 100644
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.h
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.h
+@@ -289,6 +289,10 @@ class LocationBarView
+   void OnOmniboxFocused();
+   void OnOmniboxBlurred();
  
-   {
-     SCOPED_UMA_HISTOGRAM_TIMER("Omnibox.PaintTime");
-+    gfx::Range reveal_range = focus_typing_inserted_range_;
-+    const bool reveal_inserted_text =
-+        location_bar_view_ &&
-+        location_bar_view_->IsOmniboxTypingAnimationRunning() &&
-+        reveal_range.IsValid() && reveal_range.end() <= GetText().size();
-+    if (reveal_inserted_text) {
-+      reveal_range = GetRenderText()->ExpandRangeToGraphemeBoundary(reveal_range);
-+      // Only the newly committed glyphs fade in. Existing text, the field
-+      // background, selection, and caret remain stable, matching the subtle
-+      // character reveal used by desktop word processors.
-+      const double progress =
-+          location_bar_view_->GetOmniboxTypingAnimationValue();
-+      const SkAlpha alpha = static_cast<SkAlpha>(
-+          std::clamp(0.18 + 0.82 * progress, 0.0, 1.0) * 255.0);
-+      ApplyColor(SkColorSetA(
-+                     GetColorProvider()->GetColor(kColorOmniboxText), alpha),
-+                 reveal_range);
-+    }
-     Textfield::OnPaint(canvas);
-+    if (reveal_inserted_text) {
-+      // Restore the normal URL/search styling immediately after this frame so
-+      // the animation never leaks translucent colors into later paints.
-+      EmphasizeURLComponents();
-+    }
-   }
- 
-   // Record an impression of the AIM hint text if it is being shown.
-@@ -1259,6 +1282,7 @@ bool OmniboxViewViews::UnapplySteadyStateElisions(UnelisionGesture gesture) {
- void OmniboxViewViews::OnBeforePossibleChange() {
-   // Record our state.
-   state_before_change_ = GetState();
-+  focus_typing_text_before_change_ = state_before_change_.text;
-   ime_composing_before_change_ = IsIMEComposing();
- 
-   // User is editing or traversing the text, as opposed to moving
-@@ -1273,12 +1297,41 @@ bool OmniboxViewViews::OnAfterPossibleChange(bool allow_keyword_ui_change) {
-   OmniboxView::StateChanges state_changes =
-       GetStateChanges(state_before_change_, new_state);
- 
-+  const bool is_ime_composing = IsIMEComposing();
-+  bool committed_text_differs = false;
-+  std::u16string focus_typing_baseline;
-+  if (!ime_composing_before_change_ && is_ime_composing) {
-+    // Keep the value from before the whole composition, not the transient
-+    // composing string. It lets the end transition distinguish commit from
-+    // cancellation even though confirming a composition does not itself
-+    // change the text stored by the textfield.
-+    focus_typing_text_before_composition_ = focus_typing_text_before_change_;
-+    has_focus_typing_composition_baseline_ = true;
-+  } else if (ime_composing_before_change_ && !is_ime_composing) {
-+    const std::u16string& composition_baseline =
-+        has_focus_typing_composition_baseline_
-+            ? focus_typing_text_before_composition_
-+            : focus_typing_text_before_change_;
-+    focus_typing_baseline = composition_baseline;
-+    committed_text_differs = new_state.text != focus_typing_baseline;
-+    focus_typing_text_before_composition_.clear();
-+    has_focus_typing_composition_baseline_ = false;
-+  } else if (!is_ime_composing) {
-+    // Use a dedicated snapshot because paste intentionally mutates
-+    // `state_before_change_.text` to force autocomplete refreshes. The reveal
-+    // must still represent a real visible text delta.
-+    focus_typing_baseline = focus_typing_text_before_change_;
-+    committed_text_differs = new_state.text != focus_typing_baseline;
-+    focus_typing_text_before_composition_.clear();
-+    has_focus_typing_composition_baseline_ = false;
-+  }
++  // Returns whether Focus-specific native transitions may run for this
++  // profile and accessibility environment.
++  bool ShouldAnimateFocusMotion() const;
 +
-   state_changes.text_differs =
-       state_changes.text_differs ||
--      (ime_composing_before_change_ != IsIMEComposing());
-+      (ime_composing_before_change_ != is_ime_composing);
+   // Called when omnibox view receives mouse notifications relevant to hover.
+   // |is_hovering| should be true when mouse is in omnibox; false when exited.
+   void OnOmniboxHovered(bool is_hovering);
+@@ -353,6 +357,9 @@ class LocationBarView
+   // Updates the background on a theme change, or dropdown state change.
+   void RefreshBackground();
  
-   bool something_changed = controller()->edit_model()->OnAfterPossibleChange(
--      state_changes, allow_keyword_ui_change && !IsIMEComposing());
-+      state_changes, allow_keyword_ui_change && !is_ime_composing);
- 
-   // Unapply steady state elisions in response to selection changes due to
-   // keystroke, tap gesture, and caret placement. Ignore selection changes while
-@@ -1300,6 +1353,34 @@ bool OmniboxViewViews::OnAfterPossibleChange(bool allow_keyword_ui_change) {
-     EmphasizeURLComponents();
-   }
- 
-+  if (something_changed && committed_text_differs && !is_ime_composing &&
-+      location_bar_view_) {
-+    // Find the inserted/replaced span while preserving a shared suffix. This
-+    // makes normal typing animate one glyph, and paste/IME commits animate the
-+    // complete newly visible span. Pure deletion intentionally has no reveal.
-+    size_t prefix = 0;
-+    while (prefix < focus_typing_baseline.size() &&
-+           prefix < new_state.text.size() &&
-+           focus_typing_baseline[prefix] == new_state.text[prefix]) {
-+      ++prefix;
-+    }
-+    size_t old_suffix = focus_typing_baseline.size();
-+    size_t new_suffix = new_state.text.size();
-+    while (old_suffix > prefix && new_suffix > prefix &&
-+           focus_typing_baseline[old_suffix - 1] ==
-+               new_state.text[new_suffix - 1]) {
-+      --old_suffix;
-+      --new_suffix;
-+    }
++  // Stops running Focus motion immediately when the preference changes.
++  void OnFocusMotionPreferenceChanged();
 +
-+    focus_typing_inserted_range_ =
-+        new_suffix > prefix ? gfx::Range(prefix, new_suffix)
-+                            : gfx::Range::InvalidRange();
-+    if (focus_typing_inserted_range_.IsValid()) {
-+      location_bar_view_->OnOmniboxInputEdited();
-+    }
-+  }
-+
-   return something_changed;
- }
- 
-diff --git a/chrome/browser/ui/views/omnibox/omnibox_view_views.h b/chrome/browser/ui/views/omnibox/omnibox_view_views.h
-index a1c7965..0752938 100644
---- a/chrome/browser/ui/views/omnibox/omnibox_view_views.h
-+++ b/chrome/browser/ui/views/omnibox/omnibox_view_views.h
-@@ -433,6 +433,15 @@ class OmniboxViewViews
-   // Tracking state before and after a possible change.
-   State state_before_change_;
-   bool ime_composing_before_change_ = false;
-+
-+  // Motion uses its own pre-change snapshot because the omnibox deliberately
-+  // mutates `state_before_change_` for some operations (notably paste). During
-+  // IME composition, retain the value from before the entire composition so a
-+  // confirmed edit animates while a cancelled composition does not.
-+  std::u16string focus_typing_text_before_change_;
-+  std::u16string focus_typing_text_before_composition_;
-+  bool has_focus_typing_composition_baseline_ = false;
-+  gfx::Range focus_typing_inserted_range_ = gfx::Range::InvalidRange();
- 
-   // |location_bar_view_| can be NULL in tests.
-   raw_ptr<LocationBarView> location_bar_view_;
+   // Updates the visibility state of the Content Blocked icons to reflect what
+   // is actually blocked on the current page. Returns true if the visibility
+   // of at least one of the views in |content_setting_views_| changed.

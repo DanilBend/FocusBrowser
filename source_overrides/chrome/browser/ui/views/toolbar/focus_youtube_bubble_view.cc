@@ -12,12 +12,16 @@
 #include <vector>
 
 #include "base/functional/bind.h"
+#include "base/location.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/time/time.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "components/focus_services/extension_ids.h"
+#include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/web_contents.h"
 #include "extensions/browser/api/storage/storage_area_namespace.h"
 #include "extensions/browser/api/storage/storage_frontend.h"
@@ -42,6 +46,7 @@
 #include "ui/views/view.h"
 #include "ui/views/view_class_properties.h"
 #include "ui/views/widget/widget.h"
+#include "url/url_constants.h"
 
 namespace {
 
@@ -50,6 +55,8 @@ constexpr int kCardRadius = 12;
 constexpr int kSectionSpacing = 10;
 constexpr int kRowSpacing = 6;
 constexpr int kFocusYoutubeSchemaVersion = 3;
+constexpr int kSettingsLoadMaxAttempts = 40;
+constexpr base::TimeDelta kSettingsLoadRetryDelay = base::Milliseconds(50);
 
 struct FeatureSpec {
   size_t group;
@@ -122,6 +129,15 @@ bool UseRussianFocusUi() {
       l10n_util::GetApplicationLocale(std::string(), false);
   return locale == "ru" || locale.starts_with("ru-") ||
          locale.starts_with("ru_");
+}
+
+bool IsFocusYoutubeUrl(const GURL& url) {
+  if (!url.SchemeIs(url::kHttpsScheme)) {
+    return false;
+  }
+  const std::string_view host = url.host();
+  return host == "youtube.com" || host == "www.youtube.com" ||
+         host == "m.youtube.com";
 }
 
 std::u16string FocusText(std::u16string_view english,
@@ -209,7 +225,6 @@ FocusYoutubeBubbleView::FocusYoutubeBubbleView(
   SetTitle(u"FocusYoutube");
   set_fixed_width(kBubbleWidth);
   set_margins(gfx::Insets::TLBR(12, 16, 14, 16));
-  SetCloseOnMainFrameOriginNavigation(true);
 }
 
 FocusYoutubeBubbleView::~FocusYoutubeBubbleView() = default;
@@ -227,7 +242,7 @@ void FocusYoutubeBubbleView::Init() {
 
   auto tabs = std::make_unique<views::TabbedPane>(
       views::TabbedPane::Orientation::kHorizontal,
-      views::TabbedPane::TabStripStyle::kHighlight);
+      views::TabbedPane::TabStripStyle::kBorder);
   tabs->SetDrawTabDivider(false);
 
   for (size_t group_index = 0; group_index < kGroups.size(); ++group_index) {
@@ -281,6 +296,24 @@ void FocusYoutubeBubbleView::Init() {
   SetControlsEnabled(false);
   RefreshStatus();
   LoadSettings();
+}
+
+void FocusYoutubeBubbleView::DidFinishNavigation(
+    content::NavigationHandle* navigation_handle) {
+  if (!navigation_handle->IsInPrimaryMainFrame() ||
+      !navigation_handle->HasCommitted()) {
+    return;
+  }
+
+  // The contextual toolbar button is deliberately exposed from the pending
+  // YouTube URL. The first commit can therefore arrive just after the click;
+  // treating the NTP -> YouTube commit as a generic origin change used to
+  // destroy the newly-created bubble before its first accessibility frame.
+  // Keep the surface alive for exact supported YouTube hosts, but still close
+  // it as soon as the tab commits a navigation outside that context.
+  if (!IsFocusYoutubeUrl(navigation_handle->GetURL())) {
+    CloseBubble();
+  }
 }
 
 std::unique_ptr<views::View> FocusYoutubeBubbleView::CreateMasterRow() {
@@ -362,11 +395,20 @@ std::unique_ptr<views::View> FocusYoutubeBubbleView::CreateFeatureRow(
 }
 
 void FocusYoutubeBubbleView::LoadSettings() {
+  if (!loading_) {
+    return;
+  }
+
+  ++settings_load_attempts_;
+  // The toolbar is URL-owned and can be clicked before the component
+  // extension finishes registering. Reacquire it on every attempt instead of
+  // permanently caching the constructor-time miss.
+  extension_ = GetFocusYoutubeExtension(browser_);
   auto* storage = browser_
                       ? extensions::StorageFrontend::Get(browser_->profile())
                       : nullptr;
   if (!storage || !extension_) {
-    OnSettingsLoaded(false, base::DictValue());
+    ScheduleSettingsLoadRetry();
     return;
   }
 
@@ -386,20 +428,45 @@ void FocusYoutubeBubbleView::LoadSettings() {
           weak_factory_.GetWeakPtr()));
 }
 
+void FocusYoutubeBubbleView::ScheduleSettingsLoadRetry() {
+  if (!loading_) {
+    return;
+  }
+  if (settings_load_attempts_ >= kSettingsLoadMaxAttempts) {
+    loading_ = false;
+    storage_error_ = true;
+    SetControlsEnabled(false);
+    RefreshStatus();
+    return;
+  }
+
+  // Keep the native surface in its explicit loading state while the
+  // component and its storage namespace become available. A weak pointer
+  // makes closing the bubble cancel the remaining bounded retries.
+  base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
+      FROM_HERE,
+      base::BindOnce(&FocusYoutubeBubbleView::LoadSettings,
+                     weak_factory_.GetWeakPtr()),
+      kSettingsLoadRetryDelay);
+}
+
 void FocusYoutubeBubbleView::OnSettingsLoaded(bool success,
                                               base::DictValue values) {
-  loading_ = false;
-  storage_error_ = !success;
-  if (success) {
-    global_enabled_ = values.FindBool("global_enable").value_or(true);
-    master_toggle_->SetIsOn(global_enabled_);
-    for (auto& [key, toggle] : feature_toggles_) {
-      const bool enabled = values.FindBool(key).value_or(false);
-      feature_state_[key] = enabled;
-      toggle->SetIsOn(enabled);
-    }
+  if (!success) {
+    ScheduleSettingsLoadRetry();
+    return;
   }
-  SetControlsEnabled(success);
+
+  loading_ = false;
+  storage_error_ = false;
+  global_enabled_ = values.FindBool("global_enable").value_or(true);
+  master_toggle_->SetIsOn(global_enabled_);
+  for (auto& [key, toggle] : feature_toggles_) {
+    const bool enabled = values.FindBool(key).value_or(false);
+    feature_state_[key] = enabled;
+    toggle->SetIsOn(enabled);
+  }
+  SetControlsEnabled(true);
   RefreshStatus();
 }
 

@@ -221,7 +221,6 @@ class ComponentLoader : public KeyedService {
                                  const std::string& description_string);
   void AddWebStoreApp();
   void AddUBlock();
-  void AddFocusTextMotion();
   void AddFocusYoutube();
   void AddExtstoreFixups();
 

@@ -20,10 +20,43 @@ Built-in text-entry motion static contract:
 node qa/verify_focus_text_motion.mjs
 ```
 
-After rebuilding, run the local runtime smoke test with a disposable profile:
+Blink-native caret glide static contract:
+
+```powershell
+node qa/verify_focus_caret_motion.mjs
+```
+
+Blink-native caret glide runtime proof. It isolates the bright caret against
+transparent text, checks a no-DOM-change ArrowRight control, then samples
+typing, paste-sized insertion, Backspace and Delete in input, textarea and
+contenteditable fields:
+
+```powershell
+node qa/verify_focus_caret_motion_runtime.mjs build/src/out/Default/chrome.exe "$env:TEMP\focus-caret-motion-runtime-report.json"
+```
+
+After rebuilding, run the local runtime smoke test with a disposable profile.
+It checks single-character insertion, a multi-grapheme paste payload,
+Backspace/Delete, immediate value and caret commits, pixel-stable prefixes,
+stable field geometry, and final paint settling:
 
 ```powershell
 node qa/verify_focus_text_motion_runtime.mjs build/src/out/Default/chrome.exe "$env:TEMP\focus-text-motion-runtime-report.json"
+```
+
+IME composition guard runtime proof. It uses CDP composition updates in
+input, textarea and contenteditable fields, requires a real compositionend on
+commit, verifies provisional text is still, and checks reduced motion:
+
+```powershell
+node qa/verify_focus_ime_motion_runtime.mjs build/src/out/Default/chrome.exe "$env:TEMP\focus-ime-motion-runtime-report.json"
+```
+
+Native omnibox glyph-settle smoke test (real Windows keyboard input and
+screen-pixel sampling, always with a unique disposable profile):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File qa/verify_focus_omnibox_text_motion_runtime.ps1 -BrowserPath build/src/out/Default/chrome.exe -EvidenceDirectory "$env:TEMP\focus-omnibox-motion"
 ```
 
 Final Windows package and installer/update gate (x64):

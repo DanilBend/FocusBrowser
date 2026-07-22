@@ -84,14 +84,19 @@ First-run/onboarding checks:
 - [ ] Appearance offers the three address-bar styles (full, centered, minimal)
   and the smooth-animation switch. There is no obsolete tab-layout step.
   Selections apply without a crash.
-- [ ] Newly entered graphemes fade smoothly into place in the new-tab search,
-  native address bar, and editable fields on HTTP/HTTPS pages. Disabling
-  smooth animations stops all three paths immediately.
+- [ ] Newly entered graphemes use the Focus settle (opacity `0.12`, vertical
+  offset `3px`, `180ms`) in the new-tab search, native address bar, and
+  editable fields on HTTP/HTTPS pages. Multi-grapheme paste cascades, the
+  surviving boundary settles after Backspace/Delete, and the caret glides to
+  its committed position without delaying DOM, IME, or accessibility state.
+  Disabling smooth animations stops all three paths immediately.
 - [ ] Search-engine and browser-import rows have visible, non-broken logos.
 - [ ] If Google Chrome is detected, the one-click Chrome import card is shown.
   It offers the Chromium importer categories implemented by this build
-  (bookmarks and history). Do not inspect or print imported values; the entire
-  disposable QA profile is deleted afterward.
+  (bookmarks and history). A real import is expected only when a standard
+  Chrome profile is detected. Chrome password and autofill imports are
+  deliberately disabled in this path. Do not inspect or print imported values;
+  the entire disposable QA profile is deleted afterward.
 - [ ] The Focus Password Manager page opens
   `chrome://password-manager/passwords`; its import button opens
   `chrome://password-manager/settings`.
@@ -140,7 +145,7 @@ Checks:
   it back on before finishing QA.
 - [ ] FocusBlock's per-site power control still works independently of the
   global switch and its state persists after reload.
-- [ ] FocusYoutube itself is enabled by default, but all 24 main controls are
+- [ ] FocusYoutube itself is enabled by default, but all 20 main controls are
   off. Enable **Скрывать рекомендации на главной**, reload YouTube, verify the
   feed disappears, then disable it and verify the feed returns.
 - [ ] Disable and re-enable the whole FocusYouTube module. It must not crash the
@@ -156,8 +161,9 @@ must be distinguished from offline/network failures.
 - [ ] Press the video button. A normal YouTube tab opens at exactly
   `https://www.youtube.com/watch?v=R2K7ZHsnypI`; error 153 does not appear.
 - [ ] `chrome://password-manager/passwords` and
-  `chrome://password-manager/settings` work and are Focus branded. Chrome
-  password import in onboarding lands in this disposable profile.
+  `chrome://password-manager/settings` work and are Focus branded. Onboarding
+  imports only bookmarks and history from a detected standard Chrome profile;
+  Chrome password and autofill imports remain disabled.
 - [ ] Install one harmless test extension from the Chrome Web Store into the
   disposable profile. It downloads from Google's Chrome Web Store/update
   endpoints and appears as an ordinary removable extension; FocusBlock and

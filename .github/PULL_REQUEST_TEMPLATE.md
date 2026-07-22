@@ -1,20 +1,20 @@
-## Summary
+## Краткое описание
 
-Describe what changed and why.
+Что изменено и почему.
 
-## User impact
+## Влияние на пользователя
 
-Explain the visible behavior, compatibility impact and any migration concerns.
+Опишите видимое поведение, совместимость и возможную миграцию данных.
 
-## Validation
+## Проверка
 
-- [ ] I ran the relevant source checks.
-- [ ] I tested UI changes with a disposable browser profile.
-- [ ] I did not commit build output, browser profile data, secrets or local paths.
-- [ ] I preserved all applicable third-party license notices.
+- [ ] Выполнены подходящие проверки исходников.
+- [ ] Изменения интерфейса проверены с одноразовым профилем браузера.
+- [ ] В коммит не попали результаты сборки, профили, секреты и локальные пути.
+- [ ] Сохранены все применимые уведомления о сторонних лицензиях.
 
-List the exact checks and manual scenarios used:
+Перечислите точные команды и ручные сценарии:
 
-## Screenshots
+## Снимки экрана
 
-Attach before/after screenshots for visible changes.
+Для видимых изменений приложите снимки до и после.

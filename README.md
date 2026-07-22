@@ -1,85 +1,88 @@
+<p align="right"><strong>Русский</strong> · <a href="README.en.md">English</a></p>
+
 <p align="center">
-  <img src="focus-chromium/resources/branding/product_logo.svg" width="96" alt="Focus Browser logo">
+  <img src="focus-chromium/resources/branding/product_logo.svg" width="96" alt="Логотип Focus Browser">
 </p>
 
 <h1 align="center">Focus Browser</h1>
 
 <p align="center">
-  A Chromium-based Windows browser built for focused work.
+  Браузер на базе Chromium для сфокусированной работы в Windows.
 </p>
 
 <p align="center">
-  <a href="https://github.com/DanilBend/FocusBrowser/releases/latest">Download</a>
-  · <a href="https://github.com/DanilBend/FocusBrowser/issues">Report a bug</a>
-  · <a href="docs/RELEASING.md">Release guide</a>
+  <a href="https://github.com/DanilBend/FocusBrowser/releases/latest">Скачать</a>
+  · <a href="https://github.com/DanilBend/FocusBrowser/issues">Сообщить об ошибке</a>
+  · <a href="docs/RELEASING.md">Инструкция по выпуску</a>
 </p>
 
 ## Focus Browser 1.0
 
-Focus Browser keeps the familiar Chromium engine while reducing distractions
-and integrating the controls that are normally spread across extensions.
-Version 1.0 is based on Chromium 150.0.7871.128 and targets 64-bit Windows 10
-and Windows 11.
+Focus Browser сохраняет привычный движок Chromium, уменьшает количество
+отвлекающих элементов и переносит основные инструменты концентрации прямо в
+интерфейс браузера. Версия 1.0 основана на Chromium 150.0.7871.128 и рассчитана
+на 64-битные Windows 10 и Windows 11.
 
-### Main features
+### Основные возможности
 
-- **FocusBlock** — built-in, non-removable content blocking based on uBlock
-  Origin. It is enabled by default, can be disabled globally or per site, and
-  has a compact browser-native control immediately to the left of the address
-  bar.
-- **FocusYoutube** — 24 essential YouTube distraction controls in one local
-  panel. Individual filters are off by default and no external settings site
-  is required.
-- **Clean new tab** — search and selected shortcuts only.
-- **Russian first-run setup** — search provider, Chrome data import, password
-  manager, address-bar appearance, default browser and optional shortcuts.
-- **Smooth interface motion** — subtle transitions and ambient water-like
-  motion, with switches in first-run setup and Settings. The operating
-  system's reduced-motion preference always takes priority.
-- **Meditation page** — available from the main menu and opens the selected
-  YouTube video directly, avoiding embedded-player error 153.
-- Chromium password manager, Chrome Web Store extension installation,
-  proprietary media codecs and Widevine integration hooks.
+- **FocusBlock** — встроенная неудаляемая защита на базе нативного движка
+  `adblock-rust 0.13.2`. По умолчанию она включена, может быть отключена
+  глобально или для текущего сайта, а её щит расположен справа внутри адресной
+  строки.
+- **FocusYoutube** — 20 основных локальных настроек, убирающих отвлекающие
+  элементы YouTube. Все отдельные фильтры изначально выключены; переход на
+  внешний сайт для настройки не требуется.
+- **Чистая новая вкладка** — только поиск и выбранные пользователем ярлыки.
+- **Русская первоначальная настройка** — выбор поиска и внешнего вида, импорт
+  закладок и истории из обнаруженного стандартного профиля Chrome, менеджер
+  паролей, назначение браузером по умолчанию и ярлыки.
+- **Плавные анимации** — единая настройка движения интерфейса и ввода текста,
+  которую можно отключить. Системное уменьшение движения всегда имеет
+  приоритет.
+- **Медитация** — отдельная страница из главного меню, открывающая выбранное
+  видео непосредственно на YouTube без ошибки встроенного проигрывателя 153.
+- Встроенный менеджер паролей Chromium, установка расширений напрямую из
+  Chrome Web Store, проприетарные медиакодеки и точки интеграции Widevine.
 
-## Download and installation
+## Скачивание и установка
 
-Download the installer or portable archive from
+Установщик и портативный архив доступны в разделе
 [Releases](https://github.com/DanilBend/FocusBrowser/releases).
 
-The 1.0 installer is not Authenticode-signed. Windows SmartScreen may therefore
-show **Unknown publisher**. Verify the SHA-256 values published with each
-release before running the installer.
+Установщик версии 1.0 пока не подписан Authenticode, поэтому Windows SmartScreen
+может показать предупреждение **«Неизвестный издатель»**. Перед запуском
+сверяйте SHA-256 с контрольными суммами, опубликованными вместе с выпуском.
 
-Installing a newer build over an existing Focus Browser installation preserves
-the browser profile. Production automatic updates are not enabled in the 1.0
-binary; install a newer GitHub release manually until a signed WinSparkle feed
-is configured.
+Установка новой сборки поверх существующего Focus Browser сохраняет профиль.
+Автоматическое производственное обновление в бинарнике 1.0 ещё не включено:
+до появления подписанного канала обновлений новые версии устанавливаются
+вручную из GitHub Releases.
 
-## Privacy and external services
+## Конфиденциальность и внешние сервисы
 
-- FocusBlock filtering runs locally.
-- FocusYoutube settings and filtering run locally and do not include analytics,
-  payment, donation or remote-font flows.
-- The meditation page loads no embedded player; selecting the video opens
-  YouTube in a normal tab, where YouTube receives the usual connection data.
-- Google Chrome account Sync is not enabled because Google does not issue
-  Chrome Sync credentials to third-party Chromium distributions. One-click
-  local import from Chrome is available.
-- Widevine support is compiled in, but the proprietary CDM is not distributed
-  in this repository and may need to be downloaded by Chromium's component
-  updater.
+- FocusBlock фильтрует запросы локально.
+- Настройки и фильтры FocusYoutube работают локально и не содержат аналитики,
+  платежей, пожертвований или удалённых шрифтов.
+- Страница медитации не загружает встроенный проигрыватель. После нажатия видео
+  открывается в обычной вкладке YouTube, где действуют правила YouTube.
+- Синхронизация аккаунта Google Chrome недоступна сторонним сборкам Chromium.
+  Вместо неё предусмотрен локальный импорт закладок и истории из обнаруженного
+  стандартного профиля Chrome. Пароли и данные автозаполнения этим импортёром
+  не переносятся.
+- Поддержка Widevine включена при сборке, но проприетарный CDM не хранится в
+  репозитории и может загружаться отдельным компонентом Chromium.
 
-See [PRIVACY.md](PRIVACY.md) for the component-by-component notes.
+Подробнее: [PRIVACY.md](PRIVACY.md).
 
-## Building on Windows
+## Сборка в Windows
 
-The full Chromium checkout and compiled output are intentionally not stored in
-Git. A clean build requires significant disk space and memory.
+Полный checkout Chromium и скомпилированные файлы намеренно не хранятся в Git.
+Для чистой сборки требуется значительный объём диска и оперативной памяти.
 
-1. Install Visual Studio 2022 with the Desktop development with C++ workload,
-   Windows SDK, Python 3.12+, Git and 7-Zip.
-2. Enable Windows long paths.
-3. Clone this repository and run from a Developer PowerShell for VS 2022:
+1. Установите Visual Studio 2022 с workload **Desktop development with C++**,
+   Windows SDK, Python 3.12+, Git и 7-Zip.
+2. Включите поддержку длинных путей Windows.
+3. Выполните в Developer PowerShell for VS 2022:
 
 ```powershell
 git clone https://github.com/DanilBend/FocusBrowser.git
@@ -88,33 +91,34 @@ python build.py
 python package.py --cpu-arch 64bit
 ```
 
-Build output is written under `build/`. Detailed release and updater notes are
-in [docs/RELEASING.md](docs/RELEASING.md), and the manual release checklist is
-in [build_support/FOCUS_RELEASE_QA.md](build_support/FOCUS_RELEASE_QA.md).
+Результат появится в `build/`. Подробности выпуска и обновления находятся в
+[docs/RELEASING.md](docs/RELEASING.md), ручной чек-лист — в
+[build_support/FOCUS_RELEASE_QA.md](build_support/FOCUS_RELEASE_QA.md).
 
-## Repository layout
+## Структура репозитория
 
-- `focus-chromium/` — vendored Chromium configuration, branding and patch set.
-- `patches/focus/` — Windows integration and updater patches.
-- `source_overrides/` — files overlaid onto a Chromium checkout.
-- `installer/` — Focus Browser NSIS installer.
-- `build.py` and `package.py` — source preparation, build and packaging tools.
-- `build_support/` and `qa/` — release validation scripts.
+- `focus-chromium/` — конфигурация, брендинг и набор патчей Chromium.
+- `patches/focus/` — интеграция с Windows и патчи обновления.
+- `source_overrides/` — файлы, накладываемые поверх checkout Chromium.
+- `installer/` — NSIS-установщик Focus Browser.
+- `build.py`, `package.py` — подготовка исходников, сборка и упаковка.
+- `build_support/`, `qa/` — автоматические проверки выпуска.
 
-## Licensing
+## Лицензии
 
-Project-specific GPL-covered code is licensed under GPL-3.0; see
-[LICENSE](LICENSE). Chromium and imported projects retain their original
-licenses. Important component-specific terms are documented in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Проектный код, охватываемый GPL, распространяется по GPL-3.0 — см.
+[LICENSE](LICENSE). Chromium и импортированные компоненты сохраняют свои
+исходные лицензии. Условия для отдельных компонентов перечислены в
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Доступен также
+[информационный русский перевод](THIRD_PARTY_NOTICES.ru.md), который не заменяет
+английский оригинал.
 
-In particular, FocusBlock is derived from uBlock Origin and remains GPL-3.0.
-FocusYoutube contains material derived from Unhook and is distributed by the
-project owner under separate written permission; it is **not** relicensed under
-this repository's GPL-3.0 terms.
+FocusBlock использует `adblock-rust` по MPL-2.0 и совместимые списки фильтров.
+Материалы FocusYoutube, основанные на Unhook, используются владельцем проекта
+по отдельному письменному разрешению и не перелицензируются под GPL-3.0.
 
-## Contributing
+## Участие в разработке
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Security
-issues should be reported according to [SECURITY.md](SECURITY.md), not through a
-public issue.
+Перед pull request прочитайте [CONTRIBUTING.md](CONTRIBUTING.md). Сообщения об
+уязвимостях отправляйте по инструкции [SECURITY.md](SECURITY.md), не раскрывая
+чувствительные детали в публичном Issue.

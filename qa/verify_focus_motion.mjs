@@ -181,17 +181,6 @@ assert.equal(
 const ntpUi = read(
     activeRoot,
     'chrome/browser/ui/webui/new_tab_page/new_tab_page_ui.cc');
-assert.match(ntpUi, /#include "components\/focus_services\/pref_names\.h"/);
-assert.match(
-    ntpUi,
-    /AddBoolean\(\s*"focusMotionEnabled",[\s\S]*GetBoolean\(prefs::kFocusMotionEnabled\)/);
-assert.match(
-    ntpUi,
-    /pref_change_registrar_\.Add\([\s\S]*prefs::kFocusMotionEnabled[\s\S]*OnFocusMotionEnabledChanged/);
-assert.match(
-    ntpUi,
-    /OnFocusMotionEnabledChanged\(\)[\s\S]*focus-motion-enabled-changed/);
-
 const ntpSearchbox = read(
     activeRoot,
     'chrome/browser/resources/new_tab_page/ntp_searchbox.ts');
@@ -204,62 +193,30 @@ const sharedSearchboxInputHtml = read(
 const sharedSearchboxInputCss = read(
     activeRoot,
     'ui/webui/resources/cr_components/searchbox/searchbox_input.css');
-assert.match(ntpSearchbox, /getBoolean\('focusMotionEnabled'\)/);
-assert.match(ntpSearchbox, /focus-motion-enabled-changed/);
-assert.match(ntpSearchbox, /prefers-reduced-motion: reduce/);
-assert.match(ntpSearchbox, /forced-colors: active/);
-assert.match(
-    ntpSearchbox,
-    /onSearchboxInputTextUpdated\(e, \/\*is_composing=\*\/ false\)/);
-assert.match(ntpSearchbox, /focusTypingCommittedValue_/);
-assert.match(ntpSearchbox, /focusTypingCompositionStartValue_/);
-assert.match(ntpSearchbox, /compositionstart/);
-assert.match(ntpSearchbox, /compositionend/);
-assert.match(ntpSearchbox, /requestAnimationFrame/);
-assert.match(
-    ntpSearchbox,
-    /e\.detail\.isComposing[\s\S]*e\.detail\.value === this\.focusTypingCommittedValue_/);
-assert.match(
-    ntpSearchbox,
-    /const previousValue = this\.focusTypingCommittedValue_[\s\S]*revealFocusTypingInsertion\(previousValue, currentValue\)/);
-assert.match(
-    ntpSearchbox,
-    /focusReducedMotionQuery_\.addEventListener[\s\S]*focusForcedColorsQuery_\.addEventListener/);
-assert.match(
-    ntpSearchbox,
-    /focusReducedMotionQuery_\.removeEventListener[\s\S]*focusForcedColorsQuery_\.removeEventListener/);
-assert.doesNotMatch(ntpSearchbox, /(?:container|input)\.animate\(/);
-assert.doesNotMatch(ntpSearchbox, /boxShadow|focus-typing-water/);
 
-assert.match(sharedSearchboxInput, /new Intl\.Segmenter\(undefined, \{granularity: 'grapheme'\}\)/);
-assert.match(
-    sharedSearchboxInput,
-    /revealFocusTypingInsertion\(previousValue: string, currentValue: string\)/);
-assert.match(sharedSearchboxInput, /prefixLength[\s\S]*suffixLength/);
-assert.match(sharedSearchboxInput, /currentGraphemes\.length > 512/);
-assert.match(sharedSearchboxInput, /insertedElements\.slice\(0, 24\)/);
-assert.equal(
-    (sharedSearchboxInput.match(/element\.animate\(/g) ?? []).length,
-    1,
-    'NTP typing reveal must animate only inserted grapheme elements');
-assert.match(
-    sharedSearchboxInput,
-    /opacity: 0\.12, transform: 'translateY\(3px\)'[\s\S]*duration: 180/);
-assert.match(sharedSearchboxInput, /Math\.min\(index, 10\) \* 12/);
-assert.match(
-    sharedSearchboxInput,
-    /animation\.id = 'focus-typing-grapheme-reveal'/);
-assert.match(sharedSearchboxInput, /input\.selectionStart !== input\.selectionEnd/);
-assert.match(sharedSearchboxInput, /input\.scrollLeft[\s\S]*input\.scrollTop/);
-assert.match(sharedSearchboxInputHtml, /id="focusTypingMirror" aria-hidden="true" hidden/);
-assert.match(sharedSearchboxInputHtml, /@compositionstart="\$\{this\.onFocusTypingCompositionstart_\}"/);
-assert.match(sharedSearchboxInputHtml, /@select="\$\{this\.onFocusTypingInputSelect_\}"/);
-assert.match(
+// NTP/WebUI takes the same Blink-native insertion path as every website. A
+// second mirrored input would double-animate and can move the visible text or
+// caret, so the searchbox must remain a single native input.
+for (const source of [
+  ntpUi,
+  ntpSearchbox,
+  sharedSearchboxInput,
+  sharedSearchboxInputHtml,
+  sharedSearchboxInputCss,
+]) {
+  assert.doesNotMatch(
+      source,
+      /focusTyping|focus-typing|focusMotionEnabled|focus-motion-enabled/);
+}
+assert.doesNotMatch(sharedSearchboxInputHtml, /focusTypingMirror/);
+assert.doesNotMatch(
     sharedSearchboxInputCss,
-    /:host\(\[focus-typing-reveal-active\]\) #input[\s\S]*-webkit-text-fill-color: transparent/);
-assert.match(sharedSearchboxInputCss, /prefers-reduced-motion: reduce/);
-assert.match(sharedSearchboxInputCss, /forced-colors: active/);
-assert.doesNotMatch(sharedSearchboxInputCss, /box-shadow/);
+    /-webkit-text-fill-color:\s*transparent|transform\s*:|translate\s*:/);
+
+const focusPatchSeries = read(repoRoot, 'focus-chromium/patches/series');
+assert.doesNotMatch(focusPatchSeries, /ntp-typing-motion\.patch/);
+assert.match(focusPatchSeries, /omnibox-typing-motion-ranges\.patch/);
+assert.doesNotMatch(focusPatchSeries, /omnibox-typing-opacity-ranges\.patch/);
 
 const ntpAppCss = read(
     activeRoot,
@@ -268,27 +225,27 @@ assert.doesNotMatch(
     ntpAppCss,
     /#searchboxContainer \{[\s\S]*border-radius: calc\(0\.5 \* var\(--cr-searchbox-height\)\)/);
 
-const ntpMotionPatch = read(
+const motionRangesPatch = read(
     repoRoot,
-    'focus-chromium/patches/focus/ui/ntp-typing-motion.patch');
-assert.match(ntpMotionPatch, /ui\/webui\/resources\/cr_components\/searchbox\/searchbox_input\.ts/);
-assert.match(ntpMotionPatch, /focus-typing-grapheme-reveal/);
-assert.doesNotMatch(ntpMotionPatch, /boxShadow|focus-typing-water/);
+    'focus-chromium/patches/focus/ui/omnibox-typing-motion-ranges.patch');
+assert.match(motionRangesPatch, /std::vector<FocusTypingReveal>/);
+assert.match(motionRangesPatch, /focus_typing_repaint_timer_/);
+assert.match(motionRangesPatch, /kFocusTypingInitialTranslationY/);
+assert.match(motionRangesPatch, /kFocusDeletionInitialTranslationInline/);
+assert.match(motionRangesPatch, /FocusTypingMotionKind::kDeletionSettle/);
+assert.match(
+    motionRangesPatch,
+    /transform\.Translate\(paint\.translation_x, paint\.translation_y\)/);
+assert.doesNotMatch(motionRangesPatch, /^\+.*(?:blur\(|scale\()/m);
 
 const locationBarView = read(
     activeRoot,
     'chrome/browser/ui/views/location_bar/location_bar_view.cc');
 assert.match(locationBarView, /prefs::kFocusMotionEnabled/);
-assert.match(locationBarView, /typing_animation_\.SetSlideDuration\(base::Milliseconds\(210\)\)/);
-assert.match(locationBarView, /typing_animation_\.Reset\(\);[\s\S]*typing_animation_\.Show\(\)/);
-assert.match(locationBarView, /IsOmniboxTypingAnimationRunning\(\) const/);
-assert.match(locationBarView, /GetOmniboxTypingAnimationValue\(\) const/);
 assert.match(locationBarView, /gfx::Animation::ShouldRenderRichAnimation\(\)/);
 assert.match(locationBarView, /gfx::Animation::PrefersReducedMotion\(\)/);
 assert.match(locationBarView, /PreferredContrast::kMore/);
-assert.doesNotMatch(
-    locationBarView,
-    /std::sin\(typing_animation_\.GetCurrentValue\(\)/);
+assert.doesNotMatch(locationBarView, /typing_animation_/);
 const refreshBackgroundStart = locationBarView.indexOf(
     'void LocationBarView::RefreshBackground()');
 const refreshBackgroundEnd = locationBarView.indexOf(
@@ -306,17 +263,13 @@ assert.match(
     /OnOmniboxHovered\(bool is_hovering\)[\s\S]*!ShouldAnimateFocusMotion\(\)[\s\S]*hover_animation_\.Reset\(should_show_hover \? 1\.0 : 0\.0\)/);
 assert.match(
     locationBarView,
-    /OnFocusMotionPreferenceChanged\(\)[\s\S]*typing_animation_\.Reset\(\)[\s\S]*hover_animation_\.Reset/);
+    /OnFocusMotionPreferenceChanged\(\)[\s\S]*CancelFocusTypingReveals\(\)[\s\S]*hover_animation_\.Reset/);
 
 const locationBarHeader = read(
     activeRoot,
     'chrome/browser/ui/views/location_bar/location_bar_view.h');
-assert.equal(
-    (locationBarHeader.match(/gfx::SlideAnimation typing_animation_\{this\}/g) ?? []).length,
-    1,
-    'omnibox typing pulse must reuse one native animation instance');
-assert.match(locationBarHeader, /IsOmniboxTypingAnimationRunning\(\) const/);
-assert.match(locationBarHeader, /GetOmniboxTypingAnimationValue\(\) const/);
+assert.doesNotMatch(locationBarHeader, /typing_animation_/);
+assert.match(locationBarHeader, /bool ShouldAnimateFocusMotion\(\) const/);
 
 const omniboxView = read(
     activeRoot,
@@ -335,16 +288,29 @@ assert.match(
     /focus_typing_baseline = focus_typing_text_before_change_[\s\S]*new_state\.text != focus_typing_baseline/);
 assert.match(
     omniboxView,
-    /something_changed && committed_text_differs && !is_ime_composing/);
-assert.match(omniboxView, /location_bar_view_->OnOmniboxInputEdited\(\)/);
-assert.match(omniboxView, /focus_typing_inserted_range_/);
-assert.match(omniboxView, /ExpandRangeToGraphemeBoundary\(reveal_range\)/);
+    /if \(committed_text_differs && !is_ime_composing &&\s*location_bar_view_\)/);
+assert.doesNotMatch(
+    omniboxView,
+    /something_changed && committed_text_differs/,
+    'ordinary physical typing must not be gated on the model UI return value');
 assert.match(
     omniboxView,
-    /std::clamp\(0\.18 \+ 0\.82 \* progress[\s\S]*SkColorSetA\(/);
+    /kFocusTypingRevealDuration\s*=\s*\n?\s*base::Milliseconds\(180\)/);
+assert.match(omniboxView, /UpdateFocusTypingRevealsForEdit\(/);
+assert.match(omniboxView, /AddFocusTypingReveal\(gfx::Range\(prefix, new_suffix\)\)/);
+assert.match(omniboxView, /ExpandRangeToGraphemeBoundary\(inserted_range\)/);
+assert.match(omniboxView, /focus_typing_reveals_/);
+assert.match(omniboxView, /reveal\.started_at/);
+assert.match(omniboxView, /suffix_shift/);
+assert.match(omniboxView, /focus_typing_repaint_timer_\.Start\(/);
+assert.match(omniboxView, /kFocusTypingInitialOpacity = 0\.12/);
+assert.match(omniboxView, /kFocusTypingInitialTranslationY = 3\.0f/);
+assert.match(omniboxView, /CubicBezier curve\(0\.22, 1\.0, 0\.36, 1\.0\)/);
 assert.match(
     omniboxView,
-    /Textfield::OnPaint\(canvas\);[\s\S]*if \(reveal_inserted_text\)[\s\S]*EmphasizeURLComponents\(\)/);
+    /SK_AlphaTRANSPARENT[\s\S]*Textfield::OnPaint\(canvas\);[\s\S]*EmphasizeURLComponents\(\)[\s\S]*GetSubstringBounds\(paint\.range\)[\s\S]*ClipRect\(glyph_bounds\)[\s\S]*transform\.Translate\(paint\.translation_x, paint\.translation_y\)/);
+assert.match(omniboxView, /FocusTypingMotionKind::kDeletionSettle/);
+assert.doesNotMatch(omniboxView, /blur\(|\.Scale\(|typing_animation_/);
 
 const omniboxViewHeader = read(
     activeRoot,
@@ -352,6 +318,8 @@ const omniboxViewHeader = read(
 assert.match(omniboxViewHeader, /focus_typing_text_before_change_/);
 assert.match(omniboxViewHeader, /focus_typing_text_before_composition_/);
 assert.match(omniboxViewHeader, /has_focus_typing_composition_baseline_/);
-assert.match(omniboxViewHeader, /gfx::Range focus_typing_inserted_range_/);
+assert.match(omniboxViewHeader, /struct FocusTypingReveal/);
+assert.match(omniboxViewHeader, /std::vector<FocusTypingReveal> focus_typing_reveals_/);
+assert.match(omniboxViewHeader, /base::RepeatingTimer focus_typing_repaint_timer_/);
 
 console.log('Focus motion contract verified.');

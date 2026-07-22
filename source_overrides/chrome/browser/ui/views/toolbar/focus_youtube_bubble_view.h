@@ -49,6 +49,8 @@ class FocusYoutubeBubbleView : public LocationBarBubbleDelegateView {
   // LocationBarBubbleDelegateView:
   std::u16string GetAccessibleWindowTitle() const override;
   void Init() override;
+  void DidFinishNavigation(
+      content::NavigationHandle* navigation_handle) override;
 
  private:
   FocusYoutubeBubbleView(Browser* browser,
@@ -59,6 +61,7 @@ class FocusYoutubeBubbleView : public LocationBarBubbleDelegateView {
   std::unique_ptr<views::View> CreateFeatureRow(std::string key,
                                                 std::u16string label);
   void LoadSettings();
+  void ScheduleSettingsLoadRetry();
   void OnSettingsLoaded(bool success, base::DictValue values);
   void OnMasterTogglePressed(const ui::Event& event);
   void OnFeatureTogglePressed(std::string key, const ui::Event& event);
@@ -85,6 +88,7 @@ class FocusYoutubeBubbleView : public LocationBarBubbleDelegateView {
   bool global_enabled_ = true;
   bool loading_ = true;
   bool storage_error_ = false;
+  int settings_load_attempts_ = 0;
 
   base::WeakPtrFactory<FocusYoutubeBubbleView> weak_factory_{this};
 };

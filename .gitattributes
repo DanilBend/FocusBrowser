@@ -1,5 +1,5 @@
 * text=auto
-*.patch linguist-language=C++ eol=lf
+*.patch linguist-language=C++ eol=lf -whitespace
 *.sh text eol=lf
 *.py text eol=lf
 *.js text eol=lf

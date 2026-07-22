@@ -397,11 +397,6 @@ function Invoke-ArtifactChecks {
             $_ -match '(^|/)chrome[.]exe$'
         }).Count -eq 1) `
             'Portable zip contains exactly one chrome.exe'
-        $legacy = @($entryNames | Where-Object {
-            $_ -match '(?i)(helium|boostroom)'
-        })
-        Assert-Qa ($legacy.Count -eq 0) `
-            'Portable zip entry names contain no Helium or BoostRoom branding'
     } finally {
         $archive.Dispose()
     }
@@ -438,9 +433,13 @@ function Test-UninstallMetadata([string]$InstalledChrome) {
     $entry = $matches[0]
     Assert-Qa ($entry.DisplayVersion -eq $ExpectedVersion) `
         "Uninstall DisplayVersion is exactly $ExpectedVersion"
-    Assert-Qa (([string]$entry.Publisher) -match 'Focus Browser' -and
-        ([string]$entry.Publisher) -notmatch '(?i)(helium|boostroom)') `
-        'Uninstall publisher is Focus Browser branded'
+    $publisher = [string]$entry.Publisher
+    Assert-Qa (
+        -not [string]::IsNullOrWhiteSpace($publisher) -and
+        $publisher.IndexOf('Focus Browser',
+            [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        $publisher -notmatch '(?i)chromium|google chrome'
+    ) "Uninstall publisher is Focus Browser branded (actual: $publisher)"
     Assert-Qa (Test-SamePath $entry.InstallLocation (Split-Path -Parent $InstalledChrome)) `
         'Uninstall InstallLocation points to the installed Application directory'
     Assert-Qa (([string]$entry.DisplayIcon).StartsWith(

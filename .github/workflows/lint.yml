@@ -1,4 +1,4 @@
-name: Source checks
+name: Проверка исходников
 
 on: [push, pull_request]
 

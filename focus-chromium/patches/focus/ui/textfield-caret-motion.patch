@@ -1,0 +1,79 @@
+diff --git a/ui/views/controls/textfield/textfield.cc b/ui/views/controls/textfield/textfield.cc
+index fa33742..132d310 100644
+--- a/ui/views/controls/textfield/textfield.cc
++++ b/ui/views/controls/textfield/textfield.cc
+@@ -45,6 +45,7 @@
+ #include "ui/compositor/compositor.h"
+ #include "ui/compositor/layer.h"
+ #include "ui/compositor/layer_tree_owner.h"
++#include "ui/compositor/scoped_layer_animation_settings.h"
+ #include "ui/display/display.h"
+ #include "ui/display/screen.h"
+ #include "ui/events/base_event_utils.h"
+@@ -2892,9 +2893,12 @@ void Textfield::UpdateAfterChange(
+     }
+     UpdateAccessibleValue();
+   }
++  if (cursor_changed) {
++    UpdateCursorViewPosition(text_change_type ==
++                             TextChangeType::kUserTriggered);
++  }
+   UpdateAccessibilityTextDirection();
+   if (cursor_changed) {
+-    UpdateCursorViewPosition();
+     UpdateCursorVisibility();
+   }
+   const bool anything_changed =
+@@ -2955,12 +2959,32 @@ gfx::Rect Textfield::CalculateCursorViewBounds() const {
+   return location;
+ }
+ 
+-void Textfield::UpdateCursorViewPosition() {
+-  cursor_view_->SetBoundsRect(CalculateCursorViewBounds());
++void Textfield::UpdateCursorViewPosition(bool animate) {
++  const gfx::Rect target_bounds = CalculateCursorViewBounds();
++  const bool should_animate =
++      animate && ShouldAnimateCaretMotion() && HasFocus() &&
++      GetTextInputType() != ui::TEXT_INPUT_TYPE_PASSWORD &&
++      !cursor_view_->bounds().IsEmpty() && !target_bounds.IsEmpty() &&
++      cursor_view_->bounds() != target_bounds;
++  if (should_animate) {
++    ui::ScopedLayerAnimationSettings settings(
++        cursor_view_->layer()->GetAnimator());
++    settings.SetTransitionDuration(base::Milliseconds(90));
++    settings.SetTweenType(gfx::Tween::ACCEL_0_80_DECEL_80);
++    settings.SetPreemptionStrategy(
++        ui::LayerAnimator::IMMEDIATELY_ANIMATE_TO_NEW_TARGET);
++    cursor_view_->SetBoundsRect(target_bounds);
++  } else {
++    cursor_view_->SetBoundsRect(target_bounds);
++  }
+   GetViewAccessibility().SetScrollX(
+       GetRenderText()->GetUpdatedDisplayOffset().x());
+ }
+ 
++bool Textfield::ShouldAnimateCaretMotion() const {
++  return false;
++}
++
+ int Textfield::GetTextStyle() const {
+   if (GetReadOnly() || !GetEnabledInViewsSubtree()) {
+     return style::STYLE_DISABLED;
+diff --git a/ui/views/controls/textfield/textfield.h b/ui/views/controls/textfield/textfield.h
+index f032d21..a2fbfa5 100644
+--- a/ui/views/controls/textfield/textfield.h
++++ b/ui/views/controls/textfield/textfield.h
+@@ -596,7 +596,12 @@ class VIEWS_EXPORT Textfield : public View,
+   virtual ui::TextEditCommand GetCommandForKeyEvent(const ui::KeyEvent& event);
+ 
+   // Update the cursor position in the text field.
+-  void UpdateCursorViewPosition();
++  void UpdateCursorViewPosition(bool animate = false);
++
++  // Opt-in hook for browser-owned textfields that want Word-like compositor
++  // caret travel after user-triggered insertion, paste, or deletion. Logical
++  // selection and IME geometry always move immediately.
++  virtual bool ShouldAnimateCaretMotion() const;
+ 
+   // A callback function to periodically update the cursor node_data.
+   void UpdateCursorVisibility();

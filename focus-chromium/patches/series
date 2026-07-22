@@ -236,7 +236,6 @@ focus/ui/update-cr-components.patch
 focus/ui/always-use-better-ntp.patch
 focus/ui/clean-new-tab-page.patch
 focus/ui/focus-new-tab-page.patch
-focus/ui/ntp-typing-motion.patch
 focus/ui/remove-toolbar-corners.patch
 focus/ui/location-bar.patch
 focus/ui/location-bar-page-action.patch
@@ -247,7 +246,6 @@ focus/ui/remove-toolbar-dividers.patch
 focus/ui/toolbar-window-frame-hit-test.patch
 focus/ui/toolbar-button-prefs.patch
 focus/ui/omnibox.patch
-focus/ui/omnibox-typing-motion.patch
 focus/ui/app-menu-style.patch
 focus/ui/app-menu-model.patch
 focus/ui/app-menu-button.patch
@@ -328,3 +326,6 @@ focus/ui/native-frame-materials.patch
 focus/ui/page-zoom-indicator.patch
 focus/core/focus-network-cleanup.patch
 focus/core/focusblock-native-service.patch
+focus/ui/textfield-caret-motion.patch
+focus/ui/omnibox-typing-motion.patch
+focus/ui/omnibox-typing-motion-ranges.patch

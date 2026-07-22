@@ -241,47 +241,185 @@ assert.equal(focusTextMotionManifest.name, 'Focus Text Motion');
 assert.equal(focusTextMotionManifest.short_name, 'Focus Motion');
 assert.equal(focusTextMotionManifest.version, '1.0.0');
 assert.equal(focusTextMotionManifest.incognito, 'split');
-assert.equal(focusTextMotionManifest.background.service_worker,
-             'background.js');
-assert.deepEqual(focusTextMotionManifest.permissions,
-                 ['settingsPrivate', 'storage']);
-assert.deepEqual(focusTextMotionManifest.host_permissions,
-                 ['http://*/*', 'https://*/*']);
+assert.equal(focusTextMotionManifest.background, undefined);
+assert.equal(focusTextMotionManifest.permissions, undefined);
+assert.equal(focusTextMotionManifest.host_permissions, undefined);
+assert.equal(focusTextMotionManifest.content_scripts, undefined);
 assert.equal(focusTextMotionManifest.action, undefined);
+assert.equal(focusTextMotionManifest.options, undefined);
 assert.equal(focusTextMotionManifest.options_page, undefined);
 assert.equal(focusTextMotionManifest.options_ui, undefined);
-assert.equal(focusTextMotionManifest.content_scripts.length, 1);
-assert.deepEqual(focusTextMotionManifest.content_scripts[0].matches,
-                 focusTextMotionManifest.host_permissions);
-assert.equal(focusTextMotionManifest.content_scripts[0].all_frames, true);
-assert.equal(
-    focusTextMotionManifest.content_scripts[0].match_origin_as_fallback, true);
-assert.equal(focusTextMotionManifest.content_scripts[0].run_at,
-             'document_start');
-for (const resource of manifestResources(focusTextMotionManifest)) {
-  assert.ok(fs.existsSync(path.join(focusTextMotionRoot, resource)),
-            `Focus Text Motion manifest resource is missing: ${resource}`);
-}
-
-const focusTextMotionBackground = fs.readFileSync(
-    path.join(focusTextMotionRoot, 'background.js'), 'utf8');
-assert.match(focusTextMotionBackground, /focus\.ui\.motion_enabled/);
-assert.match(focusTextMotionBackground, /chrome\.settingsPrivate\.getPref/);
-assert.match(focusTextMotionBackground,
-             /chrome\.settingsPrivate\.onPrefsChanged/);
-assert.match(focusTextMotionBackground, /chrome\.storage\.local\.set/);
-assert.doesNotMatch(focusTextMotionBackground,
-                    /\bfetch\s*\(|XMLHttpRequest|WebSocket/);
+assert.deepEqual([...manifestResources(focusTextMotionManifest)],
+                 ['manifest.json']);
 
 const focusTextMotionContent = fs.readFileSync(
     path.join(focusTextMotionRoot, 'content-script.js'), 'utf8');
-assert.match(focusTextMotionContent, /compositionstart/);
-assert.match(focusTextMotionContent, /compositionend/);
-assert.match(focusTextMotionContent, /type\.toLowerCase\(\) === 'password'/);
-assert.match(focusTextMotionContent, /Never read a password value/);
-assert.match(focusTextMotionContent, /focus-text-motion\.get-state/);
-assert.doesNotMatch(focusTextMotionContent,
-                    /\bfetch\s*\(|XMLHttpRequest|WebSocket/);
+assert.match(focusTextMotionContent, /Intentionally empty/);
+assert.match(focusTextMotionContent, /implemented in Blink's native/);
+assert.match(focusTextMotionContent, /never installs a DOM overlay/);
+const focusTextMotionExecutableContent = focusTextMotionContent
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+    .trim();
+assert.equal(focusTextMotionExecutableContent, '');
+
+function readFocusTextMotionNative(relativePath) {
+  const override = fs.readFileSync(
+      path.join(overridesRoot, relativePath), 'utf8');
+  assert.equal(read(relativePath), override,
+               `Native text-motion override differs: ${relativePath}`);
+  return override;
+}
+
+const focusTextMotionBlinkMarker = readFocusTextMotionNative(path.join(
+    'third_party', 'blink', 'renderer', 'core', 'editing', 'markers',
+    'focus_text_motion_marker.cc'));
+assert.match(focusTextMotionBlinkMarker,
+             /kRevealDuration = base::Milliseconds\(180\)/);
+assert.match(focusTextMotionBlinkMarker, /kInitialOpacity = 0\.12f/);
+assert.match(focusTextMotionBlinkMarker, /kInitialTranslationY = 3\.0f/);
+assert.match(focusTextMotionBlinkMarker,
+             /kDeletionInitialTranslationInline = 3\.0f/);
+assert.match(focusTextMotionBlinkMarker, /Kind::kDeletionSettle/);
+assert.match(
+    focusTextMotionBlinkMarker,
+    /gfx::CubicBezier curve\(0\.22, 1\.0, 0\.36, 1\.0\)/);
+assert.match(focusTextMotionBlinkMarker, /curve\.Solve\(progress\)/);
+assert.match(
+    focusTextMotionBlinkMarker,
+    /translation_y_\s*=\s*static_cast<float>\(kInitialTranslationY \* \(1\.0 - eased\)\)/);
+
+const focusTextMotionBlinkMarkerHeader = readFocusTextMotionNative(path.join(
+    'third_party', 'blink', 'renderer', 'core', 'editing', 'markers',
+    'focus_text_motion_marker.h'));
+assert.match(focusTextMotionBlinkMarkerHeader,
+             /float TranslationY\(\) const \{ return translation_y_; \}/);
+assert.match(focusTextMotionBlinkMarkerHeader, /float opacity_ = 0\.12f/);
+assert.match(focusTextMotionBlinkMarkerHeader, /float translation_y_ = 3\.0f/);
+assert.match(focusTextMotionBlinkMarkerHeader, /float translation_inline_/);
+
+const focusTextMotionHighlightPart = readFocusTextMotionNative(path.join(
+    'third_party', 'blink', 'renderer', 'core', 'paint',
+    'highlight_overlay.h'));
+assert.match(
+    focusTextMotionHighlightPart,
+    /struct CORE_EXPORT HighlightPart[\s\S]*float opacity = 1\.0f;[\s\S]*float translation_y = 0\.0f;[\s\S]*float translation_x = 0\.0f;/);
+
+const focusTextMotionHighlightPainter = readFocusTextMotionNative(path.join(
+    'third_party', 'blink', 'renderer', 'core', 'paint',
+    'highlight_painter.cc'));
+assert.match(focusTextMotionHighlightPainter, /motion\.TranslationY\(\)/);
+assert.match(focusTextMotionHighlightPainter, /motion\.TranslationInline\(\)/);
+assert.match(focusTextMotionHighlightPainter, /HighlightPart split = part/);
+assert.match(focusTextMotionHighlightPainter,
+             /split\.translation_y = translation_y/);
+assert.match(
+    focusTextMotionHighlightPainter,
+    /paint_info_\.context\.Translate\(part\.translation_x, part\.translation_y\)/);
+
+const focusInsertText = readFocusTextMotionNative(path.join(
+    'third_party', 'blink', 'renderer', 'core', 'editing', 'commands',
+    'insert_text_command.cc'));
+const focusInsertTextHeader = readFocusTextMotionNative(path.join(
+    'third_party', 'blink', 'renderer', 'core', 'editing', 'commands',
+    'insert_text_command.h'));
+const focusInsertIncrementalText = readFocusTextMotionNative(path.join(
+    'third_party', 'blink', 'renderer', 'core', 'editing', 'commands',
+    'insert_incremental_text_command.cc'));
+const focusInsertIncrementalTextHeader = readFocusTextMotionNative(path.join(
+    'third_party', 'blink', 'renderer', 'core', 'editing', 'commands',
+    'insert_incremental_text_command.h'));
+const focusInsertIncrementalTextTests = readFocusTextMotionNative(path.join(
+    'third_party', 'blink', 'renderer', 'core', 'editing', 'commands',
+    'insert_incremental_text_command_test.cc'));
+const focusTypingCommand = readFocusTextMotionNative(path.join(
+    'third_party', 'blink', 'renderer', 'core', 'editing', 'commands',
+    'typing_command.cc'));
+const focusInsertTextTests = readFocusTextMotionNative(path.join(
+    'third_party', 'blink', 'renderer', 'core', 'editing', 'commands',
+    'insert_text_command_test.cc'));
+assert.match(focusInsertText, /enable_focus_text_motion_/);
+assert.match(focusInsertTextHeader, /bool enable_focus_text_motion = true/);
+assert.match(focusInsertIncrementalText, /enable_focus_text_motion/);
+assert.match(focusInsertIncrementalTextHeader,
+             /bool enable_focus_text_motion = true/);
+assert.match(
+    focusInsertIncrementalText,
+    /enable_focus_text_motion_ && !old_text\.empty\(\) && old_text == new_text/);
+assert.match(
+    focusInsertIncrementalText,
+    /TextIterator marked_text\(selection_range\.StartPosition\(\),[\s\S]{0,1000}AddFocusInsertionMotionMarkers/);
+assert.match(focusInsertIncrementalTextTests,
+             /FocusTextMotionMarksIdenticalCommittedComposition/);
+assert.match(focusInsertIncrementalTextTests,
+             /FocusTextMotionSkipsIdenticalProvisionalComposition/);
+assert.match(
+    focusTypingCommand,
+    /const bool enable_focus_text_motion\s*=\s*\n?\s*composition_type_ != kTextCompositionUpdate/);
+assert.match(focusTypingCommand, /AddFocusTextDeletionMotionMarker/);
+assert.ok(
+    (focusTypingCommand.match(/AddFocusDeletionSettleMarker\(/g) ?? []).length >=
+        3,
+    'definition plus backward/forward deletion calls are required');
+assert.match(focusInsertTextTests, /FocusTextMotionSkipsProvisionalImeUpdate/);
+
+const focusCaretMotionHeader = readFocusTextMotionNative(path.join(
+    'third_party', 'blink', 'renderer', 'core', 'editing',
+    'caret_display_item_client.h'));
+const focusCaretMotion = readFocusTextMotionNative(path.join(
+    'third_party', 'blink', 'renderer', 'core', 'editing',
+    'caret_display_item_client.cc'));
+assert.match(focusCaretMotionHeader, /animated_local_rect_/);
+assert.match(focusCaretMotion,
+             /kFocusCaretMotionDuration = base::Milliseconds\(90\)/);
+assert.match(focusCaretMotion,
+             /gfx::CubicBezier curve\(0\.22, 1\.0, 0\.36, 1\.0\)/);
+assert.match(focusCaretMotion, /GetFocusTextMotionEnabled\(\)/);
+assert.match(focusCaretMotion, /FocusCaretMotionPrefersReducedMotion/);
+assert.match(focusCaretMotion,
+             /IsInPasswordField\(caret_position\.GetPosition\(\)\)/);
+assert.doesNotMatch(focusCaretMotion, /const bool box_fragment_changed/);
+assert.match(
+    focusCaretMotion,
+    /local_rect_\s*=\s*new_local_rect;[\s\S]{0,500}StartFocusCaretMotion\(visual_start, new_local_rect\)/);
+assert.match(
+    focusCaretMotion,
+    /RecordSelection\([\s\S]{0,300}PhysicalRect drawing_rect = local_rect_/);
+
+const focusOmniboxMotionPatch = fs.readFileSync(path.join(
+    repoRoot, 'focus-chromium', 'patches', 'focus', 'ui',
+    'omnibox-typing-motion-ranges.patch'), 'utf8');
+function assertFocusOmniboxMotion(source) {
+  assert.match(source, /base::Milliseconds\(180\)/);
+  assert.match(source, /kFocusTypingInitialOpacity = 0\.12/);
+  assert.match(source, /kFocusTypingInitialTranslationY = 3\.0f/);
+  assert.match(
+      source,
+      /gfx::CubicBezier curve\(0\.22, 1\.0, 0\.36, 1\.0\)/);
+  assert.match(
+      source,
+      /if \(committed_text_differs && !is_ime_composing && location_bar_view_\)/);
+  assert.doesNotMatch(
+      source,
+      /if \(something_changed && committed_text_differs/);
+  // The stable pass withholds only the inserted range; a clipped second
+  // RenderText pass applies opacity and vertical settle without moving layout.
+  assert.match(source, /SK_AlphaTRANSPARENT/);
+  assert.match(
+      source,
+      /Textfield::OnPaint\(canvas\);[\s\S]*GetSubstringBounds\(paint\.range\)[\s\S]*canvas->ClipRect\(glyph_bounds\)[\s\S]*canvas->SaveLayerAlpha\(paint\.alpha, glyph_bounds\)[\s\S]*transform\.Translate\(paint\.translation_x, paint\.translation_y\)[\s\S]*render_text->Draw\(canvas, \/\*select_all=\*\/false\)/);
+  assert.match(source, /FocusTypingMotionKind::kDeletionSettle/);
+}
+assertFocusOmniboxMotion(focusOmniboxMotionPatch);
+
+const focusOmniboxMotionSourcePath = path.join(
+    sourceRoot, 'chrome', 'browser', 'ui', 'views', 'omnibox',
+    'omnibox_view_views.cc');
+if (fs.existsSync(focusOmniboxMotionSourcePath)) {
+  const focusOmniboxMotionSource = fs.readFileSync(
+      focusOmniboxMotionSourcePath, 'utf8');
+  assertFocusOmniboxMotion(focusOmniboxMotionSource);
+}
 
 const focusBlockRoot = path.join(sourceRoot, 'third_party', 'ublock');
 const focusBlockManifest = parseJson(path.join(focusBlockRoot, 'manifest.json'));
@@ -736,6 +874,9 @@ const relevantOverrideFiles = [
     'extensions/browser/ui_util.cc',
     'extensions/browser/extension_prefs.cc',
     'extensions/common/manifest.h',
+    'third_party/blink/renderer/core/editing/caret_display_item_client.cc',
+    'third_party/blink/renderer/core/editing/caret_display_item_client.h',
+    'third_party/blink/renderer/core/editing/commands/insert_incremental_text_command_test.cc',
     'tools/gritsettings/resource_ids.spec',
   ].map(relative => path.join(overridesRoot, relative)),
 ];

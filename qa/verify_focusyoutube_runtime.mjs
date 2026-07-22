@@ -77,7 +77,54 @@ function verifyExactHostPredicate() {
   return toolbarPath;
 }
 
+function verifyNativeBubbleReadinessContract() {
+  const sourceCandidates = [
+    path.join(projectRoot, 'source_overrides', 'chrome', 'browser', 'ui',
+        'views', 'toolbar', 'focus_youtube_bubble_view.cc'),
+    path.join(projectRoot, 'build', 'src', 'chrome', 'browser', 'ui', 'views',
+        'toolbar', 'focus_youtube_bubble_view.cc'),
+  ];
+  const sourcePath = sourceCandidates.find(candidate => fs.existsSync(candidate));
+  assert.ok(sourcePath, 'focus_youtube_bubble_view.cc was not found');
+  const source = fs.readFileSync(sourcePath, 'utf8');
+  const attempts = Number(source.match(
+      /kSettingsLoadMaxAttempts\s*=\s*(\d+)/)?.[1]);
+  const retryDelayMs = Number(source.match(
+      /kSettingsLoadRetryDelay\s*=\s*base::Milliseconds\((\d+)\)/)?.[1]);
+  assert.ok(attempts >= 10 && attempts <= 100,
+      'native bubble must use a bounded component-readiness retry budget');
+  assert.ok(retryDelayMs >= 20 && retryDelayMs <= 250,
+      'native bubble retry delay must remain responsive and non-busy');
+  assert.match(source,
+      /extension_\s*=\s*GetFocusYoutubeExtension\(browser_\)/,
+      'each settings attempt must reacquire the component extension');
+  assert.match(source,
+      /void FocusYoutubeBubbleView::ScheduleSettingsLoadRetry\(\)/);
+  assert.match(source, /PostDelayedTask\([\s\S]*?weak_factory_\.GetWeakPtr\(\)/,
+      'closing the bubble must cancel pending readiness retries');
+  assert.match(source,
+      /if \(!storage \|\| !extension_\) \{\s*ScheduleSettingsLoadRetry\(\)/,
+      'missing component/storage must stay in loading and retry');
+  assert.match(source,
+      /if \(!success\) \{\s*ScheduleSettingsLoadRetry\(\)/,
+      'transient storage reads must retry before becoming unavailable');
+  assert.doesNotMatch(source,
+      /SetCloseOnMainFrameOriginNavigation\(true\)/,
+      'the pending NTP -> YouTube commit must not close a just-opened bubble');
+  assert.match(source,
+      /DidFinishNavigation\([\s\S]*?IsFocusYoutubeUrl\(navigation_handle->GetURL\(\)\)/,
+      'the bubble must remain open on supported YouTube commits');
+  assert.match(source,
+      /TabbedPane::Orientation::kHorizontal,\s*views::TabbedPane::TabStripStyle::kBorder/,
+      'horizontal FocusYoutube tabs must use the supported border style');
+  assert.doesNotMatch(source,
+      /TabbedPane::Orientation::kHorizontal,\s*views::TabbedPane::TabStripStyle::kHighlight/,
+      'Chromium rejects horizontal highlight tabs at runtime');
+  return {sourcePath, attempts, retryDelayMs};
+}
+
 const toolbarPath = verifyExactHostPredicate();
+const bubbleReadinessContract = verifyNativeBubbleReadinessContract();
 if (staticOnly) {
   console.log(JSON.stringify({
     ok: true,
@@ -87,6 +134,7 @@ if (staticOnly) {
     nativeBehaviorCount: nativeBehaviorIds.length,
     hiddenBehaviorCount: hiddenBehaviorIds.length,
     toolbarSource: toolbarPath,
+    bubbleReadinessContract,
     exactHosts: ['youtube.com', 'www.youtube.com', 'm.youtube.com'],
   }, null, 2));
   process.exit(0);
@@ -184,7 +232,7 @@ async function killExactProcessTree(child) {
   ]);
 }
 
-async function verifyImmediateButtonVisibility() {
+async function verifyImmediateNativeBubbleReadiness() {
   // Keep the apex host offline and deterministic. The toolbar must react to
   // the pending visible URL itself, before any network redirect to www.
   // Use a fresh profile instead of reusing the just-closed migration profile:
@@ -213,45 +261,189 @@ async function verifyImmediateButtonVisibility() {
 
   const automationScript = String.raw`
 Add-Type -AssemblyName UIAutomationClient
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $browserProcessId = [int]$env:FOCUS_QA_BROWSER_PID
 $timeoutMs = 15000
 $clock = [System.Diagnostics.Stopwatch]::StartNew()
 $windowSeenAt = $null
+$buttonSeenAt = $null
+$buttonInvokedAt = $null
+$buttonName = $null
 $maximumWindowCount = 0
+$bubbleElementSeen = $false
+$masterToggleEnabled = $false
 $seenButtonNames = [System.Collections.Generic.HashSet[string]]::new()
+$enabledFeatureNames = [System.Collections.Generic.HashSet[string]]::new()
+$focusTabNamesSeen = [System.Collections.Generic.HashSet[string]]::new()
+$focusTabNames = [System.Collections.Generic.HashSet[string]]::new(
+  [System.StringComparer]::OrdinalIgnoreCase)
+foreach ($name in @(
+    'Feed', 'Player', 'Interface', 'Search',
+    'Лента', 'Плеер', 'Интерфейс', 'Поиск')) {
+  [void]$focusTabNames.Add($name)
+}
 $processCondition = New-Object System.Windows.Automation.PropertyCondition(
   [System.Windows.Automation.AutomationElement]::ProcessIdProperty,
   $browserProcessId)
 $buttonCondition = New-Object System.Windows.Automation.PropertyCondition(
   [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
   [System.Windows.Automation.ControlType]::Button)
-while ($clock.ElapsedMilliseconds -lt $timeoutMs) {
-  $windows = [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
+
+function Get-FocusWindows {
+  return [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
     [System.Windows.Automation.TreeScope]::Children, $processCondition)
+}
+
+function Get-FocusElements {
+  $elements = [System.Collections.Generic.List[
+      System.Windows.Automation.AutomationElement]]::new()
+  $windows = Get-FocusWindows
+  foreach ($window in $windows) {
+    [void]$elements.Add($window)
+    $descendants = $window.FindAll(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($element in $descendants) {
+      [void]$elements.Add($element)
+    }
+  }
+  return $elements
+}
+
+function Collect-FocusYoutubeBubbleState {
+  $bubbleRoots = [System.Collections.Generic.List[
+      System.Windows.Automation.AutomationElement]]::new()
+  foreach ($element in (Get-FocusElements)) {
+    try {
+      if ($element.Current.Name -eq 'FocusYoutube' -and
+          $element.Current.ControlType -ne
+              [System.Windows.Automation.ControlType]::Button) {
+        $script:bubbleElementSeen = $true
+        [void]$bubbleRoots.Add($element)
+      }
+    } catch {}
+  }
+
+  $focusTabs = [System.Collections.Generic.List[
+      System.Windows.Automation.AutomationElement]]::new()
+  foreach ($bubbleRoot in $bubbleRoots) {
+    $elements = $bubbleRoot.FindAll(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($element in $elements) {
+      try {
+        $name = $element.Current.Name
+        if ($focusTabNames.Contains($name)) {
+          [void]$focusTabs.Add($element)
+          [void]$focusTabNamesSeen.Add($name)
+        }
+
+        $togglePattern = $null
+        if (-not $element.TryGetCurrentPattern(
+            [System.Windows.Automation.TogglePattern]::Pattern,
+            [ref]$togglePattern) -or -not $element.Current.IsEnabled) {
+          continue
+        }
+        if ($name -like '*FocusYoutube*') {
+          $script:masterToggleEnabled = $true
+        } elseif (-not [string]::IsNullOrWhiteSpace($name)) {
+          # Count only controls inside the native FocusYoutube dialog. The
+          # browser frame itself can expose unrelated enabled TogglePatterns
+          # (for example toolbar customisation state) and must not inflate the
+          # expected twenty feature controls.
+          [void]$enabledFeatureNames.Add($name)
+        }
+      } catch {
+        # A Views subtree can be replaced while a tab is selected. The next
+        # 20 ms probe reads the fresh automation elements.
+      }
+    }
+  }
+  return $focusTabs
+}
+
+while ($clock.ElapsedMilliseconds -lt $timeoutMs) {
+  $windows = Get-FocusWindows
   $maximumWindowCount = [Math]::Max($maximumWindowCount, $windows.Count)
   if ($windows.Count -gt 0 -and $null -eq $windowSeenAt) {
     $windowSeenAt = $clock.ElapsedMilliseconds
   }
-  foreach ($window in $windows) {
-    $buttons = $window.FindAll(
-      [System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
-    foreach ($button in $buttons) {
-      $name = $button.Current.Name
-      if (-not [string]::IsNullOrWhiteSpace($name)) {
-        [void]$seenButtonNames.Add($name)
+
+  if ($null -eq $buttonInvokedAt) {
+    foreach ($window in $windows) {
+      $buttons = $window.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
+      foreach ($button in $buttons) {
+        try {
+          $name = $button.Current.Name
+          if (-not [string]::IsNullOrWhiteSpace($name)) {
+            [void]$seenButtonNames.Add($name)
+          }
+          if ($name -notlike '*FocusYoutube*' -or
+              $button.Current.IsOffscreen -or -not $button.Current.IsEnabled) {
+            continue
+          }
+          $invokePattern = $null
+          if (-not $button.TryGetCurrentPattern(
+              [System.Windows.Automation.InvokePattern]::Pattern,
+              [ref]$invokePattern)) {
+            throw 'FocusYoutube toolbar button has no InvokePattern'
+          }
+          $buttonSeenAt = $clock.ElapsedMilliseconds
+          $buttonName = $name
+          $invokePattern.Invoke()
+          $buttonInvokedAt = $clock.ElapsedMilliseconds
+          break
+        } catch {
+          # Retry a transiently stale toolbar element until the bounded probe
+          # deadline; permanent failures are included in the final evidence.
+        }
       }
-      if ($name -like '*FocusYoutube*' -and
-          -not $button.Current.IsOffscreen -and $button.Current.IsEnabled) {
-        [pscustomobject]@{
-          ok = $true
-          processId = $browserProcessId
-          accessibleName = $name
-          windowSeenMs = [int64]$windowSeenAt
-          buttonSeenMs = [int64]$clock.ElapsedMilliseconds
-          deltaFromWindowMs = [int64]($clock.ElapsedMilliseconds - $windowSeenAt)
-        } | ConvertTo-Json -Compress
-        exit 0
-      }
+      if ($null -ne $buttonInvokedAt) { break }
+    }
+  }
+
+  if ($null -ne $buttonInvokedAt) {
+    $focusTabs = Collect-FocusYoutubeBubbleState
+    foreach ($tab in $focusTabs) {
+      try {
+        $selectionPattern = $null
+        if ($tab.TryGetCurrentPattern(
+            [System.Windows.Automation.SelectionItemPattern]::Pattern,
+            [ref]$selectionPattern)) {
+          $selectionPattern.Select()
+        } else {
+          $invokePattern = $null
+          if ($tab.TryGetCurrentPattern(
+              [System.Windows.Automation.InvokePattern]::Pattern,
+              [ref]$invokePattern)) {
+            $invokePattern.Invoke()
+          }
+        }
+        Start-Sleep -Milliseconds 15
+        Collect-FocusYoutubeBubbleState | Out-Null
+      } catch {}
+    }
+
+    if ($focusTabNamesSeen.Count -eq 4 -and $masterToggleEnabled -and
+        $enabledFeatureNames.Count -eq 20) {
+      $readyAt = $clock.ElapsedMilliseconds
+      [pscustomobject]@{
+        ok = $true
+        processId = $browserProcessId
+        accessibleName = $buttonName
+        windowSeenMs = [int64]$windowSeenAt
+        buttonSeenMs = [int64]$buttonSeenAt
+        buttonInvokedMs = [int64]$buttonInvokedAt
+        bubbleReadyMs = [int64]$readyAt
+        deltaFromWindowMs = [int64]($buttonSeenAt - $windowSeenAt)
+        deltaFromInvokeMs = [int64]($readyAt - $buttonInvokedAt)
+        bubbleElementSeen = $bubbleElementSeen
+        tabCount = $focusTabNamesSeen.Count
+        masterToggleEnabled = $masterToggleEnabled
+        enabledFeatureToggleCount = $enabledFeatureNames.Count
+      } | ConvertTo-Json -Compress
+      exit 0
     }
   }
   Start-Sleep -Milliseconds 20
@@ -260,7 +452,13 @@ while ($clock.ElapsedMilliseconds -lt $timeoutMs) {
   ok = $false
   processId = $browserProcessId
   windowSeenMs = $windowSeenAt
+  buttonSeenMs = $buttonSeenAt
+  buttonInvokedMs = $buttonInvokedAt
   maximumWindowCount = $maximumWindowCount
+  bubbleElementSeen = $bubbleElementSeen
+  tabCount = $focusTabNamesSeen.Count
+  masterToggleEnabled = $masterToggleEnabled
+  enabledFeatureToggleCount = $enabledFeatureNames.Count
   buttonNames = @($seenButtonNames)
 } | ConvertTo-Json -Compress
 exit 1
@@ -279,7 +477,7 @@ exit 1
           },
         });
     assert.equal(result.status, 0, [
-      'FocusYoutube immediate native-button UIA probe failed.',
+      'FocusYoutube immediate native-bubble UIA probe failed.',
       result.error?.message || '',
       result.stdout || '',
       result.stderr || '',
@@ -291,6 +489,15 @@ exit 1
     assert.ok(measurement.deltaFromWindowMs <= 1500,
         `FocusYoutube button appeared ${measurement.deltaFromWindowMs}ms ` +
         'after the browser window');
+    assert.equal(measurement.tabCount, 4,
+        'FocusYoutube bubble did not expose all four native sections');
+    assert.equal(measurement.masterToggleEnabled, true,
+        'FocusYoutube master toggle remained disabled');
+    assert.equal(measurement.enabledFeatureToggleCount, nativeBehaviorIds.length,
+        'FocusYoutube bubble did not enable all 20 native feature toggles');
+    assert.ok(measurement.deltaFromInvokeMs <= 2500,
+        `FocusYoutube bubble needed ${measurement.deltaFromInvokeMs}ms ` +
+        'after immediate toolbar invocation');
     return measurement;
   } finally {
     await killExactProcessTree(child);
@@ -500,8 +707,8 @@ try {
   // waiting for YouTube's redirect, content scripts, migration or a timer.
   await closeBrowser(secondRun);
   secondRun = null;
-  const immediateVisibility =
-      await verifyImmediateButtonVisibility();
+  const immediateBubbleReadiness =
+      await verifyImmediateNativeBubbleReadiness();
 
   const report = {
     ok: true,
@@ -524,10 +731,12 @@ try {
           .filter(alarm => alarm.name.startsWith('focusyoutube-'))
           .map(alarm => alarm.name),
     },
-    buttonVisibility: {
+    nativeBubbleReadiness: {
       runtimeProbe: 'Windows UI Automation on the exact spawned browser PID',
-      apexHostVisibleImmediately: true,
-      ...immediateVisibility,
+      apexHostButtonVisibleImmediately: true,
+      toolbarButtonInvokedAsSoonAsVisible: true,
+      allNativeFeatureTogglesEnabledPromptly: true,
+      ...immediateBubbleReadiness,
       source: toolbarPath,
       scheme: 'https only',
       exactHosts: ['youtube.com', 'www.youtube.com', 'm.youtube.com'],
