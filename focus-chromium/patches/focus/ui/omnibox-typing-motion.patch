@@ -1,0 +1,101 @@
+diff --git a/chrome/browser/ui/views/location_bar/BUILD.gn b/chrome/browser/ui/views/location_bar/BUILD.gn
+index 05615e7..bc58d88 100644
+--- a/chrome/browser/ui/views/location_bar/BUILD.gn
++++ b/chrome/browser/ui/views/location_bar/BUILD.gn
+@@ -157,6 +157,7 @@ source_set("impl") {
+       "//components/dom_distiller/core",
+       "//components/favicon/content",
+       "//components/feature_engagement/public:feature_constants",
++      "//components/focus_services",
+       "//components/history_embeddings/content",
+       "//components/history_embeddings/core",
+       "//components/lens",
+diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.cc b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+index 7865b06..c929749 100644
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+@@ -118,6 +118,7 @@
+ #include "components/contextual_search/input_state_model.h"
+ #include "components/dom_distiller/core/dom_distiller_features.h"
+ #include "components/favicon/content/content_favicon_driver.h"
++#include "components/focus_services/pref_names.h"
+ #include "components/lens/lens_features.h"
+ #include "components/omnibox/browser/location_bar_model.h"
+ #include "components/omnibox/browser/omnibox_client.h"
+@@ -243,6 +244,11 @@ LocationBarView::LocationBarView(Browser* browser,
+     pref_registrar_->Add(omnibox::kShowAiModeOmniboxButton,
+                          base::BindRepeating(&LocationBarView::OnChanged,
+                                              base::Unretained(this)));
++    pref_registrar_->Add(
++        prefs::kFocusMotionEnabled,
++        base::BindRepeating(
++            &LocationBarView::OnFocusMotionPreferenceChanged,
++            base::Unretained(this)));
+   }
+ 
+   run_omnibox_context_menu_callback_ =
+@@ -2086,12 +2092,34 @@ void LocationBarView::OnOmniboxBlurred() {
+   location_icon_view_->Update(false, false);
+ }
+ 
++bool LocationBarView::ShouldAnimateFocusMotion() const {
++  return profile_ &&
++         profile_->GetPrefs()->GetBoolean(prefs::kFocusMotionEnabled) &&
++         gfx::Animation::ShouldRenderRichAnimation() &&
++         !gfx::Animation::PrefersReducedMotion() &&
++         GetNativeTheme()->preferred_contrast() !=
++             ui::NativeTheme::PreferredContrast::kMore;
++}
++
++void LocationBarView::OnFocusMotionPreferenceChanged() {
++  const bool should_show_hover =
++      IsMouseHovered() && omnibox_view_ && !omnibox_view_->HasFocus();
++  hover_animation_.Reset(should_show_hover ? 1.0 : 0.0);
++  RefreshBackground();
++}
++
+ void LocationBarView::OnOmniboxHovered(bool is_hovering) {
+-  if (is_hovering) {
+-    // Only show the hover animation when omnibox is in unfocused steady state.
+-    if (!omnibox_view_->HasFocus()) {
+-      hover_animation_.Show();
+-    }
++  const bool should_show_hover = is_hovering && !omnibox_view_->HasFocus();
++  if (!ShouldAnimateFocusMotion()) {
++    // Keep hover feedback when animations are disabled, but snap directly to
++    // its final state instead of running a transition.
++    hover_animation_.Reset(should_show_hover ? 1.0 : 0.0);
++    RefreshBackground();
++    return;
++  }
++
++  if (should_show_hover) {
++    hover_animation_.Show();
+   } else {
+     hover_animation_.Hide();
+   }
+diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.h b/chrome/browser/ui/views/location_bar/location_bar_view.h
+index 015b1e1..c4ed3b3 100644
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.h
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.h
+@@ -289,6 +289,10 @@ class LocationBarView
+   void OnOmniboxFocused();
+   void OnOmniboxBlurred();
+ 
++  // Returns whether Focus-specific native transitions may run for this
++  // profile and accessibility environment.
++  bool ShouldAnimateFocusMotion() const;
++
+   // Called when omnibox view receives mouse notifications relevant to hover.
+   // |is_hovering| should be true when mouse is in omnibox; false when exited.
+   void OnOmniboxHovered(bool is_hovering);
+@@ -353,6 +357,9 @@ class LocationBarView
+   // Updates the background on a theme change, or dropdown state change.
+   void RefreshBackground();
+ 
++  // Applies the Focus motion preference immediately.
++  void OnFocusMotionPreferenceChanged();
++
+   // Updates the visibility state of the Content Blocked icons to reflect what
+   // is actually blocked on the current page. Returns true if the visibility
+   // of at least one of the views in |content_setting_views_| changed.

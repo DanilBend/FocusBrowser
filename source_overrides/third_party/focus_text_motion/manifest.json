@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Focus Text Motion",
+  "short_name": "Focus Motion",
+  "description": "Built-in Focus Browser text-entry motion for web pages.",
+  "version": "1.0.0",
+  "minimum_chrome_version": "120",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5eRQKj+CSdQghzr2x0TAvuGQD28yuD8lj6dLUwvVOA+Xzom9yaM03pqQXb/WfUwKfnseyLEx4V1LbJxYdoik6mcASe29pNyf37zvtsrxwFdhIlHGALsneiLtueIXmpclndfNoumX34Ywcp2E5o8cKT3bRr+AoyhmLUXfNMx6z0Ij/QDmsczn6aPXwIAvM6HcXoZw5kQU+6nEL5QlxFbYvQgl6sS79MJieFSc+i3jZCTjI/IECkOw1xGry+0JoyHbEvSBml1ZA+p3Sr9YzOjm7F9pxpRgQynXnQDFOGyr0JdUYzbr5hoP6TeFs30ayCkf1a8RwVs3FnHDhr4g0Lbj6wIDAQAB",
+  "incognito": "split"
+}

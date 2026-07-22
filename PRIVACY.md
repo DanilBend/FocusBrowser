@@ -1,30 +1,34 @@
-# Privacy notes
+# Конфиденциальность
 
-Focus Browser is designed to keep its Focus-specific controls local, but it is
-still a web browser and network behavior depends on the pages and services you
-use.
+<p><strong>Русский</strong> · <a href="PRIVACY.en.md">English</a></p>
 
-## Focus-specific components
+Специальные функции Focus Browser по возможности работают локально, однако
+это полноценный веб-браузер: сетевой обмен также зависит от открываемых сайтов
+и выбранных сервисов.
 
-- FocusBlock evaluates its bundled rules and user settings locally. Updating
-  external filter lists, when enabled by the user, contacts the list hosts.
-- FocusYoutube stores its switches in the local browser profile. The packaged
-  component contains no analytics, payment, donation, remote-font or external
-  settings flows.
-- The meditation page does not embed or preload YouTube. Pressing its video
-  button opens YouTube in a normal tab, after which YouTube receives the normal
-  request metadata for that visit.
-- Smooth-animation preferences, shortcut selections and onboarding choices are
-  stored in the local profile.
+## Компоненты Focus Browser
 
-## Chromium services
+- FocusBlock применяет встроенные правила и пользовательские настройки
+  локально. Если пользователь включит обновление внешних списков фильтров,
+  браузер обратится к серверам, на которых эти списки размещены.
+- FocusYoutube хранит переключатели в локальном профиле. Встроенный компонент
+  не содержит аналитики, платежей, пожертвований, удалённых шрифтов или
+  внешней страницы настроек.
+- Страница медитации не встраивает и не предзагружает YouTube. Кнопка видео
+  открывает обычную вкладку YouTube, после чего YouTube получает стандартные
+  данные соединения для этого посещения.
+- Настройки анимации, выбранные ярлыки и результаты первоначальной настройки
+  сохраняются в локальном профиле.
 
-Focus Browser inherits networking required for normal Chromium functionality,
-including websites, selected search providers, extension installation and
-allowed component updates. Google Chrome account Sync is not enabled.
+## Сервисы Chromium
 
-## Diagnostic reports
+Focus Browser наследует сетевые функции Chromium, необходимые для работы
+сайтов, выбранной поисковой системы, установки расширений и разрешённых
+обновлений компонентов. Синхронизация через аккаунт Google Chrome не включена.
 
-Do not upload a real profile, cookies, saved passwords, tokens, browsing
-databases or unsanitized crash dumps to GitHub issues. Use a disposable profile
-when reproducing bugs and follow `SECURITY.md` for vulnerabilities.
+## Диагностические данные
+
+Не загружайте в GitHub Issues настоящий профиль, cookies, сохранённые пароли,
+токены, базы истории и необработанные дампы с личными данными. Для
+воспроизведения используйте одноразовый профиль, а об уязвимостях сообщайте по
+инструкции [SECURITY.md](SECURITY.md).

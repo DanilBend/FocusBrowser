@@ -1,0 +1,26 @@
+diff --git a/chrome/browser/ui/views/omnibox/omnibox_view_views.cc b/chrome/browser/ui/views/omnibox/omnibox_view_views.cc
+--- a/chrome/browser/ui/views/omnibox/omnibox_view_views.cc
++++ b/chrome/browser/ui/views/omnibox/omnibox_view_views.cc
+@@ -863,6 +863,11 @@ bool OmniboxViewViews::IsDropCursorForInsertion() const {
+   return HasTextBeingDragged();
+ }
+ 
++bool OmniboxViewViews::ShouldAnimateCaretMotion() const {
++  return location_bar_view_ && !popup_window_mode_ &&
++         location_bar_view_->ShouldAnimateFocusMotion();
++}
++
+ void OmniboxViewViews::ApplyColor(SkColor color, const gfx::Range& range) {
+   Textfield::ApplyColor(color, range);
+ }
+diff --git a/chrome/browser/ui/views/omnibox/omnibox_view_views.h b/chrome/browser/ui/views/omnibox/omnibox_view_views.h
+--- a/chrome/browser/ui/views/omnibox/omnibox_view_views.h
++++ b/chrome/browser/ui/views/omnibox/omnibox_view_views.h
+@@ -202,6 +202,7 @@ class OmniboxViewViews
+   // views::Textfield:
+   void OnThemeChanged() override;
+   bool IsDropCursorForInsertion() const override;
++  bool ShouldAnimateCaretMotion() const override;
+ 
+   // Wrappers around Textfield methods that tests can override.
+   virtual void ApplyColor(SkColor color, const gfx::Range& range);

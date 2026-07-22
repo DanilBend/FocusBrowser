@@ -1,0 +1,46 @@
+# Copyright 2026 The Focus Browser Authors
+
+import("//tools/grit/grit_rule.gni")
+import("//ui/webui/resources/tools/generate_grd.gni")
+
+file_list = "$target_gen_dir/files.json"
+generated_grd = "$target_gen_dir/focus_text_motion_resources.grd"
+
+action("generate_file_list") {
+  script = "generate_file_list.py"
+  args = [
+    rebase_path("."),
+    rebase_path(file_list),
+  ]
+  inputs = [
+    "manifest.json",
+    "background.js",
+    "content-script.js",
+    "generate_file_list.py",
+  ]
+  outputs = [ file_list ]
+}
+
+generate_grd("focus_text_motion_grd") {
+  out_grd = generated_grd
+  grd_prefix = "focus_text_motion"
+  resource_path_prefix = "focus_text_motion"
+  manifest_files = [ file_list ]
+  deps = [ ":generate_file_list" ]
+}
+
+grit("focus_text_motion") {
+  source = generated_grd
+  enable_input_discovery_for_gn_analyze = false
+  use_brotli = true
+  output_dir = "$target_gen_dir/resources"
+
+  outputs = [
+    "grit/focus_text_motion_resources.h",
+    "grit/focus_text_motion_resources_map.cc",
+    "grit/focus_text_motion_resources_map.h",
+    "focus_text_motion_resources.pak",
+  ]
+
+  deps = [ ":focus_text_motion_grd" ]
+}

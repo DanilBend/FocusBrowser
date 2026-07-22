@@ -41,6 +41,14 @@
 #include "ui/views/vector_icons.h"
 
 namespace {
+
+bool UseRussianFocusUi() {
+  const std::string locale =
+      l10n_util::GetApplicationLocale(std::string(), false);
+  return locale == "ru" || locale.starts_with("ru-") ||
+         locale.starts_with("ru_");
+}
+
 std::optional<side_panel::customize_chrome::mojom::ActionId>
 MojoActionForChromeAction(actions::ActionId action_id) {
   switch (action_id) {
@@ -374,7 +382,9 @@ void CustomizeToolbarHandler::ListActions(ListActionsCallback callback) {
   auto focus_block_action =
       side_panel::customize_chrome::mojom::Action::New(
           side_panel::customize_chrome::mojom::ActionId::kFocusBlock,
-          base::UTF16ToUTF8(u"FocusBlock — защита от рекламы"),
+          base::UTF16ToUTF8(UseRussianFocusUi()
+                                ? u"FocusBlock — защита от рекламы"
+                                : u"FocusBlock — ad protection"),
           prefs()->GetBoolean(prefs::kShowFocusBlockButton), false,
           side_panel::customize_chrome::mojom::CategoryId::kYourChrome,
           GURL(webui::EncodePNGAndMakeDataURI(
@@ -386,7 +396,9 @@ void CustomizeToolbarHandler::ListActions(ListActionsCallback callback) {
   auto focus_youtube_action =
       side_panel::customize_chrome::mojom::Action::New(
           side_panel::customize_chrome::mojom::ActionId::kFocusYoutube,
-          base::UTF16ToUTF8(u"FocusYoutube — фокус на видео"),
+          base::UTF16ToUTF8(UseRussianFocusUi()
+                                ? u"FocusYoutube — фокус на видео"
+                                : u"FocusYoutube — focus on video"),
           prefs()->GetBoolean(prefs::kShowFocusYoutubeButton), false,
           side_panel::customize_chrome::mojom::CategoryId::kYourChrome,
           GURL(webui::EncodePNGAndMakeDataURI(

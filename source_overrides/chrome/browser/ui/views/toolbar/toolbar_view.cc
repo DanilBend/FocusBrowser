@@ -25,8 +25,6 @@
 #include "chrome/browser/actor/ui/actor_ui_metrics.h"
 #include "chrome/browser/actor/ui/task_list_bubble/actor_task_list_bubble_controller.h"
 #include "chrome/browser/command_updater.h"
-#include "chrome/browser/extensions/extension_view_host.h"
-#include "chrome/browser/extensions/extension_view_host_factory.h"
 #include "chrome/browser/glic/browser_ui/glic_actor_task_icon_manager_factory.h"
 #include "chrome/browser/glic/browser_ui/glic_button_controller.h"
 #include "chrome/browser/glic/browser_ui/glic_nudge_controller.h"
@@ -73,7 +71,6 @@
 #include "chrome/browser/ui/views/bookmarks/bookmark_bubble_view.h"
 #include "chrome/browser/ui/views/contextual_tasks/contextual_tasks_button.h"
 #include "chrome/browser/ui/views/contextual_tasks/contextual_tasks_close_tab_button.h"
-#include "chrome/browser/ui/views/extensions/extension_popup.h"
 #include "chrome/browser/ui/views/extensions/extensions_toolbar_button.h"
 #include "chrome/browser/ui/views/extensions/extensions_toolbar_coordinator.h"
 #include "chrome/browser/ui/views/extensions/extensions_toolbar_desktop.h"
@@ -84,6 +81,7 @@
 #include "chrome/browser/ui/views/glic/glic_button_interface.h"
 #include "chrome/browser/ui/views/global_media_controls/media_toolbar_button_contextual_menu.h"
 #include "chrome/browser/ui/views/global_media_controls/media_toolbar_button_view.h"
+#include "chrome/browser/ui/views/location_bar/focus_block_bubble_view.h"
 #include "chrome/browser/ui/views/location_bar/intent_chip_button.h"
 #include "chrome/browser/ui/views/location_bar/star_view.h"
 #include "chrome/browser/ui/views/location_bar/webui_location_bar.h"
@@ -102,6 +100,7 @@
 #include "chrome/browser/ui/views/toolbar/back_forward_button.h"
 #include "chrome/browser/ui/views/toolbar/browser_app_menu_button.h"
 #include "chrome/browser/ui/views/toolbar/chrome_labs/chrome_labs_coordinator.h"
+#include "chrome/browser/ui/views/toolbar/focus_youtube_bubble_view.h"
 #include "chrome/browser/ui/views/toolbar/home_button.h"
 #include "chrome/browser/ui/views/toolbar/pinned_toolbar_actions_container.h"
 #include "chrome/browser/ui/views/toolbar/reload_button.h"
@@ -127,7 +126,6 @@
 #include "components/autofill/core/common/autofill_payments_features.h"
 #include "components/contextual_tasks/public/features.h"
 #include "components/feature_engagement/public/feature_constants.h"
-#include "components/focus_services/extension_ids.h"
 #include "components/focus_services/pref_names.h"
 #include "components/prefs/pref_service.h"
 #include "components/safe_browsing/core/common/features.h"
@@ -135,10 +133,9 @@
 #include "components/signin/public/base/signin_buildflags.h"
 #include "components/strings/grit/components_strings.h"
 #include "components/vector_icons/vector_icons.h"
+#include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/render_view_host.h"
 #include "content/public/browser/web_contents.h"
-#include "extensions/browser/extension_registry.h"
-#include "extensions/common/extension.h"
 #include "third_party/skia/include/core/SkPath.h"
 #include "third_party/skia/include/core/SkPathBuilder.h"
 #include "ui/accessibility/ax_node_data.h"
@@ -196,6 +193,13 @@ constexpr int kToolbarActionsFlexOrder = kToolbarFlexOrderOffset + 2;
 constexpr int kExtensionsFlexOrder = kToolbarFlexOrderOffset + 3;
 
 constexpr int kDynamicNewTabButtonIconSize = 16;
+
+bool UseRussianFocusUi() {
+  const std::string locale =
+      l10n_util::GetApplicationLocale(std::string(), false);
+  return locale == "ru" || locale.starts_with("ru-") ||
+         locale.starts_with("ru_");
+}
 
 class DynamicNewTabToolbarButton : public ToolbarButton {
  public:
@@ -525,36 +529,20 @@ void ToolbarView::Init() {
     location_bar_ = toolbar_webview_->GetLocationBar();
   }
 
-  // FocusBlock and FocusYoutube use component extensions only as internal
-  // engines. Their controls are first-class browser buttons, deliberately
-  // separate from the user extension container and its install/pin UI.
-  focus_block_button_ = AddChildView(std::make_unique<ToolbarButton>(
-      base::BindRepeating(&ToolbarView::FocusBlockButtonPressed,
-                          base::Unretained(this))));
-  focus_block_button_->SetVectorIcon(vector_icons::kShieldIcon);
-  focus_block_button_->SetTooltipText(u"FocusBlock — защита от рекламы");
-  focus_block_button_->GetViewAccessibility().SetName(
-      u"Открыть встроенную защиту FocusBlock");
-
-  // Keep the protection control immediately to the left of the address bar,
-  // including when the location bar is hosted by the WebUI toolbar. The
-  // button remains a first-class browser control rather than an extension
-  // action.
-  views::View* const location_bar_container =
-      location_bar_view_ ? static_cast<views::View*>(location_bar_view_)
-                         : static_cast<views::View*>(toolbar_webview_);
-  CHECK(location_bar_container);
-  ReorderChildView(focus_block_button_,
-                   GetIndexOf(location_bar_container).value());
-
+  // FocusYoutube uses its component extension only as an internal engine. Its
+  // control remains a first-class browser button, deliberately separate from
+  // the user extension container and its install/pin UI. FocusBlock is owned
+  // by LocationBarView so its shield is inside the address field.
   focus_youtube_button_ = AddChildView(std::make_unique<ToolbarButton>(
       base::BindRepeating(&ToolbarView::FocusYoutubeButtonPressed,
                           base::Unretained(this))));
   focus_youtube_button_->SetVectorIcon(vector_icons::kVideoLibraryIcon);
-  focus_youtube_button_->SetTooltipText(
-      u"FocusYoutube — настройка ленты YouTube");
+  focus_youtube_button_->SetTooltipText(UseRussianFocusUi()
+                                            ? u"FocusYoutube — настройка ленты YouTube"
+                                            : u"FocusYoutube — tune your YouTube feed");
   focus_youtube_button_->GetViewAccessibility().SetName(
-      u"Открыть встроенную защиту FocusYoutube");
+      UseRussianFocusUi() ? u"Открыть встроенную защиту FocusYoutube"
+                          : u"Open built-in FocusYoutube controls");
   focus_youtube_button_->SetVisible(false);
 
   if (auto* vertical_tab_strip_state_controller =
@@ -847,8 +835,10 @@ void ToolbarView::Init() {
       prefs::kShowFocusYoutubeButton, prefs,
       base::BindRepeating(&ToolbarView::OnShowFocusYoutubeButtonChanged,
                           base::Unretained(this)));
-  UpdateFocusYoutubeButtonVisibility(
-      browser_->tab_strip_model()->GetActiveWebContents());
+  WebContents* active_web_contents =
+      browser_->tab_strip_model()->GetActiveWebContents();
+  Observe(active_web_contents);
+  UpdateFocusYoutubeButtonVisibility(active_web_contents);
 
   if (app_menu_button_) {
     show_menu_button_.Init(
@@ -1393,6 +1383,9 @@ void ToolbarView::AnimationProgressed(const gfx::Animation* animation) {
 }
 
 void ToolbarView::Update(WebContents* tab) {
+  if (tab != web_contents()) {
+    Observe(tab);
+  }
   if (location_bar_) {
     location_bar_->Update(tab);
   }
@@ -1749,58 +1742,12 @@ void ToolbarView::VerticalTabsCollapseButtonPressed(const ui::Event& event) {
   controller->RequestCollapse(!controller->IsCollapsed());
 }
 
-void ToolbarView::FocusBlockButtonPressed(const ui::Event& event) {
-  ShowFocusComponentPopup(focus::kUBlockOriginComponentId,
-                          "popup-fenix.html", focus_block_button_);
+void ToolbarView::ShowFocusBlockPopup(views::View* anchor_view) {
+  FocusBlockBubbleView::ShowBubble(browser_, anchor_view);
 }
 
 void ToolbarView::FocusYoutubeButtonPressed(const ui::Event& event) {
-  ShowFocusComponentPopup(focus::kFocusYoutubeComponentId, "popup.html",
-                          focus_youtube_button_);
-}
-
-void ToolbarView::ShowFocusComponentPopup(const char* extension_id,
-                                          const char* popup_path,
-                                          ToolbarButton* anchor_button) {
-  if (!anchor_button || !anchor_button->GetVisible()) {
-    return;
-  }
-
-  const views::BubbleAnchor popup_anchor(anchor_button);
-  if (auto* open_popup = ExtensionPopup::last_popup_for_testing()) {
-    const bool toggling_current_popup =
-        open_popup->IsSameAnchor(popup_anchor);
-    open_popup->CloseDeferredIfNecessary(
-        views::Widget::ClosedReason::kUnspecified);
-    if (toggling_current_popup) {
-      return;
-    }
-  }
-
-  auto* registry =
-      extensions::ExtensionRegistry::Get(browser_->profile());
-  const extensions::Extension* extension =
-      registry ? registry->enabled_extensions().GetByID(extension_id)
-               : nullptr;
-  if (!extension) {
-    return;
-  }
-
-  std::string popup_resource(popup_path);
-  if (!browser_->profile()->GetPrefs()->GetBoolean(
-          prefs::kFocusMotionEnabled)) {
-    popup_resource.append("?focusMotion=0");
-  }
-  auto host = extensions::ExtensionViewHostFactory::CreatePopupHost(
-      *extension, extension->GetResourceURL(popup_resource), browser_);
-  if (!host) {
-    return;
-  }
-
-  ExtensionPopup::ShowPopup(
-      browser_, std::move(host), popup_anchor,
-      views::BubbleBorder::TOP_RIGHT, PopupShowAction::kShow,
-      ShowPopupCallback());
+  FocusYoutubeBubbleView::ShowBubble(browser_, focus_youtube_button_);
 }
 
 bool ToolbarView::AcceleratorPressed(const ui::Accelerator& accelerator) {
@@ -2430,9 +2377,9 @@ void ToolbarView::OnShowExtensionsButtonChanged() {
 }
 
 void ToolbarView::OnShowFocusBlockButtonChanged() {
-  if (focus_block_button_) {
-    focus_block_button_->SetVisible(show_focus_block_button_.GetValue());
-    InvalidateLayout();
+  if (location_bar_view_) {
+    location_bar_view_->SetFocusBlockButtonVisible(
+        show_focus_block_button_.GetValue());
   }
 }
 
@@ -2446,12 +2393,44 @@ void ToolbarView::UpdateFocusYoutubeButtonVisibility(WebContents* tab) {
   if (tab) {
     // FocusYoutube is contextual: keep its browser-owned control out of the
     // way everywhere except YouTube, where its settings are useful.
-    const GURL& committed_url = tab->GetLastCommittedURL();
-    const auto& host = committed_url.host();
+    // `GetVisibleURL()` includes a pending navigation. Using only the last
+    // committed URL made the control appear after YouTube had already spent
+    // time loading, and kept it visible briefly while navigating away. The
+    // exact apex host is included too, so the control is already available
+    // while youtube.com is redirecting to www.youtube.com.
+    const GURL& visible_url = tab->GetVisibleURL();
+    const GURL& context_url =
+        visible_url.is_valid() ? visible_url : tab->GetLastCommittedURL();
+    const auto& host = context_url.host();
     focus_youtube_context_available_ =
-        committed_url.SchemeIs(url::kHttpsScheme) &&
-        (host == "www.youtube.com" || host == "m.youtube.com");
+        context_url.SchemeIs(url::kHttpsScheme) &&
+        (host == "youtube.com" || host == "www.youtube.com" ||
+         host == "m.youtube.com");
   }
+  if (focus_youtube_button_) {
+    focus_youtube_button_->SetVisible(
+        focus_youtube_context_available_ &&
+        show_focus_youtube_button_.GetValue());
+    InvalidateLayout();
+  }
+}
+
+void ToolbarView::DidStartNavigation(
+    content::NavigationHandle* navigation_handle) {
+  if (!navigation_handle->IsInPrimaryMainFrame()) {
+    return;
+  }
+
+  // The toolbar can be initialized before a command-line URL becomes the
+  // tab's pending visible URL. Observe the primary navigation directly so the
+  // native control is ready on the first frame, including the apex
+  // youtube.com URL before it redirects to www.youtube.com.
+  const GURL& navigation_url = navigation_handle->GetURL();
+  const auto& host = navigation_url.host();
+  focus_youtube_context_available_ =
+      navigation_url.SchemeIs(url::kHttpsScheme) &&
+      (host == "youtube.com" || host == "www.youtube.com" ||
+       host == "m.youtube.com");
   if (focus_youtube_button_) {
     focus_youtube_button_->SetVisible(
         focus_youtube_context_available_ &&

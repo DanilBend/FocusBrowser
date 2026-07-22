@@ -2,9 +2,10 @@ import { mount } from 'svelte'
 import './lib/chrome-send-polyfill';
 
 import './app.css'
-import { initStrings, s } from './lib/strings';
+import { getUiLocale, initStrings, s } from './lib/strings';
 
 await initStrings();
+document.documentElement.lang = getUiLocale();
 document.title = s.page.title;
 const { default: App } = await import('./App.svelte');
 

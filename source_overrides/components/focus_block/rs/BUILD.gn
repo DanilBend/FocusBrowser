@@ -1,0 +1,31 @@
+# Copyright (c) 2023 The Brave Authors. All rights reserved.
+# Copyright (c) 2026 Focus Browser contributors.
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this file,
+# You can obtain one at https://mozilla.org/MPL/2.0/.
+
+import("//build/rust/rust_static_library.gni")
+
+# Small, browser-owned CXX bridge around adblock-rust.  The browser service
+# owns the Engine and performs all policy decisions; this target only exposes
+# parsing and matching primitives.
+rust_static_library("rust_lib") {
+  crate_name = "focus_block_adblock_cxx"
+  crate_root = "src/lib.rs"
+  allow_unsafe = true
+  edition = "2021"
+
+  sources = [
+    "src/engine.rs",
+    "src/filter_set.rs",
+    "src/lib.rs",
+  ]
+
+  visibility = [ "//components/focus_block/*" ]
+  cxx_bindings = [ "src/lib.rs" ]
+
+  deps = [
+    "//third_party/rust/adblock/v0_13:lib",
+    "//third_party/rust/serde_json/v1:lib",
+  ]
+}

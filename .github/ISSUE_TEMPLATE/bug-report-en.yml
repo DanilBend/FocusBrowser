@@ -1,0 +1,57 @@
+name: Bug report (English)
+description: Report a reproducible Focus Browser problem in English
+labels: ["bug"]
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing Issues first. Do not attach a real profile, cookies,
+        passwords, tokens or other private data. Follow SECURITY.en.md for
+        vulnerabilities and do not publish sensitive technical details.
+  - type: input
+    id: version
+    attributes:
+      label: Focus Browser version
+      description: Copy it from focus://settings/help.
+      placeholder: "1.0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation method
+      options:
+        - Installer
+        - Portable archive
+        - Local source build
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the problem and its impact.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Additional diagnostics
+      description: Attach sanitized logs or screenshots and say whether the issue reproduces with a disposable profile.

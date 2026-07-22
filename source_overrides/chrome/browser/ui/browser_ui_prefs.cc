@@ -161,6 +161,8 @@ void RegisterBrowserUserPrefs(user_prefs::PrefRegistrySyncable* registry) {
   registry->RegisterBooleanPref(prefs::kShowExtensionsButton, true);
   registry->RegisterBooleanPref(prefs::kShowFocusBlockButton, true);
   registry->RegisterBooleanPref(prefs::kShowFocusYoutubeButton, true);
+  registry->RegisterBooleanPref(prefs::kFocusBlockEnabled, true);
+  registry->RegisterListPref(prefs::kFocusBlockDisabledSites);
   registry->RegisterBooleanPref(prefs::kFocusMotionEnabled, true);
   registry->RegisterBooleanPref(prefs::kShowMenuButton, true);
   registry->RegisterBooleanPref(prefs::kShowMediaButton, true);

@@ -1,8 +1,8 @@
 # Релизы Focus Browser для Windows
 
-Этот документ — runbook для будущего открытого репозитория и выпуска версии
-1.0. Он ничего не публикует и не содержит рабочих ключей. Везде замените
-`DanilBend/FocusBrowser` после создания настоящего репозитория.
+Этот документ — runbook для текущего открытого репозитория
+`DanilBend/FocusBrowser` и выпуска версии 1.0.1. Он ничего не публикует и не
+содержит рабочих ключей.
 
 > Важно: текущий `.github/workflows/main.yml` нельзя включать для production-
 > релизов без отдельного аудита, перечисленного ниже. Сначала должен пройти
@@ -107,7 +107,7 @@ variable, исходники, артефакт сборки, кэш или ло�
 
 ### 2.4. Неизменяемые релизы
 
-До публикации 1.0 откройте repository `Settings`, прокрутите страницу до
+До публикации 1.0.1 откройте repository `Settings`, прокрутите страницу до
 раздела `Releases` и включите `Enable release immutability`. Настройка действует
 только на будущие релизы. После публикации GitHub запрещает перемещение тега и
 изменение/удаление assets и автоматически создаёт release attestation.
@@ -214,18 +214,18 @@ Set-Content -LiteralPath $keyPath -Value $env:WINSPARKLE_ED_PRIVATE_KEY `
 `${{ secrets.WINSPARKLE_ED_PRIVATE_KEY }}` только внутри job с
 `environment: release`.
 
-## 4. Версия 1.0 и имена артефактов
+## 4. Версия 1.0.1 и имена артефактов
 
-Внутренняя версия должна монотонно увеличиваться. Для первого стабильного
-релиза используйте техническую версию `1.0.0.0` и тег `v1.0.0`.
+Внутренняя версия должна монотонно увеличиваться. Для текущего стабильного
+релиза используйте техническую версию `1.0.1.0` и тег `v1.0.1`.
 
-Короткая строка `1.0` относится только к presentation-слою упаковки:
+Короткая строка `1.0.1` относится только к presentation-слою упаковки:
 `package.py` использует её в именах assets, а NSIS — в тексте мастера и
 строковых version-resource полях wrapper. Установленная версия, каталог версии
 в `Application`, Windows uninstall `Version`/`DisplayVersion`, страница About,
 `--product-version` и сравнение версий WinSparkle используют полную строку
-`1.0.0.0`. Поэтому в appcast обязательно ставьте
-`sparkle:version="1.0.0.0"`; `sparkle:shortVersionString="1.0"` — только подпись
+`1.0.1.0`. Поэтому в appcast обязательно ставьте
+`sparkle:version="1.0.1.0"`; `sparkle:shortVersionString="1.0.1"` — только подпись
 для пользователя. Не переиспользуйте технический номер или тег после
 публикации.
 
@@ -233,8 +233,8 @@ Set-Content -LiteralPath $keyPath -Value $env:WINSPARKLE_ED_PRIVATE_KEY `
 
 | Архитектура | Ручная установка | Payload автообновления | Архив |
 | --- | --- | --- | --- |
-| x64 | `FocusBrowser_1.0_x64-installer.exe` | `FocusBrowser_1.0_x64-mini-installer.exe` | `FocusBrowser_1.0_x64-windows.zip` |
-| ARM64 | `FocusBrowser_1.0_arm64-installer.exe` | `FocusBrowser_1.0_arm64-mini-installer.exe` | `FocusBrowser_1.0_arm64-windows.zip` |
+| x64 | `FocusBrowser_1.0.1_x64-installer.exe` | `FocusBrowser_1.0.1_x64-mini-installer.exe` | `FocusBrowser_1.0.1_x64-windows.zip` |
+| ARM64 | `FocusBrowser_1.0.1_arm64-installer.exe` | `FocusBrowser_1.0.1_arm64-mini-installer.exe` | `FocusBrowser_1.0.1_arm64-windows.zip` |
 
 В Release также приложите:
 
@@ -275,7 +275,7 @@ pre-release каналы имеют разные правила. При policy �
 однозначно соответствовать архитектуре. Feed публикуется только после того, как
 неизменяемые assets уже доступны.
 
-Минимальный `appcast-x64.xml` для 1.0:
+Минимальный `appcast-x64.xml` для 1.0.1:
 
 ```xml
 <?xml version="1.0" encoding="utf-8"?>
@@ -287,13 +287,13 @@ pre-release каналы имеют разные правила. При policy �
     <description>Stable updates for Focus Browser x64</description>
     <language>ru</language>
     <item>
-      <title>Focus Browser 1.0</title>
-      <pubDate>Mon, 20 Jul 2026 12:00:00 +0000</pubDate>
-      <link>https://github.com/DanilBend/FocusBrowser/releases/tag/v1.0.0</link>
+      <title>Focus Browser 1.0.1</title>
+      <pubDate>Wed, 22 Jul 2026 12:00:00 +0000</pubDate>
+      <link>https://github.com/DanilBend/FocusBrowser/releases/tag/v1.0.1</link>
       <enclosure
-        url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.0/FocusBrowser_1.0_x64-mini-installer.exe"
-        sparkle:version="1.0.0.0"
-        sparkle:shortVersionString="1.0"
+        url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.1/FocusBrowser_1.0.1_x64-mini-installer.exe"
+        sparkle:version="1.0.1.0"
+        sparkle:shortVersionString="1.0.1"
         sparkle:os="windows-x64"
         sparkle:edSignature="&lt;BASE64_ED25519_SIGNATURE&gt;"
         length="&lt;BYTE_LENGTH&gt;"
@@ -309,14 +309,14 @@ pre-release каналы имеют разные правила. При policy �
 enclosure с разными URL, подписями, размерами и точными OS-маркерами:
 
 ```xml
-<sparkle:version>1.0.0.0</sparkle:version>
-<sparkle:shortVersionString>1.0</sparkle:shortVersionString>
-<enclosure url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.0/FocusBrowser_1.0_x64-mini-installer.exe"
+<sparkle:version>1.0.1.0</sparkle:version>
+<sparkle:shortVersionString>1.0.1</sparkle:shortVersionString>
+<enclosure url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.1/FocusBrowser_1.0.1_x64-mini-installer.exe"
            sparkle:os="windows-x64"
            sparkle:edSignature="&lt;X64_BASE64_ED25519_SIGNATURE&gt;"
            length="&lt;X64_BYTE_LENGTH&gt;"
            type="application/octet-stream" />
-<enclosure url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.0/FocusBrowser_1.0_arm64-mini-installer.exe"
+<enclosure url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.1/FocusBrowser_1.0.1_arm64-mini-installer.exe"
            sparkle:os="windows-arm64"
            sparkle:edSignature="&lt;ARM64_BASE64_ED25519_SIGNATURE&gt;"
            length="&lt;ARM64_BYTE_LENGTH&gt;"
@@ -336,7 +336,7 @@ code и формат stdout, затем переносите оба значен
 файл которого был подписан:
 
 ```powershell
-$payload = (Resolve-Path .\FocusBrowser_1.0_x64-mini-installer.exe).Path
+$payload = (Resolve-Path .\FocusBrowser_1.0.1_x64-mini-installer.exe).Path
 $fragment = ((& $tool sign --verbose `
   --private-key-file .\winsparkle-private.key $payload) | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or
@@ -356,7 +356,7 @@ if ($signedLength -ne (Get-Item -LiteralPath $payload).Length) {
 & $tool verify `
   --public-key '<BASE64_ED25519_PUBLIC_KEY>' `
   --signature '<BASE64_ED25519_SIGNATURE>' `
-  .\FocusBrowser_1.0_x64-mini-installer.exe
+  .\FocusBrowser_1.0.1_x64-mini-installer.exe
 ```
 
 Угловые скобки — placeholders; их нельзя оставлять в production XML. Проверьте
@@ -365,7 +365,7 @@ XML-парсером, скачайте каждый enclosure по опубли�
 
 ## 6. Неизменяемый release: правильный порядок
 
-1. Зафиксируйте commit, версии зависимостей и номер `1.0.0.0`.
+1. Зафиксируйте commit, версии зависимостей и номер `1.0.1.0`.
 2. Соберите x64 и ARM64 с одним публичным Ed25519-ключом, но с отдельным
    appcast URL для каждой архитектуры.
 3. Выполните тесты на чистых Windows x64 и Windows ARM64, включая user-level и
@@ -377,7 +377,7 @@ XML-парсером, скачайте каждый enclosure по опубли�
    Ed25519-подпись недействительной.
 6. Вычислите SHA-256 и точный размер каждого финального asset.
 7. Сгенерируйте два appcast и локально проверьте Ed25519-подписи.
-8. Создайте GitHub Release `v1.0.0` как draft.
+8. Создайте GitHub Release `v1.0.1` как draft.
 9. Загрузите в draft все x64/ARM64 assets, checksums, appcast-аудит-копии и
    release notes. Скачайте их обратно и сравните SHA-256.
 10. Одобрите protected environment и опубликуйте draft. При включённой
@@ -514,15 +514,15 @@ SignPath принимает заявки open-source проектов на бе�
 Уберите/заморозьте feed до готовности assets, затем повторите полный download и
 signature smoke-test. Клиентам нельзя предлагать URL, который ещё не доступен.
 
-## 11. Финальный чек-лист 1.0
+## 11. Финальный чек-лист 1.0.1
 
 - [ ] В исходниках, артефактах, metadata и UI используется только актуальное имя.
 - [ ] `main` и `v*` защищены ruleset.
 - [ ] Окружение `release` требует независимого approval.
 - [ ] Production private key существует только как protected secret и offline backup.
 - [ ] Pinned `winsparkle-tool` archive совпал с зафиксированным SHA-256.
-- [ ] About/installed/WinSparkle и `sparkle:version` используют `1.0.0.0`;
-      `1.0` осталась только presentation-версией упаковки.
+- [ ] About/installed/WinSparkle и `sparkle:version` используют `1.0.1.0`;
+      `1.0.1` осталась только presentation-версией упаковки.
 - [ ] x64 и ARM64 собраны с правильными раздельными appcast URL.
 - [ ] Enclosure помечены `windows-x64` и `windows-arm64`, а не generic `windows`.
 - [ ] WinSparkle registry identity осталась

@@ -37,7 +37,8 @@
         ai: s.shortcuts.ai,
         productivity: s.shortcuts.productivity,
         empty: s.shortcuts.empty,
-        selected: (count: number) => `${s.shortcuts.selected} ${count} из ${MAX_SHORTCUTS}`,
+        selected: (count: number) =>
+            `${s.shortcuts.selected} ${count} ${s.navigation.of} ${MAX_SHORTCUTS}`,
         limit: s.shortcuts.limit,
     });
 

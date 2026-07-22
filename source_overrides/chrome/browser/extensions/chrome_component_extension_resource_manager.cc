@@ -27,6 +27,7 @@
 #include "extensions/common/constants.h"
 #include "extensions/common/extension_id.h"
 #include "pdf/buildflags.h"
+#include "third_party/focus_text_motion/resources/grit/focus_text_motion_resources_map.h"
 #include "third_party/focus_youtube/resources/grit/focus_youtube_resources_map.h"
 #include "third_party/ublock/resources/grit/ublock_resources_map.h"
 #include "ui/base/resource/resource_bundle.h"
@@ -104,6 +105,7 @@ ChromeComponentExtensionResourceManager::Data::Data() {
 
   AddComponentResourceEntries(kComponentExtensionResources);
   AddComponentResourceEntries(kExtraComponentExtensionResources);
+  AddComponentResourceEntries(kFocusTextMotionResources);
   AddComponentResourceEntries(kFocusYoutubeResources);
   AddComponentResourceEntries(kUblockResources);
   AddComponentResourceEntries(kExtstoreFixupsResources);

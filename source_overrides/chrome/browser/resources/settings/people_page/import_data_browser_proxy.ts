@@ -19,6 +19,7 @@ export interface BrowserProfile {
   passwords: boolean;
   search: boolean;
   autofillFormData: boolean;
+  extensions: boolean;
 }
 
 /**

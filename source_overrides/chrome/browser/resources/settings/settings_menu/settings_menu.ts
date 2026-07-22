@@ -101,6 +101,17 @@ export class SettingsMenuElement extends SettingsMenuElementBase {
   override currentRouteChanged(newRoute: Route) {
     // Focus the initially selected path.
     const anchors = this.shadowRoot!.querySelectorAll('a');
+    // Prefer an exact sidebar destination before falling back to an ancestor.
+    // Import Data is a dialog route parented under People, but it has its own
+    // first-class Focus Browser menu item and must stay visibly selected.
+    for (let i = 0; i < anchors.length; ++i) {
+      const pathname = anchors[i].getAttribute('href')!;
+      const anchorRoute = Router.getInstance().getRouteForPath(pathname);
+      if (anchorRoute === newRoute) {
+        this.setSelectedPath_(pathname);
+        return;
+      }
+    }
     for (let i = 0; i < anchors.length; ++i) {
       // Purposefully grabbing the 'href' attribute and not the property.
       const pathname = anchors[i].getAttribute('href')!;

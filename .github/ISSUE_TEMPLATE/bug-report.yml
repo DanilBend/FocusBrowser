@@ -1,57 +1,57 @@
-name: Bug report
-description: Report a reproducible Focus Browser problem
+name: Сообщение об ошибке
+description: Сообщить о воспроизводимой проблеме Focus Browser
 labels: ["bug"]
-title: "[Bug] "
+title: "[Ошибка] "
 body:
   - type: markdown
     attributes:
       value: |
-        Search existing issues first. Do not attach a real browser profile,
-        cookies, passwords, tokens or other private data. Report security
-        vulnerabilities through the private process described in SECURITY.md.
+        Сначала проверьте существующие Issues. Не прикладывайте настоящий
+        профиль, cookies, пароли, токены и другие личные данные. Для уязвимостей
+        используйте порядок из SECURITY.md и не публикуйте технические детали.
   - type: input
     id: version
     attributes:
-      label: Focus Browser version
-      description: Copy the version from focus://settings/help.
-      placeholder: "1.0.0.0"
+      label: Версия Focus Browser
+      description: Скопируйте версию со страницы focus://settings/help.
+      placeholder: "1.0.1.0"
     validations:
       required: true
   - type: dropdown
     id: installation
     attributes:
-      label: Installation type
+      label: Способ установки
       options:
-        - Installer
-        - Portable archive
-        - Local source build
+        - Установщик
+        - Портативный архив
+        - Локальная сборка исходников
     validations:
       required: true
   - type: textarea
     id: description
     attributes:
-      label: What happened?
-      description: Describe the problem and its user impact.
+      label: Что произошло?
+      description: Опишите проблему и её влияние на работу.
     validations:
       required: true
   - type: textarea
     id: repro
     attributes:
-      label: Reproduction steps
+      label: Шаги воспроизведения
       placeholder: |
-        1. Open ...
-        2. Select ...
-        3. Observe ...
+        1. Откройте ...
+        2. Выберите ...
+        3. Наблюдайте ...
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
-      label: Expected behavior
+      label: Ожидаемое поведение
     validations:
       required: true
   - type: textarea
     id: diagnostics
     attributes:
-      label: Additional diagnostics
-      description: Add sanitized logs or screenshots and mention whether a disposable profile reproduces the issue.
+      label: Дополнительная диагностика
+      description: Приложите обезличенные журналы или снимки и укажите, воспроизводится ли проблема в одноразовом профиле.

@@ -1,0 +1,11 @@
+# Copyright (c) 2026 Focus Browser contributors.
+# Use of this source code is governed by the license in the project root.
+
+# The public native-engine dependency keeps the generated CXX types and the
+# Chromium public-suffix resolver linked together for browser-side consumers.
+group("native_engine") {
+  public_deps = [
+    "//components/focus_block/rs:rust_lib",
+    "//components/focus_block/rs/resolver",
+  ]
+}

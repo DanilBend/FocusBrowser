@@ -1,0 +1,97 @@
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index f137afcb5285e..09a32d91071e9 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -730,6 +730,7 @@ source_set("core") {
+     "//chrome/browser/external_protocol",
+     "//chrome/browser/favicon",
+     "//chrome/browser/finds/core",
++    "//chrome/browser/focus_block",
+     "//chrome/browser/first_party_sets",
+     "//chrome/browser/first_run",
+     "//chrome/browser/gcm",
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 06033560b699f..c306206a1942d 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -91,6 +91,7 @@
+ #include "chrome/browser/external_protocol/external_protocol_handler.h"
+ #include "chrome/browser/favicon/favicon_utils.h"
+ #include "chrome/browser/font_family_cache.h"
++#include "chrome/browser/focus_block/focus_block_url_loader_factory.h"
+ #include "chrome/browser/headless/headless_mode_util.h"
+ #include "chrome/browser/hid/chrome_hid_delegate.h"
+ #include "chrome/browser/history/history_service_factory.h"
+@@ -6746,5 +6747,9 @@ void ChromeContentBrowserClient::WillCreateURLLoaderFactory(
+ #endif  // BUILDFLAG(ENABLE_GUEST_VIEW)
+ 
++  focus_block::MaybeProxyURLLoaderFactory(
++      Profile::FromBrowserContext(browser_context), frame, type,
++      request_initiator, isolation_info, factory_builder);
++
+   // WARNING: This must be the last interceptor in the chain as the proxying
+   // URLLoaderFactory installed by this needs to be the one actually sending
+   // packets over the network (to effectively target `bound_network`).
+diff --git a/chrome/browser/extensions/component_loader.cc b/chrome/browser/extensions/component_loader.cc
+index 29b830fae5363..20b68bc326f42 100644
+--- a/chrome/browser/extensions/component_loader.cc
++++ b/chrome/browser/extensions/component_loader.cc
+@@ -554,6 +554,5 @@ void ComponentLoader::AddDefaultComponentExtensions(
+   if (!skip_session_components) {
+     AddWebStoreApp();
+-    AddUBlock();
+     AddFocusYoutube();
+     AddExtstoreFixups();
+ #if BUILDFLAG(IS_CHROMEOS)
+diff --git a/chrome/browser/ui/tab_helpers.cc b/chrome/browser/ui/tab_helpers.cc
+index 30379695d81fb..681dff3a27c2e 100644
+--- a/chrome/browser/ui/tab_helpers.cc
++++ b/chrome/browser/ui/tab_helpers.cc
+@@ -33,6 +33,7 @@
+ #include "chrome/browser/finds/core/finds_features.h"
+ #include "chrome/browser/finds/core/finds_tab_helper.h"
+ #include "chrome/browser/finds/finds_service_factory.h"
++#include "chrome/browser/focus_block/focus_block_tab_helper.h"
+ #include "chrome/browser/history/history_tab_helper.h"
+ #include "chrome/browser/history/top_sites_factory.h"
+ #include "chrome/browser/history_clusters/history_clusters_tab_helper.h"
+@@ -347,6 +348,7 @@ void TabHelpers::AttachTabHelpers(WebContents* web_contents) {
+       Profile::FromBrowserContext(web_contents->GetBrowserContext());
+ 
+   // --- Section 1: Common tab helpers ---
++  focus_block::FocusBlockTabHelper::CreateForWebContents(web_contents);
+   if (page_info::IsAboutThisSiteFeatureEnabled()) {
+     if (auto* optimization_guide_decider =
+             OptimizationGuideKeyedServiceFactory::GetForProfile(profile)) {
+diff --git a/chrome/browser/profiles/BUILD.gn b/chrome/browser/profiles/BUILD.gn
+index 5b2bf33b8aa1f..57da2b915a27a 100644
+--- a/chrome/browser/profiles/BUILD.gn
++++ b/chrome/browser/profiles/BUILD.gn
+@@ -647,6 +647,7 @@ source_set("profiles_extra_parts_impl") {
+     "//chrome/browser/feature_engagement",
+     "//chrome/browser/file_system_access",
+     "//chrome/browser/finds",
++    "//chrome/browser/focus_block",
+     "//chrome/browser/first_party_sets",
+     "//chrome/browser/glic",
+     "//chrome/browser/glic/suggestions",
+diff --git a/chrome/browser/profiles/chrome_browser_main_extra_parts_profiles.cc b/chrome/browser/profiles/chrome_browser_main_extra_parts_profiles.cc
+index e8f4589660d62..8c39de619a3fb 100644
+--- a/chrome/browser/profiles/chrome_browser_main_extra_parts_profiles.cc
++++ b/chrome/browser/profiles/chrome_browser_main_extra_parts_profiles.cc
+@@ -97,6 +97,7 @@
+ #include "chrome/browser/file_system_access/file_system_access_permission_context_factory.h"
+ #include "chrome/browser/finds/finds_service_factory.h"
+ #include "chrome/browser/first_party_sets/first_party_sets_policy_service_factory.h"
++#include "chrome/browser/focus_block/focus_block_service_factory.h"
+ #include "chrome/browser/font_pref_change_notifier_factory.h"
+ #include "chrome/browser/glic/public/glic_enabling.h"
+ #include "chrome/browser/glic/public/glic_keyed_service_factory.h"
+@@ -1024,6 +1025,7 @@ void ChromeBrowserMainExtraPartsProfiles::EnsureBrowserContextKeyedServiceFactor
+   FileSystemAccessPermissionContextFactory::GetInstance();
+   FindBarStateFactory::GetInstance();
+   finds::FindsServiceFactory::GetInstance();
++  focus_block::FocusBlockServiceFactory::GetInstance();
+   first_party_sets::FirstPartySetsPolicyServiceFactory::GetInstance();
+ #if !BUILDFLAG(IS_CHROMEOS) && !BUILDFLAG(IS_ANDROID)
+   FirstRunServiceFactory::GetInstance();

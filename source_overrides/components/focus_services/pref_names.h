@@ -49,6 +49,12 @@ inline constexpr char kShowFocusBlockButton[] =
 inline constexpr char kShowFocusYoutubeButton[] =
     "focus.browser.show_focus_youtube_button";
 
+// Native FocusBlock is enabled by default. Disabled sites are stored as
+// registrable domains so one exception applies consistently to subdomains.
+inline constexpr char kFocusBlockEnabled[] = "focus.block.enabled";
+inline constexpr char kFocusBlockDisabledSites[] =
+    "focus.block.disabled_sites";
+
 // Controls motion in Focus-owned WebUI surfaces and built-in protection
 // popups. The operating system's reduced-motion preference always wins.
 inline constexpr char kFocusMotionEnabled[] =

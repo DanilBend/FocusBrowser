@@ -1,0 +1,31 @@
+diff --git a/chrome/browser/ui/webui/onboarding/onboarding_page_ui.cc b/chrome/browser/ui/webui/onboarding/onboarding_page_ui.cc
+index f9cc948624a0e..13cd19c79ee47 100644
+--- a/chrome/browser/ui/webui/onboarding/onboarding_page_ui.cc
++++ b/chrome/browser/ui/webui/onboarding/onboarding_page_ui.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/ui/webui/onboarding/onboarding_page_ui.h"
+ 
++#include <string>
++
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/ui/webui/onboarding/onboarding_handler.h"
+ #include "chrome/browser/ui/webui/settings/brave_import_data_handler.h"
+@@ -17,3 +19,4 @@
+ #include "content/public/browser/web_ui_controller.h"
+ #include "content/public/browser/web_ui_data_source.h"
++#include "ui/base/l10n/l10n_util.h"
+ #include "ui/webui/webui_util.h"
+@@ -28,6 +31,12 @@ FocusOnboardingPage::FocusOnboardingPage(content::WebUI* web_ui)
+   webui::SetupWebUIDataSource(source, kFocusOnboardingGenerated,
+                               IDR_FOCUS_ONBOARDING_INDEX_HTML);
+   source->AddLocalizedStrings(focus_onboarding::kLocalizedStrings);
++  std::string application_locale =
++      l10n_util::GetApplicationLocale(std::string(), false);
++  if (application_locale.empty()) {
++    application_locale = "en-US";
++  }
++  source->AddString("applicationLocale", application_locale);
+   source->UseStringsJs();
+ 
+   // TODO: remove this call once the following issue/s are resolved:

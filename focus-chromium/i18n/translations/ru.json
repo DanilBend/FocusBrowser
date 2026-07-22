@@ -933,5 +933,15 @@
     "name": "IDS_SETTINGS_FOCUS_BROWSER_UPDATES_DESCRIPTION",
     "source": "Check for signed browser updates and install them automatically",
     "message": "Проверять подписанные обновления браузера и устанавливать их автоматически"
+  },
+  {
+    "name": "IDS_SETTINGS_FOCUS_MOTION",
+    "source": "Smooth interface animations",
+    "message": "Плавные анимации интерфейса"
+  },
+  {
+    "name": "IDS_SETTINGS_FOCUS_MOTION_DESCRIPTION",
+    "source": "Calm, fluid transitions in Focus Browser. The system reduced-motion setting always takes priority.",
+    "message": "Спокойные плавные переходы в Focus Browser. Системное уменьшение движения всегда имеет приоритет."
   }
 ]

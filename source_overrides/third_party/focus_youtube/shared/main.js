@@ -267,6 +267,33 @@
   const BEHAVIOR_ID_SET = new Set(BEHAVIOR_IDS);
   const BEHAVIOR_DEFAULTS = Object.fromEntries(
       BEHAVIOR_IDS.map(id => [id, false]));
+  // Schema v3 intentionally keeps the native surface compact. During the
+  // one-time upgrade, only these browser-owned controls retain their values;
+  // every option that existed only in the former extension UI is turned off.
+  const NATIVE_BEHAVIOR_IDS = Object.freeze([
+    'remove_homepage',
+    'remove_sidebar',
+    'remove_end_of_video',
+    'remove_all_shorts',
+    'disable_play_on_hover',
+    'disable_autoplay',
+    'auto_skip_ads',
+    'remove_info_cards',
+    'remove_overlay_suggestions',
+    'disable_ambient_mode',
+    'remove_comments',
+    'remove_left_nav_bar',
+    'remove_notif_bell',
+    'remove_menu_buttons',
+    'grayscale_mode',
+    'remove_search_suggestions',
+    'remove_search_promoted',
+    'remove_shorts_results',
+    'disable_channel_autoplay',
+    'remove_channel_for_you',
+  ]);
+  const NATIVE_BEHAVIOR_ID_SET = new Set(NATIVE_BEHAVIOR_IDS);
+  const CURRENT_SCHEMA_VERSION = 3;
   const REDIRECT_IDS = Object.freeze([
     'redirect_to_subs',
     'redirect_to_wl',
@@ -292,7 +319,7 @@
     nextTimedValue: true,
     password: false,
     hashed_password: '',
-    focus_youtube_schema_version: 2,
+    focus_youtube_schema_version: CURRENT_SCHEMA_VERSION,
   };
   const DEFAULT_SETTINGS = Object.freeze({
     ...BEHAVIOR_DEFAULTS,
@@ -484,6 +511,10 @@
     const saved = savedValue && typeof savedValue === 'object' ?
       savedValue : {};
     const patch = {};
+    const savedSchemaVersion =
+        Number.isInteger(saved.focus_youtube_schema_version) &&
+            saved.focus_youtube_schema_version >= 0 ?
+          saved.focus_youtube_schema_version : 0;
 
     if (!hasOwn(saved, 'global_enable') &&
         typeof saved.yt_on === 'boolean') {
@@ -508,18 +539,31 @@
       }
     }
 
+    if (savedSchemaVersion < CURRENT_SCHEMA_VERSION) {
+      for (const id of BEHAVIOR_IDS) {
+        if (!NATIVE_BEHAVIOR_ID_SET.has(id)) {
+          patch[id] = false;
+          continue;
+        }
+        // Preserve a canonical value first, then a value recovered from a
+        // legacy key. Invalid or absent values use the safe disabled default.
+        patch[id] = typeof saved[id] === 'boolean' ? saved[id] :
+          typeof patch[id] === 'boolean' ? patch[id] : false;
+      }
+      patch.schedule = false;
+      patch.nextTimedChange = false;
+      patch.nextTimedValue = true;
+      patch.password = false;
+      patch.hashed_password = '';
+      patch.focus_youtube_schema_version = CURRENT_SCHEMA_VERSION;
+    }
+
     for (const [id, defaultValue] of Object.entries(DEFAULT_SETTINGS)) {
       if (hasOwn(patch, id)) continue;
       if (!hasOwn(saved, id) || !isValidValue(id, saved[id])) {
         patch[id] = defaultValue;
       }
     }
-    if (saved.focus_youtube_schema_version !==
-        DEFAULT_SETTINGS.focus_youtube_schema_version) {
-      patch.focus_youtube_schema_version =
-          DEFAULT_SETTINGS.focus_youtube_schema_version;
-    }
-
     const settings = { ...DEFAULT_SETTINGS };
     for (const [id, value] of Object.entries(saved)) {
       if (isValidValue(id, value)) settings[id] = value;
@@ -556,6 +600,7 @@
     behaviorIds: BEHAVIOR_IDS,
     behaviorIdSet: BEHAVIOR_ID_SET,
     behaviorDefaults: Object.freeze(BEHAVIOR_DEFAULTS),
+    nativeBehaviorIds: NATIVE_BEHAVIOR_IDS,
     automationIds: AUTOMATION_IDS,
     metaDefaults: Object.freeze(META_DEFAULTS),
     defaults: DEFAULT_SETTINGS,

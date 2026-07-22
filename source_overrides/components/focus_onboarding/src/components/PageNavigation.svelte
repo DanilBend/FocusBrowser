@@ -140,7 +140,9 @@
             <IconArrowLeft />
             {s.button.back}
         </button>
-        <span id="setup-progress">Шаг {stepNumber} из {stepCount}</span>
+        <span id="setup-progress">
+            {s.navigation.step} {stepNumber} {s.navigation.of} {stepCount}
+        </span>
         <button disabled={navigationDisabled} class="primary" onclick={next}>
             {nextLabel}
             {#if working}

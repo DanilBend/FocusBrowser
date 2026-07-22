@@ -22,6 +22,7 @@
 #include "extensions/buildflags/buildflags.h"
 #include "extensions/common/constants.h"
 #include "printing/buildflags/buildflags.h"
+#include "third_party/focus_text_motion/resources/grit/focus_text_motion_resources.h"
 #include "third_party/focus_youtube/resources/grit/focus_youtube_resources.h"
 #include "third_party/ublock/resources/grit/ublock_resources.h"
 
@@ -42,6 +43,7 @@ bool IsComponentExtensionAllowlisted(const std::string& extension_id) {
       extension_misc::kGlicExtensionId,
       extension_misc::kInAppPaymentsSupportAppId,
       extension_misc::kPdfExtensionId,
+      focus::kFocusTextMotionComponentId,
       focus::kFocusYoutubeComponentId,
       focus::kUBlockOriginComponentId,
       focus::kExtstoreFixupsExtensionId,
@@ -104,6 +106,7 @@ bool IsComponentExtensionAllowlisted(int manifest_resource_id) {
     case IDR_NETWORK_SPEECH_SYNTHESIS_MANIFEST_MV3:
     case IDR_READING_MODE_GDOCS_HELPER_MANIFEST:
     case IDR_WEBSTORE_MANIFEST:
+    case IDR_FOCUS_TEXT_MOTION_MANIFEST_JSON:
     case IDR_FOCUS_YOUTUBE_MANIFEST_JSON:
     case IDR_UBLOCK_MANIFEST_JSON:
     case IDR_EXTSTORE_FIXUPS_MANIFEST_JSON:

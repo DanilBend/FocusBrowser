@@ -1,16 +1,21 @@
-# Security policy
+# Политика безопасности
 
-## Supported version
+<p><strong>Русский</strong> · <a href="SECURITY.en.md">English</a></p>
 
-Focus Browser 1.0 is the currently supported release line.
+## Поддерживаемая версия
 
-## Reporting a vulnerability
+В настоящее время поддерживается линия Focus Browser 1.0.
 
-Do not open a public issue for an unpatched vulnerability or include private
-browser data in a report. Use GitHub's private vulnerability reporting feature
-for this repository. Include the affected version, reproduction steps, impact
-and any suggested mitigation.
+## Сообщение об уязвимости
 
-Never attach a real browser profile, cookies, saved passwords, tokens or crash
-dumps containing personal data. Reproduce with a disposable profile whenever
-possible.
+Не публикуйте описание неисправленной уязвимости и не прикладывайте личные
+данные браузера к открытому Issue. Пока приватные отчёты GitHub для репозитория
+не включены, создайте Issue только с просьбой предоставить конфиденциальный
+канал связи. Не указывайте в нём шаги воспроизведения, технические детали и
+эксплойт. Владелец репозитория ответит и согласует закрытый способ передачи
+отчёта.
+
+В закрытом отчёте укажите затронутую версию, шаги воспроизведения, влияние и
+возможное исправление. Никогда не отправляйте настоящий профиль, cookies,
+сохранённые пароли, токены и дампы с личными данными. По возможности
+воспроизводите проблему в одноразовом профиле.

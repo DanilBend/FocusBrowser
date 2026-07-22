@@ -31,6 +31,7 @@
 #include "chrome/browser/ui/views/toolbar/pinned_toolbar_actions.h"
 #include "chrome/browser/ui/views/toolbar/split_tabs_button.h"
 #include "components/prefs/pref_member.h"
+#include "content/public/browser/web_contents_observer.h"
 #include "ui/base/accelerators/accelerator.h"
 #include "ui/base/interaction/element_identifier.h"
 #include "ui/base/metadata/metadata_header_macros.h"
@@ -93,6 +94,7 @@ class ToolbarView : public views::AccessiblePaneView,
                     public views::AnimationDelegateViews,
                     public LocationBarView::Delegate,
                     public CommandObserver,
+                    public content::WebContentsObserver,
                     public views::MouseWatcherListener,
                     public AppMenuIconController::Delegate,
                     public ToolbarButtonProvider,
@@ -383,12 +385,13 @@ class ToolbarView : public views::AccessiblePaneView,
 
   void NewTabButtonPressed(const ui::Event& event);
   void VerticalTabsCollapseButtonPressed(const ui::Event& event);
-  void FocusBlockButtonPressed(const ui::Event& event);
+  void ShowFocusBlockPopup(views::View* anchor_view) override;
   void FocusYoutubeButtonPressed(const ui::Event& event);
   void UpdateFocusYoutubeButtonVisibility(content::WebContents* tab);
-  void ShowFocusComponentPopup(const char* extension_id,
-                               const char* popup_path,
-                               ToolbarButton* anchor_button);
+
+  // content::WebContentsObserver:
+  void DidStartNavigation(
+      content::NavigationHandle* navigation_handle) override;
 
   void InitGlicContainer();
 
@@ -444,7 +447,6 @@ class ToolbarView : public views::AccessiblePaneView,
 
   // An alias for `location_bar_view_` or `toolbar_webview_->GetLocationBar()`.
   raw_ptr<LocationBar> location_bar_ = nullptr;
-  raw_ptr<ToolbarButton> focus_block_button_ = nullptr;
   raw_ptr<ToolbarButton> focus_youtube_button_ = nullptr;
   raw_ptr<ExtensionsToolbarDesktop> extensions_container_ = nullptr;
   raw_ptr<ToolbarDivider> toolbar_divider_ = nullptr;

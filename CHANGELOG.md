@@ -1,36 +1,77 @@
-# Changelog
+# История изменений
 
-## 1.0.0 - 2026-07-21
+<p><strong>Русский</strong> · <a href="CHANGELOG.en.md">English</a></p>
 
-- Initial public Windows x64 release of Focus Browser.
-- Full Focus Browser branding with transparent monochrome target icon.
-- Built-in FocusBlock content protection and browser-native toolbar control.
-- Built-in FocusYoutube panel with 24 essential distraction controls.
-- Russian first-run setup, one-click Chrome import and shortcut selection.
-- Minimal new-tab page containing only search and shortcuts.
-- Optional smooth interface and water-like ambient animations.
-- Meditation page in the main menu with direct YouTube playback.
-- Chromium password manager, Chrome Web Store installation path, proprietary
-  codecs and Widevine integration hooks.
-- Installer/update path preserves an existing Focus Browser profile.
+## 1.0.1 — 2026-07-22
 
-### Windows x64 artifacts
+- Ввод текста приведён к чёткому Word-подобному поведению: новый символ сразу
+  рисуется в конечной позиции без полупрозрачного слоя, дробного смещения и
+  размытия; Backspace/Delete больше не сдвигают соседние символы.
+- Добавлено плавное 110-миллисекундное перемещение текстовой каретки без
+  задержки фактического изменения текста, DOM, состояния IME и специальных
+  возможностей.
+- Исправлена работа с IME: промежуточная композиция не анимируется повторно,
+  а подтверждённый текст получает одну корректную отрисовку.
+- Исправлен критический сбой после успешного входа на Google, YouTube, Gmail и
+  других сайтах: нативное предложение сохранить пароль больше не закрывает
+  браузер.
+- Настройка плавных анимаций и системный режим уменьшенного движения немедленно
+  отключают анимацию символов и каретки.
+- Устранена гонка запуска FocusYoutube: кнопка появляется сразу на
+  поддерживаемых страницах YouTube, а нативная панель корректно ожидает
+  готовности встроенного компонента и не закрывается при первом переходе.
+- Репозиторий и GitHub-шаблоны оформлены на русском и английском: обновлены
+  README, история изменений, правила участия, политика конфиденциальности,
+  инструкция по безопасности, шаблоны Issue и Pull Request.
+- Расширены автоматические и визуальные проверки ввода, вставки, удаления,
+  каретки, IME, адресной строки и готовности FocusYoutube.
+- Усилена проверка установщика и обновления: повторная установка сохраняет
+  профиль, проверяет брендинг Focus Browser и не завершает посторонние процессы.
 
-- `FocusBrowser_1.0_x64-installer.exe`
-  SHA-256 `7EB762A29A0403ABACA7EA74694F7F05486A2A16616EE808661F10C719B0D311`
-- `FocusBrowser_1.0_x64-mini-installer.exe`
-  SHA-256 `3CB26E0D10CB20547F3BB5B699C13B240A8AFA0B9CD3ADA356C94F1AA7F1783E`
-- `FocusBrowser_1.0_x64-windows.zip`
-  SHA-256 `4A6C3CA0B550A4DE2EFFAB43322C006059D8A16A3E6A7320185BB58C891BF4FF`
+### Файлы Windows x64
 
-### Source-build dependency
+- `FocusBrowser_1.0.1_x64-installer.exe` — SHA-256
+  `F8F98C1F4FFB8E43F9E1DD05BE6B2D940F1A6F34EE5F3BAF00D800DD36597A91`
+- `FocusBrowser_1.0.1_x64-mini-installer.exe` — SHA-256
+  `B4EFEC7E4448E9D27F946E3043E81483C1B813AA4EB62F0A14D48861008C09B1`
+- `FocusBrowser_1.0.1_x64-windows.zip` — SHA-256
+  `FBF87CF2520AB375B6C7313456679ADAB069B42C71021046FD7B73D1D5FE5941`
 
-- `onboarding-page-202607132006-focus1.tar.gz`
-  SHA-256 `DDB5F5E375412DC987581103D8C64A59144097A084AB3C49166A95AFEEA230D7`
+## 1.0.0 — 2026-07-21
 
-This archive is used only by `build.py`; it is not an installer.
-It is published in the separate build-dependencies prerelease so the main
-Focus Browser 1.0 download list contains only end-user packages and checksums.
+- Первый публичный выпуск Focus Browser для Windows x64.
+- Полный брендинг Focus Browser с прозрачным монохромным значком-мишенью.
+- Встроенная защита FocusBlock на нативном движке `adblock-rust 0.13.2`,
+  простой русскоязычный интерфейс и щит справа внутри адресной строки.
+- Встроенная панель FocusYoutube с 20 основными настройками от отвлекающих
+  элементов.
+- Русская первоначальная настройка, импорт закладок и истории из обнаруженного
+  стандартного профиля Chrome и выбор ярлыков.
+- Минималистичная новая вкладка только с поиском и ярлыками.
+- Отключаемые плавные анимации интерфейса и ввода текста.
+- Страница медитации в главном меню с прямым открытием видео YouTube.
+- Менеджер паролей Chromium, установка из Chrome Web Store, проприетарные
+  кодеки и точки интеграции Widevine.
+- Установка обновления поверх существующей версии сохраняет профиль.
 
-The Windows binaries are not Authenticode-signed. Verify the hashes before
-installation; SmartScreen may show **Unknown publisher**.
+### Файлы Windows x64
+
+- `FocusBrowser_1.0_x64-installer.exe` — SHA-256
+  `7EB762A29A0403ABACA7EA74694F7F05486A2A16616EE808661F10C719B0D311`
+- `FocusBrowser_1.0_x64-mini-installer.exe` — SHA-256
+  `3CB26E0D10CB20547F3BB5B699C13B240A8AFA0B9CD3ADA356C94F1AA7F1783E`
+- `FocusBrowser_1.0_x64-windows.zip` — SHA-256
+  `4A6C3CA0B550A4DE2EFFAB43322C006059D8A16A3E6A7320185BB58C891BF4FF`
+
+### Зависимость для сборки исходников
+
+- `onboarding-page-202607132006-focus1.tar.gz` — SHA-256
+  `DDB5F5E375412DC987581103D8C64A59144097A084AB3C49166A95AFEEA230D7`
+
+Этот архив используется только `build.py` и не является установщиком. Он
+опубликован в отдельном предварительном выпуске зависимостей сборки, чтобы
+основной список скачивания Focus Browser 1.0 содержал только пользовательские
+пакеты и контрольные суммы.
+
+Бинарные файлы Windows не подписаны Authenticode. Перед установкой сверяйте
+хеши; SmartScreen может показать предупреждение **«Неизвестный издатель»**.

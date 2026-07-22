@@ -48,6 +48,7 @@ assert.equal(manifest.author, 'Focus Browser');
 assert.equal(manifest.version, '1.6.9.1');
 assert.deepEqual(manifest.permissions, ['storage', 'alarms']);
 assert.deepEqual(manifest.host_permissions, [
+  'https://youtube.com/*',
   'https://www.youtube.com/*',
   'https://m.youtube.com/*',
 ]);
@@ -56,6 +57,7 @@ assert.equal(manifest.options_ui, undefined,
 assert.equal(manifest.background.service_worker, 'background/events.js');
 assert.equal(manifest.web_accessible_resources, undefined);
 assert.deepEqual(manifest.content_scripts[0].matches, [
+  'https://youtube.com/*',
   'https://www.youtube.com/*',
   'https://m.youtube.com/*',
 ]);
@@ -165,15 +167,42 @@ vm.runInContext(read(activeRoot, 'shared/main.js'), schemaContext, {
 });
 const schema = schemaContext.FocusYoutubeSettings;
 const ids = [...schema.behaviorIds];
+const expectedNativeFeatureKeys = [
+  'remove_homepage',
+  'remove_sidebar',
+  'remove_end_of_video',
+  'remove_all_shorts',
+  'disable_play_on_hover',
+  'disable_autoplay',
+  'auto_skip_ads',
+  'remove_info_cards',
+  'remove_overlay_suggestions',
+  'disable_ambient_mode',
+  'remove_comments',
+  'remove_left_nav_bar',
+  'remove_notif_bell',
+  'remove_menu_buttons',
+  'grayscale_mode',
+  'remove_search_suggestions',
+  'remove_search_promoted',
+  'remove_shorts_results',
+  'disable_channel_autoplay',
+  'remove_channel_for_you',
+];
 assert.equal(ids.length, 93);
 assert.equal(new Set(ids).size, 93);
 assert.equal(Object.keys(schema.behaviorDefaults).length, 93);
 assert.ok(Object.values(schema.behaviorDefaults).every(value => value === false));
+assert.deepEqual([...schema.nativeBehaviorIds], expectedNativeFeatureKeys);
+assert.equal(new Set(schema.nativeBehaviorIds).size, 20);
+assert.ok(schema.nativeBehaviorIds.every(id => ids.includes(id)));
 assert.equal(schema.defaults.global_enable, true);
 assert.equal(schema.defaults.dark_mode, true);
 assert.equal(schema.defaults.schedule, false);
 assert.equal(schema.defaults.scheduleTimes, '09:00-17:00');
 assert.equal(schema.defaults.password, false);
+assert.equal(schema.defaults.hashed_password, '');
+assert.equal(schema.defaults.focus_youtube_schema_version, 3);
 assert.ok(ids.every(id => schema.idToShortId[id] !== undefined),
           'Для экспорта отсутствует short ID');
 assert.equal(ids.filter(id => id.startsWith('hide_')).length, 0);
@@ -204,10 +233,18 @@ assert.equal(migrated.settings.global_enable, false);
 assert.equal(migrated.settings.dark_mode, false);
 for (const targetIds of Object.values(schema.legacyMappings)) {
   for (const targetId of targetIds) {
-    assert.equal(migrated.settings[targetId], true,
-                 'Не мигрирован ' + targetId);
+    assert.equal(
+        migrated.settings[targetId],
+        expectedNativeFeatureKeys.includes(targetId),
+        'Schema v3 неверно обработала legacy key ' + targetId);
   }
 }
+assert.equal(migrated.settings.schedule, false);
+assert.equal(migrated.settings.nextTimedChange, false);
+assert.equal(migrated.settings.nextTimedValue, true);
+assert.equal(migrated.settings.password, false);
+assert.equal(migrated.settings.hashed_password, '');
+assert.equal(migrated.settings.focus_youtube_schema_version, 3);
 assert.ok(migrated.removeKeys.includes('yt_on'));
 assert.ok(migrated.removeKeys.includes('popup_settings'));
 for (const legacyId of Object.keys(schema.legacyMappings)) {
@@ -221,6 +258,38 @@ const canonicalWins = schema.createMigration({
 });
 assert.equal(canonicalWins.settings.remove_homepage, false);
 assert.equal(canonicalWins.settings.global_enable, true);
+
+const v2Settings = {
+  ...schema.defaults,
+  focus_youtube_schema_version: 2,
+  global_enable: false,
+  schedule: true,
+  nextTimedChange: Date.parse('2026-07-20T12:00:00Z'),
+  nextTimedValue: false,
+  password: true,
+  hashed_password: 'legacy-hash',
+};
+for (const id of ids) v2Settings[id] = true;
+for (const [index, id] of expectedNativeFeatureKeys.entries()) {
+  v2Settings[id] = index % 2 === 0;
+}
+const nativeSurfaceUpgrade = schema.createMigration(v2Settings);
+assert.equal(nativeSurfaceUpgrade.settings.global_enable, false);
+for (const [index, id] of expectedNativeFeatureKeys.entries()) {
+  assert.equal(nativeSurfaceUpgrade.settings[id], index % 2 === 0,
+               'Schema v3 не сохранила native key ' + id);
+}
+for (const id of ids.filter(id => !expectedNativeFeatureKeys.includes(id))) {
+  assert.equal(nativeSurfaceUpgrade.settings[id], false,
+               'Schema v3 оставила скрытый key ' + id);
+}
+assert.equal(nativeSurfaceUpgrade.settings.schedule, false);
+assert.equal(nativeSurfaceUpgrade.settings.nextTimedChange, false);
+assert.equal(nativeSurfaceUpgrade.settings.nextTimedValue, true);
+assert.equal(nativeSurfaceUpgrade.settings.password, false);
+assert.equal(nativeSurfaceUpgrade.settings.hashed_password, '');
+assert.equal(nativeSurfaceUpgrade.settings.focus_youtube_schema_version, 3);
+
 const currentSchema = schema.createMigration({ ...schema.defaults });
 assert.equal(Object.keys(currentSchema.patch).length, 0,
              'Актуальная схема не должна перезаписываться при каждом запуске');
@@ -262,6 +331,7 @@ vm.createContext(utilsContext);
 vm.runInContext(read(activeRoot, 'shared/utils.js'), utilsContext, {
   filename: 'shared/utils.js',
 });
+assert.equal(utilsContext.focusYoutubeUrl('https://youtube.com/'), true);
 assert.equal(utilsContext.focusYoutubeUrl('https://www.youtube.com/watch?v=1'), true);
 assert.equal(utilsContext.focusYoutubeUrl('https://m.youtube.com/shorts/1'), true);
 assert.equal(utilsContext.focusYoutubeUrl('https://music.youtube.com/'), false);
@@ -710,103 +780,179 @@ assert.equal(
     false,
     'Stale T1 не должен публиковать restore-write');
 
-assert.match(popupJs, /let initialized = false/);
-assert.match(popupJs, /popup\.inert = true/);
-assert.match(popupJs, /popup\.setAttribute\('aria-busy', 'true'\)/);
-assert.match(popupJs,
-             /initialized = true;[\s\S]{0,180}popup\.inert = false/);
-assert.match(popupJs, /master\.disabled = !initialized/);
-assert.match(popupJs, /input\.disabled = !initialized/);
-assert.match(popupJs, /!initialized \|\| behaviorActiveCount\(\) === 0/);
-assert.match(popupJs, /const changes = \{ \.\.\.schema\.behaviorDefaults \}/);
+const browserRoot = path.join(repoRoot, 'build', 'src');
+const nativeBubbleSource = fs.readFileSync(path.join(
+    browserRoot, 'chrome/browser/ui/views/toolbar/focus_youtube_bubble_view.cc'),
+    'utf8');
+const nativeBubbleHeader = fs.readFileSync(path.join(
+    browserRoot, 'chrome/browser/ui/views/toolbar/focus_youtube_bubble_view.h'),
+    'utf8');
+const toolbarSource = fs.readFileSync(path.join(
+    browserRoot, 'chrome/browser/ui/views/toolbar/toolbar_view.cc'), 'utf8');
 
-const visibleBlock = popupJs.match(
-    /const VISIBLE_GROUPS = Object\.freeze\(\[([\s\S]*?)\n  \]\);\n  const visibleIds/);
-assert.ok(visibleBlock, 'Не найден список основных функций popup');
-const popupVisibleIds = [...visibleBlock[1].matchAll(
-    /'([a-z][a-z0-9_]+)'/g)].map(match => match[1]);
-const expectedVisibleIds = [
-  'remove_homepage',
-  'remove_sidebar',
-  'remove_end_of_video',
-  'remove_all_shorts',
-  'search_engine_mode',
-  'disable_play_on_hover',
-  'disable_autoplay',
-  'auto_skip_ads',
-  'remove_info_cards',
-  'remove_overlay_suggestions',
-  'remove_play_next_button',
-  'remove_chat',
-  'enable_theater',
-  'disable_ambient_mode',
-  'remove_comments',
-  'remove_left_nav_bar',
-  'remove_notif_bell',
-  'remove_menu_buttons',
-  'grayscale_mode',
-  'remove_search_suggestions',
-  'remove_search_promoted',
-  'remove_shorts_results',
-  'disable_channel_autoplay',
-  'remove_channel_for_you',
-];
-assert.deepEqual(popupVisibleIds, expectedVisibleIds);
-assert.equal(new Set(popupVisibleIds).size, 24);
-assert.ok(popupVisibleIds.every(id => ids.includes(id)));
-assert.ok(popupVisibleIds.every(id => schema.defaults[id] === false));
-assert.doesNotMatch(
-    popupJs,
-    /openOptionsPage|window\.open|chrome\.tabs|https?:\/\/|location\.(?:href|assign|replace)/,
-    'Popup не должен открывать отдельную или внешнюю страницу настроек');
+const nativeFeatureBlock = nativeBubbleSource.match(
+    /constexpr std::array<FeatureSpec,\s*20>\s+kFeatures\s*=\s*\{\{([\s\S]*?)\n\}\};/);
+assert.ok(nativeFeatureBlock, 'Не найден нативный список из 20 функций');
+const nativeFeatureEntries = [...nativeFeatureBlock[1].matchAll(
+    /\{\s*(\d+),\s*"([a-z][a-z0-9_]+)"/g)].map(match => ({
+      group: Number(match[1]),
+      key: match[2],
+    }));
+const nativeFeatureKeys = nativeFeatureEntries.map(entry => entry.key);
+assert.deepEqual(nativeFeatureKeys, expectedNativeFeatureKeys);
+assert.equal(new Set(nativeFeatureKeys).size, 20);
+assert.ok(nativeFeatureKeys.every(key => ids.includes(key)));
+assert.ok(nativeFeatureKeys.every(key => schema.defaults[key] === false));
+assert.deepEqual(nativeFeatureKeys, [...schema.nativeBehaviorIds]);
 
-const toolbarRelative = path.join(
-    'chrome', 'browser', 'ui', 'views', 'toolbar', 'toolbar_view.cc');
-const activeToolbar = path.join(repoRoot, 'build', 'src', toolbarRelative);
-const overrideToolbar = path.join(repoRoot, 'source_overrides', toolbarRelative);
-assert.deepEqual(fs.readFileSync(activeToolbar), fs.readFileSync(overrideToolbar),
-                 'Active и override toolbar_view.cc различаются');
-const toolbarSource = fs.readFileSync(activeToolbar, 'utf8');
-assert.match(toolbarSource, /committed_url\.SchemeIs\(url::kHttpsScheme\)/);
+const nativeGroupBlock = nativeBubbleSource.match(
+    /constexpr std::array<GroupSpec,\s*4>\s+kGroups\s*=\s*\{\{([\s\S]*?)\n\}\};/);
+assert.ok(nativeGroupBlock, 'Не найден нативный список из четырёх вкладок');
+assert.equal(
+    [...nativeGroupBlock[1].matchAll(/\{u"[^"]+",\s*u"[^"]+"\}/g)].length,
+    4);
+for (let group = 0; group < 4; ++group) {
+  assert.equal(
+      nativeFeatureEntries.filter(entry => entry.group === group).length, 5,
+      `Вкладка ${group} должна содержать ровно пять функций`);
+}
 assert.match(
-    toolbarSource,
-    /host == "www\.youtube\.com" \|\| host == "m\.youtube\.com"/);
-assert.match(toolbarSource,
-             /prefs::kFocusMotionEnabled[\s\S]*?\?focusMotion=0/);
+    nativeBubbleSource,
+    /for \(size_t group_index = 0; group_index < kGroups\.size\(\); \+\+group_index\)[\s\S]*for \(const FeatureSpec& feature : kFeatures\)[\s\S]*tabs->AddTab\(/);
 
-const popupHtml = read(activeRoot, 'popup.html');
-assert.match(popupHtml, /lang="ru"/);
-assert.match(popupHtml, /Основные функции/);
-assert.match(popupHtml, /Включено 0 из 24/);
-assert.match(popupHtml, /Настройки применяются сразу на YouTube/);
-assert.doesNotMatch(popupHtml, /Все 93|настройки на сайте|options/i);
-assert.doesNotMatch(popupHtml, /<(?:a|form)\b/i,
-                    'Popup не должен содержать переходов или формы');
-assert.doesNotMatch(popupHtml, /Unhook|extension|расширени[ея]/i);
+assert.match(nativeBubbleHeader, /bool global_enabled_ = true;/);
+assert.match(nativeBubbleSource,
+             /FindBool\("global_enable"\)\.value_or\(true\)/);
+assert.match(nativeBubbleSource, /feature_state_\.emplace\(key, false\)/);
+assert.match(nativeBubbleSource, /values\.FindBool\(key\)\.value_or\(false\)/);
+assert.match(nativeBubbleSource,
+             /constexpr int kFocusYoutubeSchemaVersion = 3;/);
+const resetValuesBlock = nativeBubbleSource.match(
+    /base::DictValue ResetValues\(\) \{([\s\S]*?)\n\}/)?.[1];
+assert.ok(resetValuesBlock, 'Не найдены полные defaults нативного Reset');
+for (const [key, value] of [
+  ['global_enable', 'true'],
+  ['schedule', 'false'],
+  ['nextTimedChange', 'false'],
+  ['nextTimedValue', 'true'],
+  ['only_show_playlists', 'false'],
+]) {
+  assert.match(resetValuesBlock,
+               new RegExp(`values\\.Set\\("${key}", ${value}\\)`));
+}
+assert.match(resetValuesBlock,
+             /values\.Set\("focus_youtube_schema_version", kFocusYoutubeSchemaVersion\)/);
+assert.match(resetValuesBlock,
+             /for \(const FeatureSpec& feature : kFeatures\)[\s\S]*values\.Set\(feature\.key, false\)/);
 
-for (const relative of ['css/popup.css']) {
-  const css = read(activeRoot, relative);
-  for (const match of css.matchAll(/#([0-9a-f]{6})\b/gi)) {
-    const color = match[1].toLowerCase();
-    assert.equal(color.slice(0, 2), color.slice(2, 4),
-                 'Цвет не монохромный #' + color + ': ' + relative);
-    assert.equal(color.slice(2, 4), color.slice(4, 6),
-                 'Цвет не монохромный #' + color + ': ' + relative);
-  }
-  for (const match of css.matchAll(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/gi)) {
-    assert.equal(match[1], match[2], 'RGB не монохромный: ' + relative);
-    assert.equal(match[2], match[3], 'RGB не монохромный: ' + relative);
-  }
-  assert.match(css, /focus-visible/);
-  assert.match(css, /prefers-reduced-motion/);
-  assert.match(css, /html\[data-motion="off"\]/);
-  assert.match(css, /forced-colors/);
-  assert.match(css, /width:\s*400px/);
-  assert.match(css, /height:\s*600px/);
+const masterToggleHandler = nativeBubbleSource.match(
+    /void FocusYoutubeBubbleView::OnMasterTogglePressed\([^)]*\) \{([\s\S]*?)\n\}/)?.[1];
+const featureToggleHandler = nativeBubbleSource.match(
+    /void FocusYoutubeBubbleView::OnFeatureTogglePressed\([\s\S]*?\) \{([\s\S]*?)\n\}/)?.[1];
+const settingWrittenHandler = nativeBubbleSource.match(
+    /void FocusYoutubeBubbleView::OnSettingWritten\([\s\S]*?\) \{([\s\S]*?)\n\}/)?.[1];
+assert.ok(masterToggleHandler && featureToggleHandler && settingWrittenHandler);
+assert.match(masterToggleHandler, /SetControlsEnabled\(false\)/);
+assert.match(featureToggleHandler, /SetControlsEnabled\(false\)/);
+assert.match(settingWrittenHandler, /SetControlsEnabled\(true\)/);
+for (const [key, value] of [
+  ['schedule', 'false'],
+  ['nextTimedChange', 'false'],
+  ['nextTimedValue', 'true'],
+]) {
+  assert.match(masterToggleHandler,
+               new RegExp(`values\\.Set\\("${key}", ${value}\\)`));
 }
 
-assert.match(read(activeRoot, 'js/popup.js'),
-             /URLSearchParams\(location\.search\)[\s\S]*?dataset\.motion = 'off'/);
+const resetHandler = nativeBubbleSource.match(
+    /void FocusYoutubeBubbleView::OnResetPressed\([^)]*\) \{([\s\S]*?)\n\}/)?.[1];
+const resetClearedHandler = nativeBubbleSource.match(
+    /void FocusYoutubeBubbleView::OnResetStorageCleared\([^)]*\) \{([\s\S]*?)\n\}/)?.[1];
+assert.ok(resetHandler && resetClearedHandler);
+assert.match(resetHandler, /SetControlsEnabled\(false\)/);
+assert.match(resetHandler,
+             /storage->Clear\([\s\S]*weak_factory_\.GetWeakPtr\(\)\)/);
+assert.match(resetClearedHandler,
+             /storage->Set\([\s\S]*ResetValues\(\)[\s\S]*weak_factory_\.GetWeakPtr\(\)\)/);
+
+// The native surface reads and writes the same component extension's local
+// storage as the hidden content-script engine.
+assert.match(
+    nativeBubbleSource,
+    /ExtensionRegistry::Get\(browser->profile\(\)\)[\s\S]*enabled_extensions\(\)\.GetByID\([\s\S]*focus::kFocusYoutubeComponentId/);
+assert.match(nativeBubbleSource,
+             /extensions::StorageFrontend::Get\(browser_->profile\(\)\)/);
+assert.match(
+    nativeBubbleSource,
+    /storage->GetValues\(\s*extension_,\s*extensions::StorageAreaNamespace::kLocal,\s*FeatureKeys\(\)/);
+assert.equal(
+    [...nativeBubbleSource.matchAll(
+        /storage->Set\([\s\S]{0,100}?extension_,[\s\S]{0,100}?StorageAreaNamespace::kLocal/g)].length,
+    3,
+    'Master, feature and reset writes must use the component local storage');
+assert.equal(
+    [...nativeBubbleSource.matchAll(
+        /storage->Clear\([\s\S]{0,100}?extension_,[\s\S]{0,100}?StorageAreaNamespace::kLocal/g)].length,
+    1,
+    'Reset must clear the whole component local storage before defaults');
+
+const toolbarButtonHandler = toolbarSource.match(
+    /void ToolbarView::FocusYoutubeButtonPressed\(const ui::Event& event\) \{([\s\S]*?)\n\}/)?.[1];
+assert.ok(toolbarButtonHandler, 'Не найден обработчик нативной кнопки');
+assert.match(
+    toolbarButtonHandler,
+    /FocusYoutubeBubbleView::ShowBubble\(browser_, focus_youtube_button_\);/);
+assert.doesNotMatch(
+    toolbarButtonHandler,
+    /ExtensionPopup|ShowFocusComponentPopup|popup\.html|OpenURL|https?:\/\//,
+    'Кнопка FocusYoutube не должна открывать extension popup или внешний URL');
+assert.doesNotMatch(
+    nativeBubbleSource,
+    /ExtensionPopup|ShowFocusComponentPopup|popup\.html|OpenURL|OpenURLParams|https?:\/\//,
+    'Нативное окно FocusYoutube не должно содержать внешнюю навигацию');
+
+const visibilityFunction = toolbarSource.match(
+    /void ToolbarView::UpdateFocusYoutubeButtonVisibility\(WebContents\* tab\) \{([\s\S]*?)\n\}/)?.[1];
+assert.ok(visibilityFunction, 'Не найден контекстный фильтр FocusYoutube');
+assert.match(visibilityFunction, /tab->GetVisibleURL\(\)/,
+             'GetVisibleURL нужен для pending navigation');
+assert.match(
+    visibilityFunction,
+    /visible_url\.is_valid\(\) \? visible_url : tab->GetLastCommittedURL\(\)/);
+assert.match(visibilityFunction,
+             /context_url\.SchemeIs\(url::kHttpsScheme\)/);
+assert.deepEqual(
+    [...visibilityFunction.matchAll(/host == "([^"]+)"/g)]
+        .map(match => match[1]),
+    ['youtube.com', 'www.youtube.com', 'm.youtube.com']);
+assert.doesNotMatch(visibilityFunction, /DomainIs|ends_with|StartsWith/,
+                    'YouTube host filtering must use exact equality');
+
+const extensionUiUtil = fs.readFileSync(path.join(
+    browserRoot, 'extensions/browser/ui_util.cc'), 'utf8');
+const toolbarActionsModel = fs.readFileSync(path.join(
+    browserRoot, 'chrome/browser/ui/toolbar/toolbar_actions_model.cc'), 'utf8');
+const managementPolicy = fs.readFileSync(path.join(
+    browserRoot,
+    'chrome/browser/extensions/standard_management_policy_provider.cc'),
+    'utf8');
+const componentLoader = fs.readFileSync(path.join(
+    browserRoot, 'chrome/browser/extensions/component_loader.cc'), 'utf8');
+assert.match(
+    extensionUiUtil,
+    /extension_id == focus::kFocusYoutubeComponentId[\s\S]{0,260}return false;/);
+assert.match(
+    toolbarActionsModel,
+    /extension->id\(\) == kFocusYoutubeExtensionId[\s\S]{0,120}return false;/);
+assert.match(
+    managementPolicy,
+    /Manifest::IsComponentLocation\(extension->location\(\)\)[\s\S]{0,100}is_modifiable = false;/);
+assert.match(
+    managementPolicy,
+    /MustRemainInstalled\([\s\S]*?Manifest::IsComponentLocation\(extension->location\(\)\)[\s\S]{0,80}return true;/);
+assert.match(componentLoader,
+             /void ComponentLoader::AddFocusYoutube\(\)[\s\S]*IDR_FOCUS_YOUTUBE_MANIFEST_JSON/);
+assert.match(componentLoader, /if \(!skip_session_components\)[\s\S]*AddFocusYoutube\(\)/);
 
 for (const relative of [
   'background/events.js',
@@ -825,7 +971,7 @@ for (const relative of [
 }
 
 console.log(
-    'FocusYoutube full QA passed: ' + popupVisibleIds.length +
-    ' visible controls (' + ids.length + ' compatible), ' +
+    'FocusYoutube full QA passed: ' + nativeFeatureKeys.length +
+    ' native controls in 4 tabs (' + ids.length + ' compatible), ' +
     packaged.size + ' packaged resources, ' +
     overrideFiles.length + ' mirrored files.');

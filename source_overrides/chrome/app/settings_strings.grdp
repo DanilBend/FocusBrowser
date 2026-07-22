@@ -286,10 +286,10 @@
       Show a rounded frame around web contents
     </message>
     <message name="IDS_SETTINGS_FOCUS_MOTION" desc="Label for the toggle which enables or disables smooth motion in Focus-owned browser interfaces.">
-      Плавные анимации интерфейса
+      Smooth interface animations
     </message>
     <message name="IDS_SETTINGS_FOCUS_MOTION_DESCRIPTION" desc="Description for the toggle which enables or disables smooth motion in Focus-owned browser interfaces.">
-      Спокойные плавные переходы в Focus Browser. Системное уменьшение движения всегда имеет приоритет.
+      Calm, fluid transitions in Focus Browser. The system reduced-motion setting always takes priority.
     </message>
     <message name="IDS_SETTINGS_NATIVE_FRAME_MATERIALS" desc="Label for the toggle which enables or disables native system materials on the browser frame.">
       Use native frame materials (experimental)

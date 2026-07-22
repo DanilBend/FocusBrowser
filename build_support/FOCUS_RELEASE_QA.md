@@ -1,4 +1,4 @@
-# Focus Browser 1.0 — Windows release QA
+# Focus Browser 1.0.1 — Windows release QA
 
 This checklist keeps every unrelated browser profile and process out of scope.
 Never terminate every `chrome.exe`; identify Focus Browser by its full
@@ -29,7 +29,7 @@ built and packaging has finished:
 $repo = (Resolve-Path '.').Path
 $qaNode = Join-Path $repo 'build\src\third_party\node\win\node.exe'
 $qaBrowser = Join-Path $repo 'build\src\out\Default\chrome.exe'
-$qaInstaller = Join-Path $repo 'build\FocusBrowser_1.0_x64-installer.exe'
+$qaInstaller = Join-Path $repo 'build\FocusBrowser_1.0.1_x64-installer.exe'
 $qaVerifier = Join-Path $repo 'build_support\verify_focus_release.ps1'
 $qaPowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 
@@ -45,7 +45,7 @@ if ($LASTEXITCODE -ne 0) { throw 'FocusYoutube full contract failed' }
 ```
 
 The PowerShell verifier is read-only in `Artifacts` mode. It checks Focus
-branding and exact PE FileVersion/ProductVersion `1.0.0.0` for `chrome.exe`,
+branding and exact PE FileVersion/ProductVersion `1.0.1.0` for `chrome.exe`,
 `chrome.dll`, `setup.exe`, and `mini_installer.exe`, plus packaging payloads,
 SHA-256 hashes, monochrome embedded icon, signature state, and static
 browser-owned component integration. An
@@ -58,7 +58,7 @@ Do not pass `--no-first-run`; the point is to exercise the real first launch.
 
 ```powershell
 $qaRoot = Join-Path $env:TEMP `
-    ('FocusBrowser-QA-1.0-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    ('FocusBrowser-QA-1.0.1-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 $qaProfile = Join-Path $qaRoot 'User Data'
 $qaLog = Join-Path $qaRoot 'focus-browser.log'
 New-Item -ItemType Directory -Path $qaProfile -Force | Out-Null
@@ -84,11 +84,19 @@ First-run/onboarding checks:
 - [ ] Appearance offers the three address-bar styles (full, centered, minimal)
   and the smooth-animation switch. There is no obsolete tab-layout step.
   Selections apply without a crash.
+- [ ] Newly entered graphemes use the Focus settle (opacity `0.12`, vertical
+  offset `3px`, `180ms`) in the new-tab search, native address bar, and
+  editable fields on HTTP/HTTPS pages. Multi-grapheme paste cascades, the
+  surviving boundary settles after Backspace/Delete, and the caret glides to
+  its committed position without delaying DOM, IME, or accessibility state.
+  Disabling smooth animations stops all three paths immediately.
 - [ ] Search-engine and browser-import rows have visible, non-broken logos.
 - [ ] If Google Chrome is detected, the one-click Chrome import card is shown.
-  It imports bookmarks, history, saved passwords, autofill, search engine, and
-  extensions into this disposable Focus profile. Do not inspect or print the
-  imported values; the entire QA profile is deleted afterward.
+  It offers the Chromium importer categories implemented by this build
+  (bookmarks and history). A real import is expected only when a standard
+  Chrome profile is detected. Chrome password and autofill imports are
+  deliberately disabled in this path. Do not inspect or print imported values;
+  the entire disposable QA profile is deleted afterward.
 - [ ] The Focus Password Manager page opens
   `chrome://password-manager/passwords`; its import button opens
   `chrome://password-manager/settings`.
@@ -117,9 +125,16 @@ Clean-profile component URLs:
 
 Checks:
 
-- [ ] FocusBlock has a browser-owned toolbar control on a fresh profile;
+- [ ] FocusBlock has a browser-owned shield at the far right *inside* the
+  address field on a fresh profile. Verify normal, centered, compact, minimal
+  and vertical toolbar layouts, including a deliberately narrow window; the
+  shield must stay in the field and must open its popup from that same anchor.
   FocusYoutube appears only on `www.youtube.com` and `m.youtube.com`. Both use
   black/white Focus styling with Russian text.
+- [ ] FocusBlock opens a simple native panel, not an extension popup. It shows
+  engine state, the browser-wide switch, the current-site switch, blocked
+  counts for the site/session and `EasyList + EasyPrivacy / adblock-rust
+  0.13.2`; it contains no links to external settings sites.
 - [ ] Both controls can be hidden from toolbar customization; restart and
   confirm the hidden state persists. They can be restored from toolbar
   customization, not from the generic extensions menu.
@@ -130,7 +145,7 @@ Checks:
   it back on before finishing QA.
 - [ ] FocusBlock's per-site power control still works independently of the
   global switch and its state persists after reload.
-- [ ] FocusYoutube itself is enabled by default, but all 24 main controls are
+- [ ] FocusYoutube itself is enabled by default, but all 20 main controls are
   off. Enable **Скрывать рекомендации на главной**, reload YouTube, verify the
   feed disappears, then disable it and verify the feed returns.
 - [ ] Disable and re-enable the whole FocusYouTube module. It must not crash the
@@ -146,8 +161,9 @@ must be distinguished from offline/network failures.
 - [ ] Press the video button. A normal YouTube tab opens at exactly
   `https://www.youtube.com/watch?v=R2K7ZHsnypI`; error 153 does not appear.
 - [ ] `chrome://password-manager/passwords` and
-  `chrome://password-manager/settings` work and are Focus branded. Chrome
-  password import in onboarding lands in this disposable profile.
+  `chrome://password-manager/settings` work and are Focus branded. Onboarding
+  imports only bookmarks and history from a detected standard Chrome profile;
+  Chrome password and autofill imports remain disabled.
 - [ ] Install one harmless test extension from the Chrome Web Store into the
   disposable profile. It downloads from Google's Chrome Web Store/update
   endpoints and appears as an ordinary removable extension; FocusBlock and
@@ -178,7 +194,7 @@ snapshot contains only sizes, timestamps, paths, and SHA-256 hashes—never
 password/history contents:
 
 ```powershell
-$qaUpgradeRoot = Join-Path $env:TEMP 'FocusBrowser-QA-Upgrade-1.0'
+$qaUpgradeRoot = Join-Path $env:TEMP 'FocusBrowser-QA-Upgrade-1.0.1'
 New-Item -ItemType Directory -Path $qaUpgradeRoot -Force | Out-Null
 $qaBefore = Join-Path $qaUpgradeRoot 'before.json'
 $qaAfter = Join-Path $qaUpgradeRoot 'after.json'
@@ -213,7 +229,7 @@ Installer checks:
   0 and behaves as repair/up-to-date, not as an error.
 - [ ] Installed executable is
   `%LOCALAPPDATA%\FocusBrowser\Focus Browser\Application\chrome.exe` and its
-  FileVersion and ProductVersion are exactly `1.0.0.0`.
+  FileVersion and ProductVersion are exactly `1.0.1.0`.
 - [ ] `RegisteredApplications`, `StartMenuInternet`, `FocusHTM*`, and
   `FocusPDF*` registry entries point to that executable.
 - [ ] No new `chrome.exe*.dmp`, `setup.exe*.dmp`, or installer crash dump was

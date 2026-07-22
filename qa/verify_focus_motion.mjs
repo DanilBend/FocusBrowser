@@ -68,8 +68,9 @@ assert.match(browserPrefs,
 const toolbarView = read(
     activeRoot,
     'chrome/browser/ui/views/toolbar/toolbar_view.cc');
-assert.match(toolbarView, /GetBoolean\([\s\S]*prefs::kFocusMotionEnabled/);
-assert.match(toolbarView, /popup_resource\.append\("\?focusMotion=0"\)/);
+assert.match(toolbarView, /FocusBlockBubbleView::ShowBubble/);
+assert.match(toolbarView, /FocusYoutubeBubbleView::ShowBubble/);
+assert.doesNotMatch(toolbarView, /popup_resource\.append\("\?focusMotion=0"\)/);
 
 const prefsUtil = read(
     activeRoot,
@@ -160,33 +161,127 @@ assert.match(focusBlockCss, /@media \(prefers-reduced-motion: reduce\)/);
 
 const settingsStrings = read(activeRoot, 'chrome/app/settings_strings.grdp');
 assert.match(settingsStrings,
-             /IDS_SETTINGS_FOCUS_MOTION[^]*Плавные анимации интерфейса/);
+             /IDS_SETTINGS_FOCUS_MOTION[^]*Smooth interface animations/);
 assert.match(settingsStrings,
-             /IDS_SETTINGS_FOCUS_MOTION_DESCRIPTION[^]*Спокойные плавные переходы/);
-assert.doesNotMatch(settingsStrings,
-                    /Smooth interface animations|Use calm, fluid transitions/);
+             /IDS_SETTINGS_FOCUS_MOTION_DESCRIPTION[^]*Calm, fluid transitions/);
+assert.doesNotMatch(settingsStrings, /[А-Яа-яЁё]/);
 
-for (const ntpRoot of [
-  path.join(activeRoot, 'chrome', 'browser', 'resources', 'new_tab_page'),
-  path.join(activeRoot, 'chrome', 'browser', 'resources', 'new_tab_page_third_party'),
+const russianTranslations = JSON.parse(read(
+    repoRoot, 'focus-chromium/i18n/translations/ru.json'));
+const russianTranslationByName = new Map(
+    russianTranslations.map(entry => [entry.name, entry]));
+assert.equal(
+    russianTranslationByName.get('IDS_SETTINGS_FOCUS_MOTION')?.message,
+    'Плавные анимации интерфейса');
+assert.equal(
+    russianTranslationByName.get('IDS_SETTINGS_FOCUS_MOTION_DESCRIPTION')
+        ?.message,
+    'Спокойные плавные переходы в Focus Browser. Системное уменьшение движения всегда имеет приоритет.');
+
+const ntpUi = read(
+    activeRoot,
+    'chrome/browser/ui/webui/new_tab_page/new_tab_page_ui.cc');
+const ntpSearchbox = read(
+    activeRoot,
+    'chrome/browser/resources/new_tab_page/ntp_searchbox.ts');
+const sharedSearchboxInput = read(
+    activeRoot,
+    'ui/webui/resources/cr_components/searchbox/searchbox_input.ts');
+const sharedSearchboxInputHtml = read(
+    activeRoot,
+    'ui/webui/resources/cr_components/searchbox/searchbox_input.html.ts');
+const sharedSearchboxInputCss = read(
+    activeRoot,
+    'ui/webui/resources/cr_components/searchbox/searchbox_input.css');
+
+// NTP/WebUI takes the same Blink-native insertion path as every website. A
+// second mirrored input would double-animate and can move the visible text or
+// caret, so the searchbox must remain a single native input.
+for (const source of [
+  ntpUi,
+  ntpSearchbox,
+  sharedSearchboxInput,
+  sharedSearchboxInputHtml,
+  sharedSearchboxInputCss,
 ]) {
-  if (!fs.existsSync(ntpRoot)) continue;
-  const pending = [ntpRoot];
-  while (pending.length) {
-    const current = pending.pop();
-    for (const entry of fs.readdirSync(current, {withFileTypes: true})) {
-      const absolute = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        pending.push(absolute);
-      } else if (/\.(css|html|js|ts)$/.test(entry.name)) {
-        const contents = fs.readFileSync(absolute, 'utf8');
-        assert.doesNotMatch(
-            contents,
-            /focus\.ui\.motion_enabled|focusMotionEnabled|focus-water-drift/,
-            `motion feature leaked into NTP: ${absolute}`);
-      }
-    }
-  }
+  assert.doesNotMatch(
+      source,
+      /focusTyping|focus-typing|focusMotionEnabled|focus-motion-enabled/);
 }
+assert.doesNotMatch(sharedSearchboxInputHtml, /focusTypingMirror/);
+assert.doesNotMatch(
+    sharedSearchboxInputCss,
+    /-webkit-text-fill-color:\s*transparent|transform\s*:|translate\s*:/);
+
+const focusPatchSeries = read(repoRoot, 'focus-chromium/patches/series');
+assert.doesNotMatch(focusPatchSeries, /ntp-typing-motion\.patch/);
+assert.match(focusPatchSeries, /omnibox-typing-motion-ranges\.patch/);
+assert.doesNotMatch(focusPatchSeries, /omnibox-typing-opacity-ranges\.patch/);
+
+const ntpAppCss = read(
+    activeRoot,
+    'chrome/browser/resources/new_tab_page/app.css');
+assert.doesNotMatch(
+    ntpAppCss,
+    /#searchboxContainer \{[\s\S]*border-radius: calc\(0\.5 \* var\(--cr-searchbox-height\)\)/);
+
+const motionRangesPatch = read(
+    repoRoot,
+    'focus-chromium/patches/focus/ui/omnibox-typing-motion-ranges.patch');
+assert.match(motionRangesPatch, /ShouldAnimateCaretMotion\(\) const/);
+assert.doesNotMatch(
+    motionRangesPatch,
+    /FocusTypingReveal|focus_typing_repaint_timer_|SaveLayerAlpha|transform\.Translate|kFocusTypingInitialOpacity|kFocusDeletionInitialTranslationInline|blur\(|scale\(/);
+
+const locationBarView = read(
+    activeRoot,
+    'chrome/browser/ui/views/location_bar/location_bar_view.cc');
+assert.match(locationBarView, /prefs::kFocusMotionEnabled/);
+assert.match(locationBarView, /gfx::Animation::ShouldRenderRichAnimation\(\)/);
+assert.match(locationBarView, /gfx::Animation::PrefersReducedMotion\(\)/);
+assert.match(locationBarView, /PreferredContrast::kMore/);
+assert.doesNotMatch(locationBarView, /typing_animation_/);
+const refreshBackgroundStart = locationBarView.indexOf(
+    'void LocationBarView::RefreshBackground()');
+const refreshBackgroundEnd = locationBarView.indexOf(
+    '\nvoid LocationBarView::', refreshBackgroundStart + 1);
+assert.ok(refreshBackgroundStart >= 0 && refreshBackgroundEnd > refreshBackgroundStart);
+assert.doesNotMatch(
+    locationBarView.slice(refreshBackgroundStart, refreshBackgroundEnd),
+    /typing_animation_/,
+    'typing reveal must not pulse the omnibox background');
+assert.match(
+    locationBarView,
+    /bool LocationBarView::ShouldAnimateFocusMotion\(\) const[\s\S]*kFocusMotionEnabled[\s\S]*ShouldRenderRichAnimation[\s\S]*PrefersReducedMotion[\s\S]*PreferredContrast::kMore/);
+assert.match(
+    locationBarView,
+    /OnOmniboxHovered\(bool is_hovering\)[\s\S]*!ShouldAnimateFocusMotion\(\)[\s\S]*hover_animation_\.Reset\(should_show_hover \? 1\.0 : 0\.0\)/);
+assert.match(
+    locationBarView,
+    /OnFocusMotionPreferenceChanged\(\)[\s\S]*hover_animation_\.Reset/);
+assert.doesNotMatch(locationBarView, /CancelFocusTypingReveals/);
+
+const locationBarHeader = read(
+    activeRoot,
+    'chrome/browser/ui/views/location_bar/location_bar_view.h');
+assert.doesNotMatch(locationBarHeader, /typing_animation_/);
+assert.match(locationBarHeader, /bool ShouldAnimateFocusMotion\(\) const/);
+
+const omniboxView = read(
+    activeRoot,
+    'chrome/browser/ui/views/omnibox/omnibox_view_views.cc');
+assert.match(omniboxView, /ShouldAnimateCaretMotion\(\) const/);
+assert.match(omniboxView, /Textfield::OnPaint\(canvas\)/);
+assert.doesNotMatch(
+    omniboxView,
+    /FocusTypingReveal|focus_typing_reveals_|focus_typing_repaint_timer_|SaveLayerAlpha|SK_AlphaTRANSPARENT|transform\.Translate|kFocusTypingInitialOpacity|FocusTypingPaint|blur\(|\.Scale\(|typing_animation_/);
+
+const omniboxViewHeader = read(
+    activeRoot,
+    'chrome/browser/ui/views/omnibox/omnibox_view_views.h');
+assert.match(omniboxViewHeader, /ShouldAnimateCaretMotion\(\) const override/);
+assert.doesNotMatch(
+    omniboxViewHeader,
+    /FocusTypingReveal|focus_typing_reveals_|focus_typing_repaint_timer_|CancelFocusTypingReveals/);
 
 console.log('Focus motion contract verified.');

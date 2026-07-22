@@ -210,6 +210,7 @@ static_library("ui") {
     "//chrome/browser:icon_manager",
     "//chrome/browser:renderer_preferences_util",
     "//chrome/browser:resources_util",
+    "//chrome/browser/focus_block",
     "//chrome/browser/affiliations",
     "//chrome/browser/ai",
     "//chrome/browser/autocomplete",

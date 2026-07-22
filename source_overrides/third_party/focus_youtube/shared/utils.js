@@ -18,7 +18,8 @@ function focusYoutubeUrl(urlValue = location.href) {
   try {
     const url = new URL(urlValue);
     return url.protocol === 'https:' &&
-        (url.hostname === 'www.youtube.com' ||
+        (url.hostname === 'youtube.com' ||
+         url.hostname === 'www.youtube.com' ||
          url.hostname === 'm.youtube.com');
   } catch {
     return false;
