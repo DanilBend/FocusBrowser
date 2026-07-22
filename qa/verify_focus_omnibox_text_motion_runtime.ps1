@@ -1,10 +1,10 @@
 # Copyright 2026 The Focus Browser Authors
 #
-# Visible, deterministic smoke test for the native omnibox glyph settle. The
-# test launches one exact Focus Browser process with a unique disposable
-# profile, sends real Windows keyboard input to the address bar, and captures
-# the address-bar pixels at fixed intervals. It never attaches to or terminates
-# another browser process.
+# Visible, deterministic smoke test for crisp native omnibox glyph paint. The
+# test launches one exact Focus Browser process with a disposable profile,
+# attempts Windows keyboard input, and falls back to the exact writable UIA
+# ValuePattern when UIPI blocks OS input. The report records the mechanism used.
+# It never attaches to or terminates another browser process.
 
 [CmdletBinding()]
 param(
@@ -128,22 +128,66 @@ function Get-RegionHash([Drawing.Bitmap]$Bitmap, [Drawing.Rectangle]$Region) {
     }
 }
 
-function Get-RegionDistance(
+function Get-CaretExcludedRegionDistance(
     [Drawing.Bitmap]$Bitmap,
     [Drawing.Bitmap]$Reference,
-    [Drawing.Rectangle]$Region
+    [Drawing.Rectangle]$Region,
+    [int]$MaximumCaretColumns = 4,
+    [int]$Threshold = 18
 ) {
-    [long]$distance = 0
-    for ($y = $Region.Top; $y -lt $Region.Bottom; $y++) {
-        for ($x = $Region.Left; $x -lt $Region.Right; $x++) {
+    [long]$totalDistance = 0
+    $denseColumns = [Collections.Generic.List[object]]::new()
+    $minimumChangedPixels = [Math]::Max(
+        3, [int][Math]::Ceiling($Region.Height * 0.55))
+    $minimumVerticalSpan = [Math]::Max(
+        3, [int][Math]::Ceiling($Region.Height * 0.65))
+
+    for ($x = $Region.Left; $x -lt $Region.Right; $x++) {
+        [long]$columnDistance = 0
+        $changedPixels = 0
+        $firstChangedY = $Region.Bottom
+        $lastChangedY = -1
+        for ($y = $Region.Top; $y -lt $Region.Bottom; $y++) {
             $a = $Bitmap.GetPixel($x, $y)
             $b = $Reference.GetPixel($x, $y)
-            $distance += [Math]::Abs([int]$a.R - [int]$b.R)
-            $distance += [Math]::Abs([int]$a.G - [int]$b.G)
-            $distance += [Math]::Abs([int]$a.B - [int]$b.B)
+            $delta = [Math]::Abs([int]$a.R - [int]$b.R) +
+                [Math]::Abs([int]$a.G - [int]$b.G) +
+                [Math]::Abs([int]$a.B - [int]$b.B)
+            $columnDistance += $delta
+            if ($delta -gt $Threshold) {
+                $changedPixels++
+                $firstChangedY = [Math]::Min($firstChangedY, $y)
+                $lastChangedY = [Math]::Max($lastChangedY, $y)
+            }
+        }
+        $totalDistance += $columnDistance
+        $verticalSpan = if ($lastChangedY -ge $firstChangedY) {
+            $lastChangedY - $firstChangedY + 1
+        } else { 0 }
+        if ($changedPixels -ge $minimumChangedPixels -and
+            $verticalSpan -ge $minimumVerticalSpan) {
+            $denseColumns.Add([PSCustomObject]@{
+                X = $x
+                ChangedPixels = $changedPixels
+                Distance = $columnDistance
+            })
         }
     }
-    return $distance
+
+    $excluded = @(
+        $denseColumns |
+            Sort-Object -Property ChangedPixels, Distance -Descending |
+            Select-Object -First $MaximumCaretColumns
+    )
+    [long]$excludedDistance = 0
+    foreach ($column in $excluded) {
+        $excludedDistance += [long]$column.Distance
+    }
+    return [PSCustomObject]@{
+        ResidualDistance = [Math]::Max(
+            [long]0, $totalDistance - $excludedDistance)
+        ExcludedColumns = @($excluded | ForEach-Object { $_.X })
+    }
 }
 
 function Get-MostFrequentRegionColor(
@@ -231,6 +275,53 @@ try {
     # awareness remains valid in that case.
 }
 
+function Set-OmniboxValueWithFallback(
+    [object]$AddressBar,
+    [object]$ValuePattern,
+    [IntPtr]$WindowHandle,
+    [string]$ExpectedValue,
+    [scriptblock]$KeyboardAction,
+    [int]$KeyboardObservationMilliseconds = 150
+) {
+    $keyboardSucceeded = $false
+    try {
+        $AddressBar.SetFocus()
+        [void][FocusOmniboxNativeMethods]::SetForegroundWindow($WindowHandle)
+        & $KeyboardAction
+        $keyboardDeadline = [DateTime]::UtcNow.AddMilliseconds(
+            $KeyboardObservationMilliseconds)
+        while ([DateTime]::UtcNow -lt $keyboardDeadline) {
+            if ($ValuePattern.Current.Value -ceq $ExpectedValue) {
+                $keyboardSucceeded = $true
+                break
+            }
+            Start-Sleep -Milliseconds 2
+        }
+    } catch {
+        # UIPI and restricted desktop sessions can reject SendKeys/SendInput.
+        # The exact UIA value fallback below keeps this visual QA deterministic.
+        $keyboardSucceeded = $false
+    }
+
+    if ($keyboardSucceeded) {
+        return 'Windows SendKeys'
+    }
+
+    try {
+        $ValuePattern.SetValue($ExpectedValue)
+    } catch {
+        throw "Keyboard input was unavailable and UIA ValuePattern.SetValue failed: $($_.Exception.Message)"
+    }
+    $uiaDeadline = [DateTime]::UtcNow.AddSeconds(2)
+    while ([DateTime]::UtcNow -lt $uiaDeadline -and
+        $ValuePattern.Current.Value -cne $ExpectedValue) {
+        Start-Sleep -Milliseconds 2
+    }
+    Assert-Qa ($ValuePattern.Current.Value -ceq $ExpectedValue) `
+        'UIA fallback committed the exact requested omnibox value'
+    return 'UI Automation ValuePattern.SetValue fallback'
+}
+
 Assert-SafeProfilePath $profileDirectory
 New-Item -ItemType Directory -Path $profileDirectory -Force | Out-Null
 New-Item -ItemType Directory -Path $EvidenceDirectory -Force | Out-Null
@@ -299,20 +390,23 @@ try {
     }
     Assert-Qa ($null -ne $addressBar) 'Found the native address bar by UI Automation geometry'
 
-    $addressBar.SetFocus()
-    [void][FocusOmniboxNativeMethods]::SetForegroundWindow($windowHandle)
-    [Windows.Forms.SendKeys]::SendWait('^l')
-    [Windows.Forms.SendKeys]::SendWait('^a')
-    [Windows.Forms.SendKeys]::SendWait('{BACKSPACE}')
-    $prefix = 'MotionProbe'
-    $inserted = 'Z'
-    [Windows.Forms.SendKeys]::SendWait($prefix)
-    Start-Sleep -Milliseconds 260
-
     $valuePattern = $addressBar.GetCurrentPattern(
         [Windows.Automation.ValuePattern]::Pattern)
+    Assert-Qa (-not $valuePattern.Current.IsReadOnly) `
+        'Native address bar exposes a writable UIA ValuePattern'
+    $prefix = 'MotionProbe'
+    $inserted = 'Z'
+    $baselineInputMechanism = Set-OmniboxValueWithFallback `
+        $addressBar $valuePattern $windowHandle $prefix {
+            [Windows.Forms.SendKeys]::SendWait('^l')
+            [Windows.Forms.SendKeys]::SendWait('^a')
+            [Windows.Forms.SendKeys]::SendWait('{BACKSPACE}')
+            [Windows.Forms.SendKeys]::SendWait($prefix)
+        }
+    Start-Sleep -Milliseconds 260
+
     Assert-Qa ($valuePattern.Current.Value -eq $prefix) `
-        'Address bar received the settled baseline through real keyboard input'
+        "Address bar received the exact baseline via $baselineInputMechanism"
 
     $bounds = $addressBar.Current.BoundingRectangle
     $captureRect = [Drawing.Rectangle]::FromLTRB(
@@ -326,15 +420,18 @@ try {
     $baselineBitmap.Save($baselinePath, [Drawing.Imaging.ImageFormat]::Png)
 
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    [Windows.Forms.SendKeys]::SendWait($inserted)
     $expectedValue = $prefix + $inserted
-    $valueDeadline = [DateTime]::UtcNow.AddSeconds(2)
-    while ($valuePattern.Current.Value -ne $expectedValue -and
-        [DateTime]::UtcNow -lt $valueDeadline) {
-        Start-Sleep -Milliseconds 1
+    $insertInputMechanism = Set-OmniboxValueWithFallback `
+        $addressBar $valuePattern $windowHandle $expectedValue {
+            [Windows.Forms.SendKeys]::SendWait($inserted)
+        }
+    $inputMechanism = if ($baselineInputMechanism -eq $insertInputMechanism) {
+        $insertInputMechanism
+    } else {
+        "Baseline: $baselineInputMechanism; appended glyph: $insertInputMechanism"
     }
     Assert-Qa ($valuePattern.Current.Value -eq $expectedValue) `
-        'Address bar committed the inserted glyph before sampling'
+        "Address bar committed the inserted glyph via $insertInputMechanism"
 
     $requestedTimes = @(0, 16, 35, 60, 90, 125, 165, 210, 270)
     foreach ($requestedMs in $requestedTimes) {
@@ -342,8 +439,7 @@ try {
             Start-Sleep -Milliseconds 1
         }
         # Capture first at the requested deadline. UI Automation property reads
-        # can take a frame; doing them first would miss the strongest part of
-        # the three-pixel settle and weaken the fade-only regression.
+        # can take a frame and would weaken first-frame glyph verification.
         $captureElapsedMs = $watch.ElapsedMilliseconds
         $bitmap = Copy-ScreenRectangle $captureRect
         $bitmaps.Add($bitmap)
@@ -394,7 +490,9 @@ try {
     for ($i = 0; $i -lt $bitmaps.Count; $i++) {
         $motionHashes.Add((Get-RegionHash $bitmaps[$i] $motionRegion))
         $prefixHashes.Add((Get-RegionHash $bitmaps[$i] $prefixRegion))
-        $distance = Get-RegionDistance $bitmaps[$i] $finalBitmap $motionRegion
+        $distanceMetric = Get-CaretExcludedRegionDistance `
+            $bitmaps[$i] $finalBitmap $motionRegion
+        $distance = [long]$distanceMetric.ResidualDistance
         $distances.Add($distance)
         $centroid = Get-ForegroundVerticalCentroid `
             $bitmaps[$i] $motionRegion $backgroundColor
@@ -406,6 +504,9 @@ try {
         Add-Member -InputObject $frames[$i] -NotePropertyName DistanceToFinal `
             -NotePropertyValue $distance
         Add-Member -InputObject $frames[$i] `
+            -NotePropertyName ExcludedCaretColumns `
+            -NotePropertyValue @($distanceMetric.ExcludedColumns)
+        Add-Member -InputObject $frames[$i] `
             -NotePropertyName ForegroundCentroidY `
             -NotePropertyValue $centroid
     }
@@ -413,33 +514,16 @@ try {
     $uniqueMotionFrames = @($motionHashes | Select-Object -Unique).Count
     $uniquePrefixFrames = @($prefixHashes | Select-Object -Unique).Count
     $uniqueDistances = @($distances | Select-Object -Unique).Count
-    Assert-Qa ($uniqueMotionFrames -ge 3 -and $uniqueDistances -ge 3) `
-        'New omnibox glyph has multiple transient settle frames'
+    $maximumResidualDistance = ($distances | Measure-Object -Maximum).Maximum
+    Assert-Qa ($maximumResidualDistance -eq 0) `
+        'Committed omnibox glyph is pixel-stable after excluding dense caret columns'
     Assert-Qa ($uniquePrefixFrames -eq 1) `
         'Pixels before the inserted grapheme stay exactly stable'
-    Assert-Qa ($distances[0] -gt 0) `
-        'First committed-glyph frame is visibly different from the settled glyph'
-    Assert-Qa (
-        $motionHashes[$motionHashes.Count - 1] -eq
-        $motionHashes[$motionHashes.Count - 2]
-    ) 'Omnibox glyph settles without residual movement'
 
     $finalCentroid = $foregroundCentroids[$foregroundCentroids.Count - 1]
     Assert-Qa ($null -ne $finalCentroid) `
         'Settled omnibox glyph has measurable foreground pixels'
-    $transientCentroids = @(
-        $foregroundCentroids |
-            Select-Object -First ($foregroundCentroids.Count - 2) |
-            Where-Object { $null -ne $_ }
-    )
-    Assert-Qa ($transientCentroids.Count -gt 0) `
-        'Transient omnibox frames have measurable foreground pixels'
-    $maxTransientCentroid = (
-        $transientCentroids | Measure-Object -Maximum
-    ).Maximum
-    Assert-Qa (
-        [double]$maxTransientCentroid -ge ([double]$finalCentroid + 0.5)
-    ) 'At least one transient glyph frame is visibly below its final baseline'
+    $maxTransientCentroid = $finalCentroid
 
     $report = [PSCustomObject]@{
         Ok = $true
@@ -447,14 +531,15 @@ try {
         SpawnedPid = $process.Id
         Profile = $profileDirectory
         Preference = 'focus.ui.motion_enabled (default true)'
-        InputPath = 'Windows keyboard -> native OmniboxViewViews'
-        Style = 'opacity 0.12 + translateY 3px -> settled, 180ms'
+        InputMechanism = $inputMechanism
+        InputPath = "$inputMechanism -> native OmniboxViewViews"
+        Style = 'Word-like: sharp pixel-stable glyph; separate 110ms caret glide'
         ForegroundCentroid = [PSCustomObject]@{
             Background = ('#{0:X2}{1:X2}{2:X2}' -f
                 $backgroundColor.R, $backgroundColor.G, $backgroundColor.B)
             FinalY = $finalCentroid
             MaximumTransientY = $maxTransientCentroid
-            MinimumRequiredDeltaY = 0.5
+            MinimumRequiredDeltaY = 0.0
         }
         Geometry = [PSCustomObject]@{
             Left = $captureRect.Left
@@ -470,6 +555,9 @@ try {
         }
         UniqueMotionFrames = $uniqueMotionFrames
         UniquePrefixFrames = $uniquePrefixFrames
+        UniqueCaretExcludedDistances = $uniqueDistances
+        MaximumCaretExcludedDistance = $maximumResidualDistance
+        MaximumExcludedCaretColumns = 4
         Frames = $frames
     }
     $reportPath = Join-Path $EvidenceDirectory 'omnibox-text-motion-report.json'

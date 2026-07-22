@@ -274,29 +274,25 @@ function readFocusTextMotionNative(relativePath) {
 const focusTextMotionBlinkMarker = readFocusTextMotionNative(path.join(
     'third_party', 'blink', 'renderer', 'core', 'editing', 'markers',
     'focus_text_motion_marker.cc'));
-assert.match(focusTextMotionBlinkMarker,
-             /kRevealDuration = base::Milliseconds\(180\)/);
-assert.match(focusTextMotionBlinkMarker, /kInitialOpacity = 0\.12f/);
-assert.match(focusTextMotionBlinkMarker, /kInitialTranslationY = 3\.0f/);
-assert.match(focusTextMotionBlinkMarker,
-             /kDeletionInitialTranslationInline = 3\.0f/);
-assert.match(focusTextMotionBlinkMarker, /Kind::kDeletionSettle/);
 assert.match(
     focusTextMotionBlinkMarker,
-    /gfx::CubicBezier curve\(0\.22, 1\.0, 0\.36, 1\.0\)/);
-assert.match(focusTextMotionBlinkMarker, /curve\.Solve\(progress\)/);
-assert.match(
+    /UpdateOpacity\(base::TimeTicks\)\s*\{[\s\S]*?return true;\s*\}/);
+assert.doesNotMatch(
     focusTextMotionBlinkMarker,
-    /translation_y_\s*=\s*static_cast<float>\(kInitialTranslationY \* \(1\.0 - eased\)\)/);
+    /kRevealDuration|kInitialOpacity|kInitialTranslationY|kDeletionInitialTranslationInline|CubicBezier|curve\.Solve|opacity_|translation_inline_|translation_y_/);
 
 const focusTextMotionBlinkMarkerHeader = readFocusTextMotionNative(path.join(
     'third_party', 'blink', 'renderer', 'core', 'editing', 'markers',
     'focus_text_motion_marker.h'));
 assert.match(focusTextMotionBlinkMarkerHeader,
-             /float TranslationY\(\) const \{ return translation_y_; \}/);
-assert.match(focusTextMotionBlinkMarkerHeader, /float opacity_ = 0\.12f/);
-assert.match(focusTextMotionBlinkMarkerHeader, /float translation_y_ = 3\.0f/);
-assert.match(focusTextMotionBlinkMarkerHeader, /float translation_inline_/);
+             /float Opacity\(\) const \{ return 1\.0f; \}/);
+assert.match(focusTextMotionBlinkMarkerHeader,
+             /float TranslationInline\(\) const \{ return 0\.0f; \}/);
+assert.match(focusTextMotionBlinkMarkerHeader,
+             /float TranslationY\(\) const \{ return 0\.0f; \}/);
+assert.doesNotMatch(
+    focusTextMotionBlinkMarkerHeader,
+    /animation_start_|start_delay_|kind_|float opacity_|float translation_inline_|float translation_y_/);
 
 const focusTextMotionHighlightPart = readFocusTextMotionNative(path.join(
     'third_party', 'blink', 'renderer', 'core', 'paint',
@@ -311,11 +307,19 @@ const focusTextMotionHighlightPainter = readFocusTextMotionNative(path.join(
 assert.match(focusTextMotionHighlightPainter, /motion\.TranslationY\(\)/);
 assert.match(focusTextMotionHighlightPainter, /motion\.TranslationInline\(\)/);
 assert.match(focusTextMotionHighlightPainter, /HighlightPart split = part/);
-assert.match(focusTextMotionHighlightPainter,
-             /split\.translation_y = translation_y/);
-assert.match(
+for (const crispPaintContract of [
+  'float opacity = 1.0f;',
+  'float translation_inline = 0.0f;',
+  'float translation_y = 0.0f;',
+  'split.opacity = opacity;',
+  'TextPainter::kTextProperOnly',
+]) {
+  assert.ok(focusTextMotionHighlightPainter.includes(crispPaintContract),
+            `Missing crisp text-paint contract: ${crispPaintContract}`);
+}
+assert.doesNotMatch(
     focusTextMotionHighlightPainter,
-    /paint_info_\.context\.Translate\(part\.translation_x, part\.translation_y\)/);
+    /BeginLayer\(part\.opacity\)|Translate\(part\.translation_x, part\.translation_y\)/);
 
 const focusInsertText = readFocusTextMotionNative(path.join(
     'third_party', 'blink', 'renderer', 'core', 'editing', 'commands',
@@ -371,9 +375,9 @@ const focusCaretMotion = readFocusTextMotionNative(path.join(
     'caret_display_item_client.cc'));
 assert.match(focusCaretMotionHeader, /animated_local_rect_/);
 assert.match(focusCaretMotion,
-             /kFocusCaretMotionDuration = base::Milliseconds\(90\)/);
+             /kFocusCaretMotionDuration = base::Milliseconds\(110\)/);
 assert.match(focusCaretMotion,
-             /gfx::CubicBezier curve\(0\.22, 1\.0, 0\.36, 1\.0\)/);
+             /gfx::CubicBezier curve\(0\.0, 0\.8, 0\.2, 1\.0\)/);
 assert.match(focusCaretMotion, /GetFocusTextMotionEnabled\(\)/);
 assert.match(focusCaretMotion, /FocusCaretMotionPrefersReducedMotion/);
 assert.match(focusCaretMotion,
@@ -390,25 +394,12 @@ const focusOmniboxMotionPatch = fs.readFileSync(path.join(
     repoRoot, 'focus-chromium', 'patches', 'focus', 'ui',
     'omnibox-typing-motion-ranges.patch'), 'utf8');
 function assertFocusOmniboxMotion(source) {
-  assert.match(source, /base::Milliseconds\(180\)/);
-  assert.match(source, /kFocusTypingInitialOpacity = 0\.12/);
-  assert.match(source, /kFocusTypingInitialTranslationY = 3\.0f/);
   assert.match(
       source,
-      /gfx::CubicBezier curve\(0\.22, 1\.0, 0\.36, 1\.0\)/);
-  assert.match(
-      source,
-      /if \(committed_text_differs && !is_ime_composing && location_bar_view_\)/);
+      /bool OmniboxViewViews::ShouldAnimateCaretMotion\(\) const\s*\{[\s\S]*?location_bar_view_ && !popup_window_mode_[\s\S]*?location_bar_view_->ShouldAnimateFocusMotion\(\);[\s\S]*?\}/);
   assert.doesNotMatch(
       source,
-      /if \(something_changed && committed_text_differs/);
-  // The stable pass withholds only the inserted range; a clipped second
-  // RenderText pass applies opacity and vertical settle without moving layout.
-  assert.match(source, /SK_AlphaTRANSPARENT/);
-  assert.match(
-      source,
-      /Textfield::OnPaint\(canvas\);[\s\S]*GetSubstringBounds\(paint\.range\)[\s\S]*canvas->ClipRect\(glyph_bounds\)[\s\S]*canvas->SaveLayerAlpha\(paint\.alpha, glyph_bounds\)[\s\S]*transform\.Translate\(paint\.translation_x, paint\.translation_y\)[\s\S]*render_text->Draw\(canvas, \/\*select_all=\*\/false\)/);
-  assert.match(source, /FocusTypingMotionKind::kDeletionSettle/);
+      /FocusTypingReveal|FocusTypingPaint|focus_typing_|RepeatingTimer|SaveLayerAlpha|SK_AlphaTRANSPARENT|transform\.Translate|kFocusTyping|base::Milliseconds\(180\)|CubicBezier/);
 }
 assertFocusOmniboxMotion(focusOmniboxMotionPatch);
 
@@ -419,6 +410,7 @@ if (fs.existsSync(focusOmniboxMotionSourcePath)) {
   const focusOmniboxMotionSource = fs.readFileSync(
       focusOmniboxMotionSourcePath, 'utf8');
   assertFocusOmniboxMotion(focusOmniboxMotionSource);
+  assert.match(focusOmniboxMotionSource, /Textfield::OnPaint\(canvas\)/);
 }
 
 const focusBlockRoot = path.join(sourceRoot, 'third_party', 'ublock');

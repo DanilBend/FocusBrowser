@@ -10,7 +10,7 @@ param(
 
     [string]$BrowserPath,
     [string]$InstallerPath,
-    [string]$ExpectedVersion = '1.0.0.0',
+    [string]$ExpectedVersion = '1.0.1.0',
 
     [string]$UserDataPath =
         (Join-Path $env:LOCALAPPDATA 'FocusBrowser\Focus Browser\User Data'),
@@ -61,7 +61,7 @@ function Resolve-ArtifactPaths {
         $candidate = $candidateRoots |
             Where-Object { Test-Path -LiteralPath $_ -PathType Container } |
             ForEach-Object {
-                Get-ChildItem -LiteralPath $_ -File -Filter '*FocusBrowser*1.0*installer.exe' |
+                Get-ChildItem -LiteralPath $_ -File -Filter '*FocusBrowser*1.0.1*installer.exe' |
                     Where-Object { $_.Name -notmatch 'mini-installer' }
             } |
             Sort-Object LastWriteTimeUtc -Descending |
@@ -206,13 +206,13 @@ function Test-ArtifactRelease {
     }
 
     if ([string]::IsNullOrWhiteSpace($script:InstallerPath)) {
-        Write-Fail 'Focus Browser 1.0 NSIS installer was not found; pass -InstallerPath explicitly'
+        Write-Fail 'Focus Browser 1.0.1 NSIS installer was not found; pass -InstallerPath explicitly'
     } else {
         Test-PeArtifact $script:InstallerPath 'NSIS installer' $true
-        if ((Split-Path -Leaf $script:InstallerPath) -match '1[._-]0') {
-            Write-Pass 'Installer filename carries release version 1.0'
+        if ((Split-Path -Leaf $script:InstallerPath) -match '1[._-]0[._-]1') {
+            Write-Pass 'Installer filename carries release version 1.0.1'
         } else {
-            Write-Fail "Installer filename does not carry version 1.0: $script:InstallerPath"
+            Write-Fail "Installer filename does not carry version 1.0.1: $script:InstallerPath"
         }
     }
 
@@ -227,7 +227,7 @@ function Test-ArtifactRelease {
         $versionText = Get-Content -LiteralPath $versionFile -Raw
         Assert-Focus ($versionText -match '(?m)^FOCUS_MAJOR=1\s*$') 'FOCUS_MAJOR is 1'
         Assert-Focus ($versionText -match '(?m)^FOCUS_MINOR=0\s*$') 'FOCUS_MINOR is 0'
-        Assert-Focus ($versionText -match '(?m)^FOCUS_PATCH=0\s*$') 'FOCUS_PATCH is 0'
+        Assert-Focus ($versionText -match '(?m)^FOCUS_PATCH=1\s*$') 'FOCUS_PATCH is 1'
         Assert-Focus ($versionText -match '(?m)^FOCUS_PLATFORM=0\s*$') 'FOCUS_PLATFORM is 0'
     } else {
         Write-Fail "Version source is missing: $versionFile"

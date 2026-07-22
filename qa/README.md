@@ -14,6 +14,13 @@ Native FocusBlock network smoke test (local fixture, no extension page):
 node qa/verify_focusblock_runtime.mjs build/src/out/Default/chrome.exe "$env:TEMP\focusblock-runtime-report.json"
 ```
 
+Automatic password-save bubble crash regression (generated QA credentials,
+local login form, Password Manager Internals proof and disposable profile):
+
+```powershell
+node qa/verify_password_bubble_runtime.mjs build/src/out/Default/chrome.exe "$env:TEMP\focus-password-bubble-runtime-report.json"
+```
+
 Built-in text-entry motion static contract:
 
 ```powershell

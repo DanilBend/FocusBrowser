@@ -113,18 +113,22 @@ assert.match(
 
 const marker = read(activeRoot,
     'third_party/blink/renderer/core/editing/markers/focus_text_motion_marker.cc');
-assert.match(marker, /kRevealDuration = base::Milliseconds\(180\)/);
-assert.match(marker, /opacity_/);
-assert.match(marker, /kInitialTranslationY = 3\.0f/);
-assert.match(marker, /kDeletionInitialTranslationInline = 3\.0f/);
-assert.match(marker, /Kind::kDeletionSettle/);
-assert.match(marker, /CubicBezier curve\(0\.22, 1\.0, 0\.36, 1\.0\)/);
+const markerHeader = read(activeRoot,
+    'third_party/blink/renderer/core/editing/markers/focus_text_motion_marker.h');
+assert.match(markerHeader, /float Opacity\(\) const \{ return 1\.0f; \}/);
+assert.match(markerHeader,
+             /float TranslationInline\(\) const \{ return 0\.0f; \}/);
+assert.match(markerHeader, /float TranslationY\(\) const \{ return 0\.0f; \}/);
+assert.match(marker, /UpdateOpacity\(base::TimeTicks\)[\s\S]*return true/);
+assert.doesNotMatch(marker + markerHeader,
+                    /kRevealDuration|opacity_|translation_inline_|translation_y_/);
 assert.doesNotMatch(marker,
     /document\.|createElement|attachShadow|InputEvent|translateY|scale\(|blur\(/);
 const markerTests = read(
     activeRoot,
     'third_party/blink/renderer/core/editing/markers/focus_text_motion_marker_test.cc');
-assert.match(markerTests, /RapidInsertionsKeepIndependentTimelines/);
+assert.match(markerTests, /CommittedGlyphInkIsAlwaysCrisp/);
+assert.match(markerTests, /PasteDelayNeverDelaysCommittedInk/);
 
 const painter = read(activeRoot,
     'third_party/blink/renderer/core/paint/highlight_painter.cc');
@@ -132,30 +136,22 @@ for (const required of [
   'ApplyFocusTextMotionToParts',
   'MarkerRangeMappingContext',
   'ExpandRangeToIncludePartialGlyphs',
-  'BeginLayer(part.opacity)',
   'motion.TranslationInline()',
-  'Translate(part.translation_x, part.translation_y)',
   'TextPainter::kTextProperOnly',
 ]) {
   assert.ok(painter.includes(required), `native paint contract missing: ${required}`);
 }
-assert.doesNotMatch(painter, /scale\(|blur\(/);
+assert.doesNotMatch(
+    painter,
+    /BeginLayer\(part\.opacity\)|Translate\(part\.translation_x, part\.translation_y\)|scale\(|blur\(/);
 
 const omniboxPatch = read(
     projectRoot,
     'focus-chromium/patches/focus/ui/omnibox-typing-motion-ranges.patch');
-assert.match(omniboxPatch, /kFocusTypingRevealDuration[\s\S]*Milliseconds\(180\)/);
-assert.match(omniboxPatch,
-             /^\+\s+if \(committed_text_differs && !is_ime_composing && location_bar_view_\)/m);
-assert.doesNotMatch(omniboxPatch,
-                    /^\+\s+if \(something_changed && committed_text_differs/m);
-assert.match(omniboxPatch, /FocusTypingReveal[\s\S]*base::TimeTicks started_at/);
-assert.match(omniboxPatch, /CubicBezier[\s\S]*0\.22[\s\S]*0\.36/);
-assert.match(
+assert.match(omniboxPatch, /ShouldAnimateCaretMotion\(\) const/);
+assert.doesNotMatch(
     omniboxPatch,
-    /transform\.Translate\(paint\.translation_x, paint\.translation_y\)/);
-assert.match(omniboxPatch, /FocusTypingMotionKind::kDeletionSettle/);
-assert.doesNotMatch(omniboxPatch, /scale\(|blur\(/);
+    /FocusTypingReveal|SaveLayerAlpha|transform\.Translate|kFocusTypingInitialOpacity|kFocusDeletionInitialTranslationInline|scale\(|blur\(/);
 
 const controller = read(activeRoot,
     'third_party/blink/renderer/core/editing/markers/document_marker_controller.cc');
@@ -210,10 +206,10 @@ assert.match(tests, /FocusTextMotionSkipsProvisionalImeUpdate/);
 
 console.log(JSON.stringify({
   ok: true,
-  implementation: 'Blink native range paint',
-  geometry: 'layout/caret unchanged; only inserted-range paint settles by 3px',
+  implementation: 'crisp native glyph paint with separate caret glide',
+  geometry: 'committed glyph pixels stay at final coordinates; caret moves independently',
   coverage: 'input/textarea UA shadow editors, contenteditable, frames',
   preference: 'focus.ui.motion_enabled (live WebPreferences)',
   reducedMotion: true,
-  passwordPolicy: 'paint-time opacity/translation only; no password text copy',
+  passwordPolicy: 'no glyph overlay, opacity layer or password text copy',
 }, null, 2));

@@ -29,4 +29,4 @@ allowed component updates. Google Chrome account Sync is not enabled.
 
 Do not upload a real profile, cookies, saved passwords, tokens, browsing
 databases or unsanitized crash dumps to GitHub issues. Use a disposable profile
-when reproducing bugs and follow [SECURITY.md](SECURITY.md) for vulnerabilities.
+when reproducing bugs and follow [SECURITY.en.md](SECURITY.en.md) for vulnerabilities.

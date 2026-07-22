@@ -40,7 +40,7 @@ index fa33742..132d310 100644
 +  if (should_animate) {
 +    ui::ScopedLayerAnimationSettings settings(
 +        cursor_view_->layer()->GetAnimator());
-+    settings.SetTransitionDuration(base::Milliseconds(90));
++    settings.SetTransitionDuration(base::Milliseconds(110));
 +    settings.SetTweenType(gfx::Tween::ACCEL_0_80_DECEL_80);
 +    settings.SetPreemptionStrategy(
 +        ui::LayerAnimator::IMMEDIATELY_ANIMATE_TO_NEW_TARGET);

@@ -34,7 +34,7 @@ index 7865b06..c929749 100644
    }
  
    run_omnibox_context_menu_callback_ =
-@@ -2086,12 +2092,37 @@ void LocationBarView::OnOmniboxBlurred() {
+@@ -2086,12 +2092,34 @@ void LocationBarView::OnOmniboxBlurred() {
    location_icon_view_->Update(false, false);
  }
  
@@ -48,9 +48,6 @@ index 7865b06..c929749 100644
 +}
 +
 +void LocationBarView::OnFocusMotionPreferenceChanged() {
-+  if (omnibox_view_) {
-+    omnibox_view_->CancelFocusTypingReveals();
-+  }
 +  const bool should_show_hover =
 +      IsMouseHovered() && omnibox_view_ && !omnibox_view_->HasFocus();
 +  hover_animation_.Reset(should_show_hover ? 1.0 : 0.0);
@@ -96,7 +93,7 @@ index 015b1e1..c4ed3b3 100644
    // Updates the background on a theme change, or dropdown state change.
    void RefreshBackground();
  
-+  // Stops running Focus motion immediately when the preference changes.
++  // Applies the Focus motion preference immediately.
 +  void OnFocusMotionPreferenceChanged();
 +
    // Updates the visibility state of the Content Blocked icons to reflect what

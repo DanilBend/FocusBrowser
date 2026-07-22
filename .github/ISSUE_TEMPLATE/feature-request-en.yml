@@ -1,0 +1,32 @@
+name: Feature request (English)
+description: Suggest a useful Focus Browser improvement in English
+labels: ["enhancement"]
+title: "[Feature] "
+body:
+  - type: markdown
+    attributes:
+      value: Search existing Issues before submitting a duplicate request.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Which user problem should this change solve?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the smallest useful behavior and its tradeoffs.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to help implement or test this feature.

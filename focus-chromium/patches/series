@@ -260,6 +260,7 @@ focus/ui/multi-contents-drop-target.patch
 focus/ui/fix-customize-side-panel.patch
 focus/ui/side-panel.patch
 focus/ui/remove-dead-toolbar-actions.patch
+focus/ui/restore-password-action.patch
 focus/ui/remove-dead-profile-actions.patch
 focus/ui/clean-up-installed-extension-bubble.patch
 focus/ui/add-specific-error-for-disabled-extension-downloads.patch

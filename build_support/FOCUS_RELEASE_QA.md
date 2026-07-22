@@ -1,4 +1,4 @@
-# Focus Browser 1.0 — Windows release QA
+# Focus Browser 1.0.1 — Windows release QA
 
 This checklist keeps every unrelated browser profile and process out of scope.
 Never terminate every `chrome.exe`; identify Focus Browser by its full
@@ -29,7 +29,7 @@ built and packaging has finished:
 $repo = (Resolve-Path '.').Path
 $qaNode = Join-Path $repo 'build\src\third_party\node\win\node.exe'
 $qaBrowser = Join-Path $repo 'build\src\out\Default\chrome.exe'
-$qaInstaller = Join-Path $repo 'build\FocusBrowser_1.0_x64-installer.exe'
+$qaInstaller = Join-Path $repo 'build\FocusBrowser_1.0.1_x64-installer.exe'
 $qaVerifier = Join-Path $repo 'build_support\verify_focus_release.ps1'
 $qaPowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 
@@ -45,7 +45,7 @@ if ($LASTEXITCODE -ne 0) { throw 'FocusYoutube full contract failed' }
 ```
 
 The PowerShell verifier is read-only in `Artifacts` mode. It checks Focus
-branding and exact PE FileVersion/ProductVersion `1.0.0.0` for `chrome.exe`,
+branding and exact PE FileVersion/ProductVersion `1.0.1.0` for `chrome.exe`,
 `chrome.dll`, `setup.exe`, and `mini_installer.exe`, plus packaging payloads,
 SHA-256 hashes, monochrome embedded icon, signature state, and static
 browser-owned component integration. An
@@ -58,7 +58,7 @@ Do not pass `--no-first-run`; the point is to exercise the real first launch.
 
 ```powershell
 $qaRoot = Join-Path $env:TEMP `
-    ('FocusBrowser-QA-1.0-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    ('FocusBrowser-QA-1.0.1-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 $qaProfile = Join-Path $qaRoot 'User Data'
 $qaLog = Join-Path $qaRoot 'focus-browser.log'
 New-Item -ItemType Directory -Path $qaProfile -Force | Out-Null
@@ -194,7 +194,7 @@ snapshot contains only sizes, timestamps, paths, and SHA-256 hashes—never
 password/history contents:
 
 ```powershell
-$qaUpgradeRoot = Join-Path $env:TEMP 'FocusBrowser-QA-Upgrade-1.0'
+$qaUpgradeRoot = Join-Path $env:TEMP 'FocusBrowser-QA-Upgrade-1.0.1'
 New-Item -ItemType Directory -Path $qaUpgradeRoot -Force | Out-Null
 $qaBefore = Join-Path $qaUpgradeRoot 'before.json'
 $qaAfter = Join-Path $qaUpgradeRoot 'after.json'
@@ -229,7 +229,7 @@ Installer checks:
   0 and behaves as repair/up-to-date, not as an error.
 - [ ] Installed executable is
   `%LOCALAPPDATA%\FocusBrowser\Focus Browser\Application\chrome.exe` and its
-  FileVersion and ProductVersion are exactly `1.0.0.0`.
+  FileVersion and ProductVersion are exactly `1.0.1.0`.
 - [ ] `RegisteredApplications`, `StartMenuInternet`, `FocusHTM*`, and
   `FocusPDF*` registry entries point to that executable.
 - [ ] No new `chrome.exe*.dmp`, `setup.exe*.dmp`, or installer crash dump was

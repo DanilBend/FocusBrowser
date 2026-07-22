@@ -1117,20 +1117,9 @@ void HighlightPainter::PaintHighlightOverlays(
       fragment_paint_info_.shape_result->ExpandRangeToIncludePartialGlyphs(
           &start, &end);
 
-      if (part.translation_x != 0.0f || part.translation_y != 0.0f) {
-        // This transforms only the paint of the inserted range. Line boxes,
-        // selection geometry and the caret keep their original coordinates.
-        paint_info_.context.Translate(part.translation_x, part.translation_y);
-      }
-      if (part.opacity < 1.0f) {
-        paint_info_.context.BeginLayer(part.opacity);
-      }
       text_painter_.Paint(fragment_paint_info_.Slice(start, end), part.style,
                           node_id, foreground_auto_dark_mode_,
                           TextPainter::kTextProperOnly);
-      if (part.opacity < 1.0f) {
-        paint_info_.context.EndLayer();
-      }
     }
 
     PaintDecorationsOnlyLineThrough(part, part_rect);

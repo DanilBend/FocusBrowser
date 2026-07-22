@@ -12,8 +12,8 @@ param(
 
     [string]$RepoRoot,
     [string]$InstallerPath,
-    [string]$ExpectedVersion = '1.0.0.0',
-    [string]$ExpectedDisplayVersion = '1.0',
+    [string]$ExpectedVersion = '1.0.1.0',
+    [string]$ExpectedDisplayVersion = '1.0.1',
     [ValidateRange(15, 180)]
     [int]$StartupTimeoutSeconds = 60,
     [string]$EvidenceDirectory,

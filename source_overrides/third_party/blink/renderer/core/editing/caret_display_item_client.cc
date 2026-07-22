@@ -66,7 +66,7 @@ void CaretDisplayItemClient::Trace(Visitor* visitor) const {
 
 namespace {
 
-constexpr base::TimeDelta kFocusCaretMotionDuration = base::Milliseconds(90);
+constexpr base::TimeDelta kFocusCaretMotionDuration = base::Milliseconds(110);
 
 PhysicalRect InterpolateFocusCaretRect(const PhysicalRect& from,
                                        const PhysicalRect& to,
@@ -436,7 +436,7 @@ void CaretDisplayItemClient::ContinueFocusCaretMotion(base::TimeTicks tick) {
   const double linear_progress = std::clamp(
       (tick - *focus_caret_motion_start_) / kFocusCaretMotionDuration, 0.0,
       1.0);
-  static const gfx::CubicBezier curve(0.22, 1.0, 0.36, 1.0);
+  static const gfx::CubicBezier curve(0.0, 0.8, 0.2, 1.0);
   animated_local_rect_ = InterpolateFocusCaretRect(
       focus_caret_motion_from_, focus_caret_motion_to_,
       curve.Solve(linear_progress));

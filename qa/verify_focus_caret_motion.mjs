@@ -50,10 +50,10 @@ for (const required of [
 
 assert.match(
     implementation,
-    /kFocusCaretMotionDuration\s*=\s*base::Milliseconds\(90\)/);
+    /kFocusCaretMotionDuration\s*=\s*base::Milliseconds\(110\)/);
 assert.match(
     implementation,
-    /gfx::CubicBezier curve\(0\.22, 1\.0, 0\.36, 1\.0\)/);
+    /gfx::CubicBezier curve\(0\.0, 0\.8, 0\.2, 1\.0\)/);
 assert.match(implementation, /RequestAnimationFrame/);
 assert.match(implementation, /curve\.Solve\(linear_progress\)/);
 
@@ -95,8 +95,8 @@ assert.doesNotMatch(
 console.log(JSON.stringify({
   ok: true,
   implementation: 'Blink native paint-only caret glide',
-  durationMs: 90,
-  easing: 'cubic-bezier(.22,1,.36,1)',
+  durationMs: 110,
+  easing: 'cubic-bezier(0,.8,.2,1)',
   geometry: 'selection, IME, accessibility and events use synchronous local_rect_',
   reducedMotion: true,
   passwordPolicy: 'disabled with Blink IsInPasswordField',

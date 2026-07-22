@@ -233,12 +233,14 @@ async function killExactProcessTree(child) {
 }
 
 async function verifyImmediateNativeBubbleReadiness() {
-  // Keep the apex host offline and deterministic. The toolbar must react to
-  // the pending visible URL itself, before any network redirect to www.
-  // Use a fresh profile instead of reusing the just-closed migration profile:
-  // Windows can keep a renderer descendant alive for a moment after
-  // Browser.close, which would otherwise turn this spawn into a short-lived
-  // launcher with no top-level window of its own.
+  // Keep the apex host offline and deterministic. Warm the native browser
+  // window on about:blank first, then dispatch the YouTube navigation through
+  // a second invocation using the same profile. Invoking a Views control while
+  // the cold-start error page is still replacing the toolbar can make Windows
+  // UI Automation block on a stale element and report a successful Invoke
+  // without delivering the callback. A warmed window still verifies the
+  // important product contract: the button must react to the pending visible
+  // URL itself, before any network redirect to www.
   const profileDir = fs.mkdtempSync(
       path.join(os.tmpdir(), 'focusyoutube-button-qa-'));
   const child = spawn(chromePath, [
@@ -250,7 +252,7 @@ async function verifyImmediateNativeBubbleReadiness() {
     '--disable-sync',
     '--host-resolver-rules=MAP youtube.com 127.0.0.1',
     '--window-size=1000,700',
-    'https://youtube.com/',
+    'about:blank',
   ], {
     stdio: 'ignore',
     // UI Automation must inspect the real top-level browser window. Passing
@@ -266,6 +268,10 @@ $browserProcessId = [int]$env:FOCUS_QA_BROWSER_PID
 $timeoutMs = 15000
 $clock = [System.Diagnostics.Stopwatch]::StartNew()
 $windowSeenAt = $null
+$windowReadyAt = $null
+$navigationDispatchedAt = $null
+$navigationLauncherProcessId = $null
+$navigationLauncherError = $null
 $buttonSeenAt = $null
 $buttonInvokedAt = $null
 $buttonName = $null
@@ -288,6 +294,9 @@ $processCondition = New-Object System.Windows.Automation.PropertyCondition(
 $buttonCondition = New-Object System.Windows.Automation.PropertyCondition(
   [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
   [System.Windows.Automation.ControlType]::Button)
+$editCondition = New-Object System.Windows.Automation.PropertyCondition(
+  [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+  [System.Windows.Automation.ControlType]::Edit)
 
 function Get-FocusWindows {
   return [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
@@ -362,6 +371,72 @@ function Collect-FocusYoutubeBubbleState {
   return $focusTabs
 }
 
+# Wait for a stable, interactive omnibox before dispatching the navigation.
+# This separates toolbar readiness from cold-process startup without weakening
+# the bounded pending-URL assertion below.
+while ($clock.ElapsedMilliseconds -lt $timeoutMs -and
+       $null -eq $windowReadyAt) {
+  $windows = Get-FocusWindows
+  $maximumWindowCount = [Math]::Max($maximumWindowCount, $windows.Count)
+  if ($windows.Count -gt 0 -and $null -eq $windowSeenAt) {
+    $windowSeenAt = $clock.ElapsedMilliseconds
+  }
+  foreach ($window in $windows) {
+    try {
+      $edits = $window.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants, $editCondition)
+      foreach ($edit in $edits) {
+        if ($edit.Current.IsEnabled -and -not $edit.Current.IsOffscreen) {
+          $windowReadyAt = $clock.ElapsedMilliseconds
+          break
+        }
+      }
+    } catch {}
+    if ($null -ne $windowReadyAt) { break }
+  }
+  if ($null -eq $windowReadyAt) { Start-Sleep -Milliseconds 20 }
+}
+
+if ($null -eq $windowReadyAt) {
+  [pscustomobject]@{
+    ok = $false
+    phase = 'browser-warmup'
+    processId = $browserProcessId
+    windowSeenMs = $windowSeenAt
+    maximumWindowCount = $maximumWindowCount
+  } | ConvertTo-Json -Compress
+  exit 1
+}
+
+# Give Views one event-loop turn after UIA first observes the omnibox, then ask
+# the already-running profile to navigate. The short-lived launcher owns no
+# browser window; all subsequent UIA reads remain scoped to browserProcessId.
+Start-Sleep -Milliseconds 100
+$navigationDispatchedAt = $clock.ElapsedMilliseconds
+try {
+  $launcher = Start-Process -FilePath $env:FOCUS_QA_CHROME_PATH -ArgumentList @(
+    "--user-data-dir=$($env:FOCUS_QA_PROFILE_DIR)",
+    '--new-tab',
+    'https://youtube.com/'
+  ) -PassThru
+  $navigationLauncherProcessId = $launcher.Id
+} catch {
+  $navigationLauncherError = $_.Exception.Message
+}
+
+if ($null -ne $navigationLauncherError) {
+  [pscustomobject]@{
+    ok = $false
+    phase = 'navigation-dispatch'
+    processId = $browserProcessId
+    windowSeenMs = $windowSeenAt
+    windowReadyMs = $windowReadyAt
+    navigationDispatchedMs = $navigationDispatchedAt
+    navigationLauncherError = $navigationLauncherError
+  } | ConvertTo-Json -Compress
+  exit 1
+}
+
 while ($clock.ElapsedMilliseconds -lt $timeoutMs) {
   $windows = Get-FocusWindows
   $maximumWindowCount = [Math]::Max($maximumWindowCount, $windows.Count)
@@ -433,10 +508,15 @@ while ($clock.ElapsedMilliseconds -lt $timeoutMs) {
         processId = $browserProcessId
         accessibleName = $buttonName
         windowSeenMs = [int64]$windowSeenAt
+        windowReadyMs = [int64]$windowReadyAt
+        navigationDispatchedMs = [int64]$navigationDispatchedAt
+        navigationLauncherProcessId = $navigationLauncherProcessId
         buttonSeenMs = [int64]$buttonSeenAt
         buttonInvokedMs = [int64]$buttonInvokedAt
         bubbleReadyMs = [int64]$readyAt
         deltaFromWindowMs = [int64]($buttonSeenAt - $windowSeenAt)
+        deltaFromNavigationMs = [int64](
+          $buttonSeenAt - $navigationDispatchedAt)
         deltaFromInvokeMs = [int64]($readyAt - $buttonInvokedAt)
         bubbleElementSeen = $bubbleElementSeen
         tabCount = $focusTabNamesSeen.Count
@@ -452,6 +532,10 @@ while ($clock.ElapsedMilliseconds -lt $timeoutMs) {
   ok = $false
   processId = $browserProcessId
   windowSeenMs = $windowSeenAt
+  windowReadyMs = $windowReadyAt
+  navigationDispatchedMs = $navigationDispatchedAt
+  navigationLauncherProcessId = $navigationLauncherProcessId
+  navigationLauncherError = $navigationLauncherError
   buttonSeenMs = $buttonSeenAt
   buttonInvokedMs = $buttonInvokedAt
   maximumWindowCount = $maximumWindowCount
@@ -474,6 +558,8 @@ exit 1
           env: {
             ...process.env,
             FOCUS_QA_BROWSER_PID: String(child.pid),
+            FOCUS_QA_CHROME_PATH: chromePath,
+            FOCUS_QA_PROFILE_DIR: profileDir,
           },
         });
     assert.equal(result.status, 0, [
@@ -486,9 +572,9 @@ exit 1
     const measurement = JSON.parse(line);
     assert.equal(measurement.ok, true);
     assert.match(measurement.accessibleName, /FocusYoutube/);
-    assert.ok(measurement.deltaFromWindowMs <= 1500,
-        `FocusYoutube button appeared ${measurement.deltaFromWindowMs}ms ` +
-        'after the browser window');
+    assert.ok(measurement.deltaFromNavigationMs <= 1500,
+        `FocusYoutube button appeared ${measurement.deltaFromNavigationMs}ms ` +
+        'after the pending YouTube navigation');
     assert.equal(measurement.tabCount, 4,
         'FocusYoutube bubble did not expose all four native sections');
     assert.equal(measurement.masterToggleEnabled, true,

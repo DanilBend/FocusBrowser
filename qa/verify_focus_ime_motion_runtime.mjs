@@ -491,8 +491,8 @@ async function sampleIme(spec) {
       new Set(commitPrefixHashes).size, 1,
       `${spec.name}: stable prefix moved during committed Focus settle`);
   assert.equal(
-      commitFullHashes.at(-1), commitFullHashes.at(-2),
-      `${spec.name}: committed Focus settle did not stabilize`);
+      uniqueCommitFrames, 1,
+      `${spec.name}: committed IME glyph pixels were not immediately stable`);
 
   const finalState = await evaluate(stateExpression);
   assertValue(finalState, finalValue, `${spec.name} final state`);
@@ -501,7 +501,7 @@ async function sampleIme(spec) {
 
   const caseResult = {
     target: spec.name,
-    ok: uniqueCommitFrames >= 3,
+    ok: uniqueCommitFrames === 1,
     provisional: {
       ok: true,
       firstValue,
@@ -517,13 +517,13 @@ async function sampleIme(spec) {
       })),
     },
     commit: {
-      ok: uniqueCommitFrames >= 3,
+      ok: uniqueCommitFrames === 1,
       mechanism: 'Input.insertText while Input.imeSetComposition is active',
       compositionEndObserved: true,
       compositionEndData: compositionEnds[0].data,
       immediateCommitObservedAfterMs: commitImmediateElapsedMs,
       finalValue,
-      uniqueFocusSettleFrames: uniqueCommitFrames,
+      uniqueCommittedGlyphFrames: uniqueCommitFrames,
       stablePrefixFrames: new Set(commitPrefixHashes).size,
       finalStable: commitFullHashes.at(-1) === commitFullHashes.at(-2),
       events: compactEvents(commitEvents),
@@ -538,9 +538,9 @@ async function sampleIme(spec) {
       })),
     },
   };
-  if (uniqueCommitFrames < 3) {
+  if (uniqueCommitFrames !== 1) {
     const error = new Error(
-        `${spec.name}: committed IME text did not produce Focus settle frames; ` +
+        `${spec.name}: committed IME text was not pixel-stable; ` +
         `uniqueFrames=${uniqueCommitFrames}`);
     error.partialResult = caseResult;
     throw error;
@@ -587,8 +587,8 @@ async function samplePlainInsertControl(spec) {
   ];
   const prefixHashes = samples.map(sample => sample.prefix);
   const uniqueFrames = new Set(fullHashes).size;
-  assert.ok(uniqueFrames >= 3,
-            `${spec.name}: ordinary insert control saw only ${uniqueFrames} frames`);
+  assert.equal(uniqueFrames, 1,
+               `${spec.name}: ordinary insert glyph pixels were not stable`);
   assert.equal(new Set(prefixHashes).size, 1,
                `${spec.name}: ordinary insert control moved stable prefix`);
   assert.equal(fullHashes.at(-1), fullHashes.at(-2),
@@ -596,8 +596,8 @@ async function samplePlainInsertControl(spec) {
   return {
     target: spec.name,
     ok: true,
-    purpose: 'proves the same fixture and pixel sampler detect native Focus motion outside IME commit',
-    uniqueFocusSettleFrames: uniqueFrames,
+    purpose: 'verifies ordinary committed glyph pixels are immediately stable',
+    uniqueCommittedGlyphFrames: uniqueFrames,
     finalStable: fullHashes.at(-1) === fullHashes.at(-2),
   };
 }
@@ -773,7 +773,7 @@ try {
       userDataDir: profileDir,
       cleanup: 'Browser.close followed only by exact owned PID-tree fallback',
     },
-    implementation: 'Blink native Focus text motion with provisional IME guard',
+    implementation: 'crisp native glyph paint with provisional IME guard and separate caret glide',
     fixture: 'local HTTP; transparent caret; disposable profile',
     commitSemantics:
         'Input.insertText is accepted only when one matching compositionend proves the active Input.imeSetComposition was committed',
@@ -782,8 +782,8 @@ try {
       'after its first settled frame a provisional update has no later glyph-motion frames',
       'stable prefix and field geometry do not move',
       'commit dispatches compositionend with the committed text',
-      'committed text produces multiple Focus settle frames and a stable final paint',
-      'prefers-reduced-motion suppresses committed IME settle',
+      'committed text is sharp and pixel-stable from its first sampled frame',
+      'prefers-reduced-motion preserves the same crisp committed IME paint',
       'input, textarea and contenteditable finish with the exact committed value',
     ],
     results,

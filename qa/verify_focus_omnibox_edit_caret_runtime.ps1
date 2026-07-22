@@ -613,13 +613,6 @@ function Analyze-EditCapture(
         $centroidDelta = [double]$maximumTransientCentroid - [double]$finalCentroid
     }
 
-    $postCommitHashes = @()
-    if ($firstChangedIndex -ge 0) {
-        $postCommitHashes = @(
-            $motionHashes | Select-Object -Skip $firstChangedIndex |
-                Select-Object -Unique)
-    }
-
     return [PSCustomObject]@{
         Valid = $true
         DifferenceBounds = [PSCustomObject]@{
@@ -635,7 +628,6 @@ function Analyze-EditCapture(
         UniqueMotionFrames = @($motionHashes | Select-Object -Unique).Count
         UniquePrefixFrames = @($prefixHashes | Select-Object -Unique).Count
         UniqueDistancesToFinal = @($distanceToFinal | Select-Object -Unique).Count
-        UniquePostCommitFrames = $postCommitHashes.Count
         FinalStable = (
             $motionHashes[$motionHashes.Count - 1] -eq
             $motionHashes[$motionHashes.Count - 2])
@@ -666,9 +658,6 @@ function Invoke-EditScenario(
     [string]$Expected,
     [scriptblock]$Prepare,
     [scriptblock]$Action,
-    [int]$MinimumUniqueMotionFrames,
-    [bool]$RequireTranslateY,
-    [bool]$RequireStatic,
     [int]$LeftExpansion = 4,
     [int]$MaximumAttempts = 1
 ) {
@@ -699,20 +688,8 @@ function Invoke-EditScenario(
 
             $candidateOk = $valueOk -and $geometryOk -and $metrics.Valid -and
                 ($metrics.UniquePrefixFrames -eq 1) -and $metrics.FinalStable
-            if ($RequireStatic) {
-                $candidateOk = $candidateOk -and
-                    ($metrics.UniquePostCommitFrames -le 2) -and
-                    ([Math]::Abs([double]$metrics.TransientCentroidDeltaY) -lt 0.20)
-            } else {
-                $candidateOk = $candidateOk -and
-                    ($metrics.UniqueMotionFrames -ge $MinimumUniqueMotionFrames)
-                if ($RequireTranslateY) {
-                    $candidateOk = $candidateOk -and
-                        ($metrics.TransientCentroidDeltaY -ge 0.20) -and
-                        ($null -ne $metrics.FirstChangedElapsedMs) -and
-                        ($metrics.FirstChangedElapsedMs -le 160)
-                }
-            }
+            $candidateOk = $candidateOk -and ([Math]::Abs(
+                [double]$metrics.TransientCentroidDeltaY) -lt 0.20)
             if ($candidateOk) {
                 $chosen = $candidate
                 break
@@ -729,22 +706,8 @@ function Invoke-EditScenario(
     Assert-Qa ($chosen.Metrics.UniquePrefixFrames -eq 1) `
         "$Name left the unaffected prefix pixels exactly stable"
     Assert-Qa ($chosen.Metrics.FinalStable) "$Name settled to identical final frames"
-    if ($RequireStatic) {
-        Assert-Qa ($chosen.Metrics.UniquePostCommitFrames -le 2) `
-            "$Name has no multi-frame glyph transition under reduced motion"
-        Assert-Qa ([Math]::Abs([double]$chosen.Metrics.TransientCentroidDeltaY) -lt 0.20) `
-            "$Name has no translated transient glyph under reduced motion"
-    } else {
-        Assert-Qa (
-            $chosen.Metrics.UniqueMotionFrames -ge $MinimumUniqueMotionFrames
-        ) "$Name exposes multiple native edit-motion frames"
-        if ($RequireTranslateY) {
-            Assert-Qa ($chosen.Metrics.FirstChangedElapsedMs -le 160) `
-                "$Name captured the committed glyph before the settle ended"
-            Assert-Qa ($chosen.Metrics.TransientCentroidDeltaY -ge 0.20) `
-                "$Name proves non-fade translateY through foreground centroid movement"
-        }
-    }
+    Assert-Qa ([Math]::Abs([double]$chosen.Metrics.TransientCentroidDeltaY) -lt 0.20) `
+        "$Name keeps committed glyphs at their final baseline"
     return $chosen
 }
 
@@ -975,7 +938,7 @@ try {
     $ordinary = Invoke-EditScenario $normalContext 'ordinary-character' `
         'MotionProbe' 'MotionProbeZ' {} {
             [void][FocusOmniboxNativeMethods]::SendUnicodeBatch('Z')
-        } 3 $true $false 4 3
+        } 4 3
 
     $zwjEmoji = [char]::ConvertFromUtf32(0x1F469) +
         [string]([char]0x200D) + [char]::ConvertFromUtf32(0x1F4BB)
@@ -983,14 +946,14 @@ try {
     $zwjPaste = Invoke-EditScenario $normalContext 'zwj-multigrapheme-batch' `
         'Batch:' ('Batch:' + $zwjPayload) {} {
             [void][FocusOmniboxNativeMethods]::SendUnicodeBatch($zwjPayload)
-        } 3 $false $false 5 2
+        } 5 2
 
     $backspace = Invoke-EditScenario $normalContext 'backspace' `
         'EraseXYZ' 'EraseXZ' {
             [void][FocusOmniboxNativeMethods]::SendVirtualKey([uint16]0x25)
         } {
             [void][FocusOmniboxNativeMethods]::SendVirtualKey([uint16]0x08)
-        } 2 $false $false 14 2
+        } 14 2
 
     $delete = Invoke-EditScenario $normalContext 'delete' `
         'EraseXYZ' 'EraseXZ' {
@@ -998,7 +961,7 @@ try {
             [void][FocusOmniboxNativeMethods]::SendVirtualKey([uint16]0x25)
         } {
             [void][FocusOmniboxNativeMethods]::SendVirtualKey([uint16]0x2e)
-        } 2 $false $false 14 2
+        } 14 2
 
     $caret = Invoke-CaretScenario $normalContext 'caret-glide' $true 3
     $normalPid = $normalContext.Process.Id
@@ -1008,7 +971,7 @@ try {
     $reducedGlyph = Invoke-EditScenario $reducedContext 'reduced-motion-glyph' `
         'ReducedProbe' 'ReducedProbeR' {} {
             [void][FocusOmniboxNativeMethods]::SendUnicodeBatch('R')
-        } 1 $false $true 4 2
+        } 4 2
     $reducedCaret = Invoke-CaretScenario `
         $reducedContext 'reduced-motion-caret' $false 2
     $reducedPid = $reducedContext.Process.Id
@@ -1038,7 +1001,7 @@ try {
             Backspace = 'PASS'
             Delete = 'PASS'
             CaretIntermediateX = 'PASS'
-            GlyphNonFadeTranslateYCentroid = 'PASS'
+            GlyphBaselineStable = 'PASS'
             ReducedMotionGlyph = 'PASS'
             ReducedMotionCaret = 'PASS'
         }
@@ -1047,10 +1010,10 @@ try {
         Backspace = $backspace
         Delete = $delete
         CaretGlide = $caret
-        GlyphNonFade = [PSCustomObject]@{
-            Method = 'foreground vertical centroid in bounded changed-glyph region'
-            ToleratesLateFirstFrame = $true
-            MinimumDeltaY = 0.20
+        GlyphBaseline = [PSCustomObject]@{
+            Method = 'bounded changed region and foreground centroid; crisp pixels use the dedicated glyph runtime'
+            ToleratesLateFirstFrame = $false
+            MaximumDeltaY = 0.20
             ObservedDeltaY = $ordinary.Metrics.TransientCentroidDeltaY
             FirstChangedElapsedMs = $ordinary.Metrics.FirstChangedElapsedMs
         }

@@ -144,12 +144,16 @@ const fixtureHtml = `<!doctype html>
   const closedInput = closedRoot.querySelector('#input');
 
   function prepareInput(element, value = prefix, caret = value.length) {
+    // Glyph stability is measured here; caret travel has its own runtime QA.
+    element.style.caretColor = 'transparent';
     element.value = value;
     element.focus();
     element.setSelectionRange(caret, caret);
   }
 
   function prepareEditable(element, value = prefix, caret = value.length) {
+    // Keep the animated caret out of glyph-only screenshot hashes.
+    element.style.caretColor = 'transparent';
     element.textContent = value;
     element.focus();
     const range = document.createRange();
@@ -303,7 +307,7 @@ async function capture(clip) {
   return digest(result.data);
 }
 
-async function sampleInsertion(spec, expectMotion = true) {
+async function sampleInsertion(spec) {
   await evaluate(spec.prepare);
   await delay(35);
   const geometry = await evaluate(spec.geometry);
@@ -325,19 +329,12 @@ async function sampleInsertion(spec, expectMotion = true) {
   const uniquePrefix = new Set(prefixHashes).size;
   assert.equal(uniquePrefix, 1,
                `${spec.name}: pre-existing glyph pixels moved or faded`);
-  if (expectMotion) {
-    assert.ok(uniqueFull >= 2,
-              `${spec.name}: inserted glyph did not produce transient paint`);
-    assert.equal(fullHashes.at(-1), fullHashes.at(-2),
-                 `${spec.name}: settle did not finish after 220 ms`);
-  } else {
-    assert.equal(uniqueFull, 1,
-                 `${spec.name}: reduced motion did not suppress reveal`);
-  }
+  assert.equal(uniqueFull, 1,
+               `${spec.name}: committed glyph pixels were not immediately stable`);
 
   results.push({
     target: spec.name,
-    expectedMotion: expectMotion,
+    expectedMotion: 'caret-only',
     uniqueFullFrames: uniqueFull,
     stablePrefixFrames: uniquePrefix,
     samples: samples.map(sample => ({
@@ -384,7 +381,6 @@ async function sampleEditMotion({
   expectedValue,
   expectedCaret,
   requestedTimes,
-  minimumTransientFrames = 3,
 }) {
   await evaluate(prepare);
   await delay(35);
@@ -400,10 +396,8 @@ async function sampleEditMotion({
       immediate, expectedValue, expectedCaret, `${name} immediate state`);
   assertStableRect(immediate.rect, before.rect, `${name} immediate state`);
 
-  // Capture several full-field frames back-to-back before the prefix crop and
-  // scheduled sampling add latency. The settle curve is intentionally fast;
-  // these rapid frames make the transient-paint assertion deterministic even
-  // on a busy machine while still checking value/caret after every capture.
+  // Capture several glyph-only frames back-to-back before scheduled sampling
+  // adds latency. Any transient opacity, transform, or blur must change a hash.
   const rapidSamples = [];
   for (let index = 0; index < 3; ++index) {
     const full = await capture(clip.full);
@@ -451,25 +445,9 @@ async function sampleEditMotion({
   assert.equal(
       uniquePrefix, 1,
       `${name}: stable prefix moved, faded, or was repainted differently`);
-  if (uniqueFull < minimumTransientFrames) {
-    console.error(JSON.stringify({
-      diagnostic: 'insufficient transient frames',
-      name,
-      minimumTransientFrames,
-      uniqueFullFrames: uniqueFull,
-      samples: samples.map(sample => ({
-        elapsedMs: sample.elapsedMs,
-        full: sample.full.slice(0, 12),
-        prefix: sample.prefix.slice(0, 12),
-      })),
-    }, null, 2));
-  }
-  assert.ok(
-      uniqueFull >= minimumTransientFrames,
-      `${name}: expected multiple transient paint frames, got ${uniqueFull}`);
   assert.equal(
-      fullHashes.at(-1), fullHashes.at(-2),
-      `${name}: final paint did not stabilize`);
+      uniqueFull, 1,
+      `${name}: committed glyph pixels moved after the edit completed`);
 
   const finalState = await evaluate(state);
   assertTextState(finalState, expectedValue, expectedCaret, `${name} final state`);
@@ -478,7 +456,7 @@ async function sampleEditMotion({
   results.push({
     target: name,
     operation,
-    expectedMotion: true,
+    expectedMotion: 'caret-only',
     immediateCommitObservedAfterMs: immediateElapsedMs,
     initialValue,
     expectedValue,
@@ -664,22 +642,22 @@ try {
     name: 'prefers-reduced-motion',
     prepare: "qa.prepareInput(document.querySelector('#input'))",
     geometry: "qa.geometry(document.querySelector('#input'))",
-  }, false);
+  });
 
   const report = {
     ok: true,
     executable: chromePath,
-    implementation: 'Blink native range paint',
+    implementation: 'crisp native glyph paint with separate caret glide',
     fixture: 'local HTTP only; disposable profile',
     invariants: [
-      'inserted glyph produces transient paint frames',
-      'multi-grapheme paste payload produces multiple transient paint frames',
+      'inserted glyph is sharp and pixel-stable from the first sampled frame',
+      'multi-grapheme paste payload is sharp and pixel-stable after commit',
       'Backspace and Delete commit value and caret before animation sampling',
       'Backspace and Delete remove one complete Unicode grapheme',
       'pre-existing prefix stays pixel-stable',
-      'field geometry stays stable throughout paint-only motion',
+      'field geometry and neighboring glyph pixels stay stable during caret motion',
       'no DOM overlay is injected',
-      'prefers-reduced-motion suppresses the reveal',
+      'prefers-reduced-motion keeps the same crisp committed glyph paint',
     ],
     results,
   };

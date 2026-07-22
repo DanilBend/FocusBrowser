@@ -5,8 +5,6 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_MARKERS_FOCUS_TEXT_MOTION_MARKER_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_MARKERS_FOCUS_TEXT_MOTION_MARKER_H_
 
-#include <optional>
-
 #include "base/time/time.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/editing/markers/document_marker.h"
@@ -33,21 +31,16 @@ class CORE_EXPORT FocusTextMotionMarker final : public DocumentMarker {
 
   MarkerType GetType() const final;
 
-  float Opacity() const { return opacity_; }
-  float TranslationInline() const { return translation_inline_; }
-  float TranslationY() const { return translation_y_; }
+  // Word-like typing keeps committed glyph ink at its final coordinates and
+  // full opacity. Motion belongs exclusively to the caret.
+  float Opacity() const { return 1.0f; }
+  float TranslationInline() const { return 0.0f; }
+  float TranslationY() const { return 0.0f; }
 
   // Advances this marker using the document animation-frame clock. Returns
   // true once the reveal is complete.
   bool UpdateOpacity(base::TimeTicks tick);
 
- private:
-  const Kind kind_;
-  const base::TimeDelta start_delay_;
-  std::optional<base::TimeTicks> animation_start_;
-  float opacity_ = 0.12f;
-  float translation_inline_ = 0.0f;
-  float translation_y_ = 3.0f;
 };
 
 template <>

@@ -228,15 +228,10 @@ assert.doesNotMatch(
 const motionRangesPatch = read(
     repoRoot,
     'focus-chromium/patches/focus/ui/omnibox-typing-motion-ranges.patch');
-assert.match(motionRangesPatch, /std::vector<FocusTypingReveal>/);
-assert.match(motionRangesPatch, /focus_typing_repaint_timer_/);
-assert.match(motionRangesPatch, /kFocusTypingInitialTranslationY/);
-assert.match(motionRangesPatch, /kFocusDeletionInitialTranslationInline/);
-assert.match(motionRangesPatch, /FocusTypingMotionKind::kDeletionSettle/);
-assert.match(
+assert.match(motionRangesPatch, /ShouldAnimateCaretMotion\(\) const/);
+assert.doesNotMatch(
     motionRangesPatch,
-    /transform\.Translate\(paint\.translation_x, paint\.translation_y\)/);
-assert.doesNotMatch(motionRangesPatch, /^\+.*(?:blur\(|scale\()/m);
+    /FocusTypingReveal|focus_typing_repaint_timer_|SaveLayerAlpha|transform\.Translate|kFocusTypingInitialOpacity|kFocusDeletionInitialTranslationInline|blur\(|scale\(/);
 
 const locationBarView = read(
     activeRoot,
@@ -263,7 +258,8 @@ assert.match(
     /OnOmniboxHovered\(bool is_hovering\)[\s\S]*!ShouldAnimateFocusMotion\(\)[\s\S]*hover_animation_\.Reset\(should_show_hover \? 1\.0 : 0\.0\)/);
 assert.match(
     locationBarView,
-    /OnFocusMotionPreferenceChanged\(\)[\s\S]*CancelFocusTypingReveals\(\)[\s\S]*hover_animation_\.Reset/);
+    /OnFocusMotionPreferenceChanged\(\)[\s\S]*hover_animation_\.Reset/);
+assert.doesNotMatch(locationBarView, /CancelFocusTypingReveals/);
 
 const locationBarHeader = read(
     activeRoot,
@@ -274,52 +270,18 @@ assert.match(locationBarHeader, /bool ShouldAnimateFocusMotion\(\) const/);
 const omniboxView = read(
     activeRoot,
     'chrome/browser/ui/views/omnibox/omnibox_view_views.cc');
-assert.match(
-    omniboxView,
-    /focus_typing_text_before_change_ = state_before_change_\.text/);
-assert.match(
-    omniboxView,
-    /!ime_composing_before_change_ && is_ime_composing[\s\S]*focus_typing_text_before_composition_/);
-assert.match(
-    omniboxView,
-    /ime_composing_before_change_ && !is_ime_composing[\s\S]*focus_typing_baseline = composition_baseline[\s\S]*new_state\.text != focus_typing_baseline/);
-assert.match(
-    omniboxView,
-    /focus_typing_baseline = focus_typing_text_before_change_[\s\S]*new_state\.text != focus_typing_baseline/);
-assert.match(
-    omniboxView,
-    /if \(committed_text_differs && !is_ime_composing &&\s*location_bar_view_\)/);
+assert.match(omniboxView, /ShouldAnimateCaretMotion\(\) const/);
+assert.match(omniboxView, /Textfield::OnPaint\(canvas\)/);
 assert.doesNotMatch(
     omniboxView,
-    /something_changed && committed_text_differs/,
-    'ordinary physical typing must not be gated on the model UI return value');
-assert.match(
-    omniboxView,
-    /kFocusTypingRevealDuration\s*=\s*\n?\s*base::Milliseconds\(180\)/);
-assert.match(omniboxView, /UpdateFocusTypingRevealsForEdit\(/);
-assert.match(omniboxView, /AddFocusTypingReveal\(gfx::Range\(prefix, new_suffix\)\)/);
-assert.match(omniboxView, /ExpandRangeToGraphemeBoundary\(inserted_range\)/);
-assert.match(omniboxView, /focus_typing_reveals_/);
-assert.match(omniboxView, /reveal\.started_at/);
-assert.match(omniboxView, /suffix_shift/);
-assert.match(omniboxView, /focus_typing_repaint_timer_\.Start\(/);
-assert.match(omniboxView, /kFocusTypingInitialOpacity = 0\.12/);
-assert.match(omniboxView, /kFocusTypingInitialTranslationY = 3\.0f/);
-assert.match(omniboxView, /CubicBezier curve\(0\.22, 1\.0, 0\.36, 1\.0\)/);
-assert.match(
-    omniboxView,
-    /SK_AlphaTRANSPARENT[\s\S]*Textfield::OnPaint\(canvas\);[\s\S]*EmphasizeURLComponents\(\)[\s\S]*GetSubstringBounds\(paint\.range\)[\s\S]*ClipRect\(glyph_bounds\)[\s\S]*transform\.Translate\(paint\.translation_x, paint\.translation_y\)/);
-assert.match(omniboxView, /FocusTypingMotionKind::kDeletionSettle/);
-assert.doesNotMatch(omniboxView, /blur\(|\.Scale\(|typing_animation_/);
+    /FocusTypingReveal|focus_typing_reveals_|focus_typing_repaint_timer_|SaveLayerAlpha|SK_AlphaTRANSPARENT|transform\.Translate|kFocusTypingInitialOpacity|FocusTypingPaint|blur\(|\.Scale\(|typing_animation_/);
 
 const omniboxViewHeader = read(
     activeRoot,
     'chrome/browser/ui/views/omnibox/omnibox_view_views.h');
-assert.match(omniboxViewHeader, /focus_typing_text_before_change_/);
-assert.match(omniboxViewHeader, /focus_typing_text_before_composition_/);
-assert.match(omniboxViewHeader, /has_focus_typing_composition_baseline_/);
-assert.match(omniboxViewHeader, /struct FocusTypingReveal/);
-assert.match(omniboxViewHeader, /std::vector<FocusTypingReveal> focus_typing_reveals_/);
-assert.match(omniboxViewHeader, /base::RepeatingTimer focus_typing_repaint_timer_/);
+assert.match(omniboxViewHeader, /ShouldAnimateCaretMotion\(\) const override/);
+assert.doesNotMatch(
+    omniboxViewHeader,
+    /FocusTypingReveal|focus_typing_reveals_|focus_typing_repaint_timer_|CancelFocusTypingReveals/);
 
 console.log('Focus motion contract verified.');
