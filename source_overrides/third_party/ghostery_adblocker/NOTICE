@@ -1,0 +1,21 @@
+Ghostery Adblocker
+==================
+
+This directory contains a generated JavaScript bundle of
+@ghostery/adblocker 2.18.1.
+
+Copyright (c) 2017-present Ghostery GmbH. All rights reserved.
+Licensed under the Mozilla Public License, version 2.0.
+
+Exact upstream source:
+  https://github.com/ghostery/adblocker/tree/67ef23276e93ebc5dd4621cc9df2b09ad9f490d7
+
+The dependency graph, resolved package URLs and integrity hashes are recorded
+in package-lock.json. Each dependency retains its own copyright and license.
+The generated bundle preserves upstream legal comments; DEPENDENCIES.md lists
+the packages and licenses shipped in the bundle.
+
+Focus Browser's adapter is maintained in src/focus_ghostery_adblocker.js. The
+FocusBlock interface includes a technical attribution footer identifying
+Ghostery 2.18.1. The Ghostery extension product, user interface and branding
+assets are not included.

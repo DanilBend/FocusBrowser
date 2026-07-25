@@ -54,13 +54,15 @@ constexpr int kBubbleWidth = 420;
 constexpr int kCardRadius = 12;
 constexpr int kSectionSpacing = 10;
 constexpr int kRowSpacing = 6;
-constexpr int kFocusYoutubeSchemaVersion = 3;
+constexpr int kFocusYoutubeSchemaVersion = 4;
 constexpr int kSettingsLoadMaxAttempts = 40;
 constexpr base::TimeDelta kSettingsLoadRetryDelay = base::Milliseconds(50);
 
 struct FeatureSpec {
   size_t group;
   std::string_view key;
+  std::string_view companion_key_1;
+  std::string_view companion_key_2;
   std::u16string_view english;
   std::u16string_view russian;
 };
@@ -70,59 +72,112 @@ struct GroupSpec {
   std::u16string_view russian;
 };
 
+constexpr FeatureSpec Feature(size_t group,
+                              std::string_view key,
+                              std::u16string_view english,
+                              std::u16string_view russian) {
+  return {group, key, std::string_view(), std::string_view(), english,
+          russian};
+}
+
+constexpr FeatureSpec CompositeFeature(size_t group,
+                                       std::string_view key,
+                                       std::string_view companion_key_1,
+                                       std::string_view companion_key_2,
+                                       std::u16string_view english,
+                                       std::u16string_view russian) {
+  return {group, key, companion_key_1, companion_key_2, english, russian};
+}
+
 constexpr std::array<GroupSpec, 4> kGroups = {{
     {u"Feed", u"Лента"},
     {u"Player", u"Плеер"},
     {u"Interface", u"Интерфейс"},
-    {u"Search", u"Поиск"},
+    {u"Navigation", u"Навигация"},
 }};
 
-// The native surface intentionally exposes the twenty controls that matter
-// most in everyday use. The keys are the existing FocusYoutube schema keys, so
-// the content-script engine and chrome.storage.local remain the source of
-// truth and require no forked settings format.
-constexpr std::array<FeatureSpec, 20> kFeatures = {{
-    {0, "remove_homepage", u"Hide home recommendations",
-     u"Скрывать рекомендации на главной"},
-    {0, "remove_sidebar", u"Hide video recommendations",
-     u"Скрывать рекомендации рядом с видео"},
-    {0, "remove_end_of_video", u"Hide end-screen suggestions",
-     u"Скрывать рекомендации в конце видео"},
-    {0, "remove_all_shorts", u"Hide Shorts everywhere", u"Скрывать Shorts"},
-    {0, "disable_play_on_hover", u"Disable hover previews",
-     u"Отключать превью при наведении"},
+// These are the controls exposed by the original Unhook 1.6.9 surface. The
+// implementation uses FocusYoutube's existing compatible storage schema; the
+// two compound controls write all of their related keys atomically.
+constexpr std::array<FeatureSpec, 25> kFeatures = {{
+    Feature(0, "remove_homepage", u"Hide homepage feed",
+            u"Скрывать ленту на главной"),
+    Feature(0, "remove_entire_sidebar", u"Hide video sidebar",
+            u"Скрывать боковую колонку видео"),
+    Feature(0, "remove_sidebar", u"Hide recommended videos",
+            u"Скрывать рекомендованные видео"),
+    Feature(0, "remove_chat", u"Hide live chat",
+            u"Скрывать чат трансляций"),
+    Feature(0, "remove_playlist_panel", u"Hide playlist",
+            u"Скрывать плейлист"),
+    Feature(0, "remove_all_shorts", u"Hide YouTube Shorts",
+            u"Скрывать YouTube Shorts"),
 
-    {1, "disable_autoplay", u"Disable autoplay",
-     u"Отключать автовоспроизведение"},
-    {1, "auto_skip_ads", u"Skip and speed up ads",
-     u"Пропускать и ускорять рекламу"},
-    {1, "remove_info_cards", u"Hide info cards",
-     u"Скрывать информационные карточки"},
-    {1, "remove_overlay_suggestions", u"Hide overlay suggestions",
-     u"Скрывать всплывающие подсказки"},
-    {1, "disable_ambient_mode", u"Disable ambient mode",
-     u"Отключать фоновую подсветку"},
+    Feature(1, "remove_end_of_video", u"Hide end-screen videowall",
+            u"Скрывать видеостену в конце видео"),
+    Feature(1, "remove_info_cards", u"Hide end-screen cards",
+            u"Скрывать карточки в конце видео"),
+    Feature(1, "remove_mixes", u"Hide Mix radio playlists",
+            u"Скрывать миксы и радиоплейлисты"),
+    Feature(1, "remove_video_metadata", u"Hide video info",
+            u"Скрывать информацию о видео"),
+    Feature(1, "disable_autoplay", u"Disable autoplay",
+            u"Отключать автовоспроизведение"),
+    Feature(1, "disable_annotations", u"Disable annotations",
+            u"Отключать аннотации"),
 
-    {2, "remove_comments", u"Hide comments", u"Скрывать комментарии"},
-    {2, "remove_left_nav_bar", u"Hide left navigation",
-     u"Скрывать левую панель"},
-    {2, "remove_notif_bell", u"Hide notifications", u"Скрывать уведомления"},
-    {2, "remove_menu_buttons", u"Hide extra action buttons",
-     u"Скрывать лишние кнопки действий"},
-    {2, "grayscale_mode", u"Use grayscale YouTube",
-     u"Делать YouTube чёрно-белым"},
+    Feature(2, "remove_comments", u"Hide comments", u"Скрывать комментарии"),
+    Feature(2, "remove_comment_profiles", u"Hide profile photos",
+            u"Скрывать фотографии профилей"),
+    Feature(2, "remove_merch_shelves", u"Hide merch, tickets and offers",
+            u"Скрывать товары, билеты и предложения"),
+    Feature(2, "remove_menu_buttons", u"Hide video buttons bar",
+            u"Скрывать панель кнопок видео"),
+    Feature(2, "remove_channel_owner", u"Hide channel",
+            u"Скрывать блок канала"),
+    Feature(2, "remove_vid_description", u"Hide video description",
+            u"Скрывать описание видео"),
+    Feature(2, "remove_top_header", u"Hide top header",
+            u"Скрывать верхнюю панель YouTube"),
 
-    {3, "remove_search_suggestions", u"Hide search suggestions",
-     u"Скрывать подсказки поиска"},
-    {3, "remove_search_promoted", u"Hide promoted videos",
-     u"Скрывать продвигаемые видео"},
-    {3, "remove_shorts_results", u"Hide Shorts in search",
-     u"Скрывать Shorts в поиске"},
-    {3, "disable_channel_autoplay", u"Disable channel trailers",
-     u"Не запускать трейлеры каналов"},
-    {3, "remove_channel_for_you", u"Hide “For you” sections",
-     u"Скрывать разделы «Для вас»"},
+    Feature(3, "remove_notif_bell", u"Hide notification bell",
+            u"Скрывать значок уведомлений"),
+    Feature(3, "remove_extra_results", u"Hide irrelevant search results",
+            u"Скрывать нерелевантные результаты поиска"),
+    CompositeFeature(3, "remove_trending_page", "remove_explore_link",
+                     "remove_explore_section", u"Hide Explore and Trending",
+                     u"Скрывать «Навигатор» и тренды"),
+    Feature(3, "remove_more_section", u"Hide More from YouTube",
+            u"Скрывать раздел «Другие возможности YouTube»"),
+    CompositeFeature(3, "remove_subscriptions_page",
+                     "remove_subscriptions_link", "remove_sub_section",
+                     u"Hide subscriptions", u"Скрывать подписки"),
+    Feature(3, "redirect_to_subs", u"Redirect home to subscriptions",
+            u"Открывать подписки вместо главной"),
 }};
+
+std::array<std::string_view, 3> StorageKeys(const FeatureSpec& feature) {
+  return {feature.key, feature.companion_key_1, feature.companion_key_2};
+}
+
+const FeatureSpec* FindFeature(std::string_view key) {
+  for (const FeatureSpec& feature : kFeatures) {
+    if (feature.key == key) {
+      return &feature;
+    }
+  }
+  return nullptr;
+}
+
+bool IsFeatureEnabled(const base::DictValue& values,
+                      const FeatureSpec& feature) {
+  for (std::string_view key : StorageKeys(feature)) {
+    if (!key.empty() && !values.FindBool(key).value_or(false)) {
+      return false;
+    }
+  }
+  return true;
+}
 
 bool UseRussianFocusUi() {
   const std::string locale =
@@ -132,12 +187,7 @@ bool UseRussianFocusUi() {
 }
 
 bool IsFocusYoutubeUrl(const GURL& url) {
-  if (!url.SchemeIs(url::kHttpsScheme)) {
-    return false;
-  }
-  const std::string_view host = url.host();
-  return host == "youtube.com" || host == "www.youtube.com" ||
-         host == "m.youtube.com";
+  return url.SchemeIs(url::kHttpsScheme) && url.DomainIs("youtube.com");
 }
 
 std::u16string FocusText(std::u16string_view english,
@@ -167,10 +217,14 @@ scoped_refptr<const extensions::Extension> GetFocusYoutubeExtension(
 
 std::vector<std::string> FeatureKeys() {
   std::vector<std::string> keys;
-  keys.reserve(kFeatures.size() + 1);
+  keys.reserve(kFeatures.size() + 7);
   keys.emplace_back("global_enable");
   for (const FeatureSpec& feature : kFeatures) {
-    keys.emplace_back(feature.key);
+    for (std::string_view key : StorageKeys(feature)) {
+      if (!key.empty()) {
+        keys.emplace_back(key);
+      }
+    }
   }
   return keys;
 }
@@ -184,7 +238,11 @@ base::DictValue ResetValues() {
   values.Set("only_show_playlists", false);
   values.Set("focus_youtube_schema_version", kFocusYoutubeSchemaVersion);
   for (const FeatureSpec& feature : kFeatures) {
-    values.Set(feature.key, false);
+    for (std::string_view key : StorageKeys(feature)) {
+      if (!key.empty()) {
+        values.Set(key, false);
+      }
+    }
   }
   return values;
 }
@@ -462,7 +520,8 @@ void FocusYoutubeBubbleView::OnSettingsLoaded(bool success,
   global_enabled_ = values.FindBool("global_enable").value_or(true);
   master_toggle_->SetIsOn(global_enabled_);
   for (auto& [key, toggle] : feature_toggles_) {
-    const bool enabled = values.FindBool(key).value_or(false);
+    const FeatureSpec* feature = FindFeature(key);
+    const bool enabled = feature && IsFeatureEnabled(values, *feature);
     feature_state_[key] = enabled;
     toggle->SetIsOn(enabled);
   }
@@ -519,12 +578,17 @@ void FocusYoutubeBubbleView::OnFeatureTogglePressed(std::string key,
   storage_error_ = false;
   SetControlsEnabled(false);
 
+  const FeatureSpec* feature = FindFeature(key);
+  if (!feature) {
+    toggle_it->second->SetIsOn(previous_value);
+    return;
+  }
+
   base::DictValue values;
-  values.Set(key, requested_value);
-  if (key == "remove_left_nav_bar" && requested_value) {
-    // Mirrors the existing schema effect: a fully hidden navigation panel and
-    // the legacy playlists-only panel cannot be enabled at the same time.
-    values.Set("only_show_playlists", false);
+  for (std::string_view storage_key : StorageKeys(*feature)) {
+    if (!storage_key.empty()) {
+      values.Set(storage_key, requested_value);
+    }
   }
   auto* storage = extensions::StorageFrontend::Get(browser_->profile());
   storage->Set(

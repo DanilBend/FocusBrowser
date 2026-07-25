@@ -1793,6 +1793,11 @@
     "includes": [10095],
   },
 
+  "third_party/ghostery_adblocker/ghostery_adblocker_resources.grd": {
+    "META": {"sizes": {"includes": [5]}},
+    "includes": [10098],
+  },
+
   "third_party/search_engines_data/resources_internal/search_engines_scaled_resources.grd": {
     "structures": [10100],
   },

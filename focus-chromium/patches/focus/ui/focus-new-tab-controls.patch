@@ -1,0 +1,47 @@
+--- a/chrome/browser/resources/new_tab_page/app.html
++++ b/chrome/browser/resources/new_tab_page/app.html
+@@ -26,4 +26,12 @@
+       </section>
+     ` : ''}
+   </main>
++  ${this.lazyRender_ && !this.isFooterVisible_ && !this.isAndroid_ ? html`
++    <ntp-customize-buttons id="customizeButtons"
++        ?show-background-image="${this.showBackgroundImage_}"
++        ?show-customize="${this.showCustomize_}"
++        @customize-click="${this.onCustomizeClick_}"
++        show-shadow>
++    </ntp-customize-buttons>
++  ` : ''}
+ </div>
+--- a/chrome/browser/resources/new_tab_page/app.css
++++ b/chrome/browser/resources/new_tab_page/app.css
+@@ -239,6 +239,15 @@ ntp-middle-slot-promo:not([hidden]) ~ #modules {
+   margin-top: 16px;
+ }
+ 
++#customizeButtons {
++  bottom: 16px;
++  inset-inline-end: 16px;
++  position: fixed;
++  z-index: 3;
++}
++
++/* Keep the Focus NTP clean: the shared component is reduced to one localized
++   pencil icon by clean-new-tab-page.patch. */
+ #backgroundImageAttribution {
+   border-radius: 8px;
+   bottom: 16px;
+@@ -294,6 +303,13 @@ ntp-middle-slot-promo:not([hidden]) ~ #modules {
+   font-size: 0.75rem;
+ }
+ 
++@media (max-width: 520px) {
++  #customizeButtons {
++    bottom: 12px;
++    inset-inline-end: 12px;
++  }
++}
++
+ svg {
+   position: fixed;
+ }

@@ -10,11 +10,23 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const activeRoot = path.join(repoRoot, 'build', 'src', 'third_party', 'focus_youtube');
+const activeSourceRoot = process.env.FOCUS_ACTIVE_SOURCE_ROOT ?
+  path.resolve(process.env.FOCUS_ACTIVE_SOURCE_ROOT) :
+  path.join(repoRoot, 'build', 'src');
+const activeRoot = path.join(
+    activeSourceRoot, 'third_party', 'focus_youtube');
 const overrideRoot = path.join(repoRoot, 'source_overrides', 'third_party', 'focus_youtube');
 
 const read = (root, relative) =>
   fs.readFileSync(path.join(root, relative), 'utf8');
+
+function readMirroredFile(file) {
+  const bytes = fs.readFileSync(file);
+  if (!/\.(?:cc|css|gn|h|html|js|json|py|svg|txt|chromium)$/i.test(file)) {
+    return bytes;
+  }
+  return Buffer.from(bytes.toString('utf8').replace(/\r\n?/g, '\n'), 'utf8');
+}
 
 function walk(root) {
   return fs.readdirSync(root, { withFileTypes: true }).flatMap(entry => {
@@ -29,8 +41,8 @@ for (const overrideFile of overrideFiles) {
   const activeFile = path.join(activeRoot, relative);
   assert.ok(fs.existsSync(activeFile), 'Нет active-файла: ' + relative);
   assert.deepEqual(
-      fs.readFileSync(overrideFile),
-      fs.readFileSync(activeFile),
+      readMirroredFile(overrideFile),
+      readMirroredFile(activeFile),
       'Active и source_overrides различаются: ' + relative);
 }
 
@@ -49,8 +61,7 @@ assert.equal(manifest.version, '1.6.9.1');
 assert.deepEqual(manifest.permissions, ['storage', 'alarms']);
 assert.deepEqual(manifest.host_permissions, [
   'https://youtube.com/*',
-  'https://www.youtube.com/*',
-  'https://m.youtube.com/*',
+  'https://*.youtube.com/*',
 ]);
 assert.equal(manifest.options_ui, undefined,
              'Отдельная страница настроек не должна быть доступна');
@@ -58,8 +69,7 @@ assert.equal(manifest.background.service_worker, 'background/events.js');
 assert.equal(manifest.web_accessible_resources, undefined);
 assert.deepEqual(manifest.content_scripts[0].matches, [
   'https://youtube.com/*',
-  'https://www.youtube.com/*',
-  'https://m.youtube.com/*',
+  'https://*.youtube.com/*',
 ]);
 assert.deepEqual(manifest.content_scripts[0].js, [
   'shared/utils.js',
@@ -169,32 +179,41 @@ const schema = schemaContext.FocusYoutubeSettings;
 const ids = [...schema.behaviorIds];
 const expectedNativeFeatureKeys = [
   'remove_homepage',
+  'remove_entire_sidebar',
   'remove_sidebar',
+  'remove_chat',
+  'remove_playlist_panel',
   'remove_end_of_video',
-  'remove_all_shorts',
-  'disable_play_on_hover',
-  'disable_autoplay',
-  'auto_skip_ads',
   'remove_info_cards',
-  'remove_overlay_suggestions',
-  'disable_ambient_mode',
   'remove_comments',
-  'remove_left_nav_bar',
-  'remove_notif_bell',
+  'remove_comment_profiles',
+  'remove_mixes',
+  'remove_merch_shelves',
+  'remove_video_metadata',
   'remove_menu_buttons',
-  'grayscale_mode',
-  'remove_search_suggestions',
-  'remove_search_promoted',
-  'remove_shorts_results',
-  'disable_channel_autoplay',
-  'remove_channel_for_you',
+  'remove_channel_owner',
+  'remove_vid_description',
+  'remove_top_header',
+  'remove_notif_bell',
+  'remove_extra_results',
+  'remove_explore_link',
+  'remove_explore_section',
+  'remove_trending_page',
+  'remove_more_section',
+  'remove_all_shorts',
+  'remove_subscriptions_link',
+  'remove_sub_section',
+  'remove_subscriptions_page',
+  'redirect_to_subs',
+  'disable_autoplay',
+  'disable_annotations',
 ];
 assert.equal(ids.length, 93);
 assert.equal(new Set(ids).size, 93);
 assert.equal(Object.keys(schema.behaviorDefaults).length, 93);
 assert.ok(Object.values(schema.behaviorDefaults).every(value => value === false));
 assert.deepEqual([...schema.nativeBehaviorIds], expectedNativeFeatureKeys);
-assert.equal(new Set(schema.nativeBehaviorIds).size, 20);
+assert.equal(new Set(schema.nativeBehaviorIds).size, 29);
 assert.ok(schema.nativeBehaviorIds.every(id => ids.includes(id)));
 assert.equal(schema.defaults.global_enable, true);
 assert.equal(schema.defaults.dark_mode, true);
@@ -202,7 +221,7 @@ assert.equal(schema.defaults.schedule, false);
 assert.equal(schema.defaults.scheduleTimes, '09:00-17:00');
 assert.equal(schema.defaults.password, false);
 assert.equal(schema.defaults.hashed_password, '');
-assert.equal(schema.defaults.focus_youtube_schema_version, 3);
+assert.equal(schema.defaults.focus_youtube_schema_version, 4);
 assert.ok(ids.every(id => schema.idToShortId[id] !== undefined),
           'Для экспорта отсутствует short ID');
 assert.equal(ids.filter(id => id.startsWith('hide_')).length, 0);
@@ -236,7 +255,7 @@ for (const targetIds of Object.values(schema.legacyMappings)) {
     assert.equal(
         migrated.settings[targetId],
         expectedNativeFeatureKeys.includes(targetId),
-        'Schema v3 неверно обработала legacy key ' + targetId);
+        'Schema v4 неверно обработала legacy key ' + targetId);
   }
 }
 assert.equal(migrated.settings.schedule, false);
@@ -244,7 +263,7 @@ assert.equal(migrated.settings.nextTimedChange, false);
 assert.equal(migrated.settings.nextTimedValue, true);
 assert.equal(migrated.settings.password, false);
 assert.equal(migrated.settings.hashed_password, '');
-assert.equal(migrated.settings.focus_youtube_schema_version, 3);
+assert.equal(migrated.settings.focus_youtube_schema_version, 4);
 assert.ok(migrated.removeKeys.includes('yt_on'));
 assert.ok(migrated.removeKeys.includes('popup_settings'));
 for (const legacyId of Object.keys(schema.legacyMappings)) {
@@ -277,18 +296,18 @@ const nativeSurfaceUpgrade = schema.createMigration(v2Settings);
 assert.equal(nativeSurfaceUpgrade.settings.global_enable, false);
 for (const [index, id] of expectedNativeFeatureKeys.entries()) {
   assert.equal(nativeSurfaceUpgrade.settings[id], index % 2 === 0,
-               'Schema v3 не сохранила native key ' + id);
+               'Schema v4 не сохранила native key ' + id);
 }
 for (const id of ids.filter(id => !expectedNativeFeatureKeys.includes(id))) {
   assert.equal(nativeSurfaceUpgrade.settings[id], false,
-               'Schema v3 оставила скрытый key ' + id);
+               'Schema v4 оставила скрытый key ' + id);
 }
 assert.equal(nativeSurfaceUpgrade.settings.schedule, false);
 assert.equal(nativeSurfaceUpgrade.settings.nextTimedChange, false);
 assert.equal(nativeSurfaceUpgrade.settings.nextTimedValue, true);
 assert.equal(nativeSurfaceUpgrade.settings.password, false);
 assert.equal(nativeSurfaceUpgrade.settings.hashed_password, '');
-assert.equal(nativeSurfaceUpgrade.settings.focus_youtube_schema_version, 3);
+assert.equal(nativeSurfaceUpgrade.settings.focus_youtube_schema_version, 4);
 
 const currentSchema = schema.createMigration({ ...schema.defaults });
 assert.equal(Object.keys(currentSchema.patch).length, 0,
@@ -780,7 +799,7 @@ assert.equal(
     false,
     'Stale T1 не должен публиковать restore-write');
 
-const browserRoot = path.join(repoRoot, 'build', 'src');
+const browserRoot = activeSourceRoot;
 const nativeBubbleSource = fs.readFileSync(path.join(
     browserRoot, 'chrome/browser/ui/views/toolbar/focus_youtube_bubble_view.cc'),
     'utf8');
@@ -789,21 +808,81 @@ const nativeBubbleHeader = fs.readFileSync(path.join(
     'utf8');
 const toolbarSource = fs.readFileSync(path.join(
     browserRoot, 'chrome/browser/ui/views/toolbar/toolbar_view.cc'), 'utf8');
+const toolbarHeader = fs.readFileSync(path.join(
+    browserRoot, 'chrome/browser/ui/views/toolbar/toolbar_view.h'), 'utf8');
+const locationBarSource = fs.readFileSync(path.join(
+    browserRoot, 'chrome/browser/ui/views/location_bar/location_bar_view.cc'),
+    'utf8');
+const locationBarHeader = fs.readFileSync(path.join(
+    browserRoot, 'chrome/browser/ui/views/location_bar/location_bar_view.h'),
+    'utf8');
+const focusYoutubeIcon = fs.readFileSync(path.join(
+    browserRoot, 'components/vector_icons/focus_youtube_off.icon'), 'utf8');
 
 const nativeFeatureBlock = nativeBubbleSource.match(
-    /constexpr std::array<FeatureSpec,\s*20>\s+kFeatures\s*=\s*\{\{([\s\S]*?)\n\}\};/);
-assert.ok(nativeFeatureBlock, 'Не найден нативный список из 20 функций');
+    /constexpr std::array<FeatureSpec,\s*25>\s+kFeatures\s*=\s*\{\{([\s\S]*?)\n\}\};/);
+assert.ok(nativeFeatureBlock, 'Не найден нативный список из 25 функций');
 const nativeFeatureEntries = [...nativeFeatureBlock[1].matchAll(
-    /\{\s*(\d+),\s*"([a-z][a-z0-9_]+)"/g)].map(match => ({
-      group: Number(match[1]),
-      key: match[2],
+    /\b(Feature|CompositeFeature)\(\s*(\d+),\s*"([a-z][a-z0-9_]+)"(?:,\s*"([a-z][a-z0-9_]+)",\s*"([a-z][a-z0-9_]+)")?/g)].map(match => ({
+      kind: match[1],
+      group: Number(match[2]),
+      key: match[3],
+      companions: [match[4], match[5]].filter(Boolean),
     }));
 const nativeFeatureKeys = nativeFeatureEntries.map(entry => entry.key);
-assert.deepEqual(nativeFeatureKeys, expectedNativeFeatureKeys);
-assert.equal(new Set(nativeFeatureKeys).size, 20);
+const expectedNativeUiFeatureKeys = [
+  'remove_homepage',
+  'remove_entire_sidebar',
+  'remove_sidebar',
+  'remove_chat',
+  'remove_playlist_panel',
+  'remove_all_shorts',
+  'remove_end_of_video',
+  'remove_info_cards',
+  'remove_mixes',
+  'remove_video_metadata',
+  'disable_autoplay',
+  'disable_annotations',
+  'remove_comments',
+  'remove_comment_profiles',
+  'remove_merch_shelves',
+  'remove_menu_buttons',
+  'remove_channel_owner',
+  'remove_vid_description',
+  'remove_top_header',
+  'remove_notif_bell',
+  'remove_extra_results',
+  'remove_trending_page',
+  'remove_more_section',
+  'remove_subscriptions_page',
+  'redirect_to_subs',
+];
+assert.deepEqual(nativeFeatureKeys, expectedNativeUiFeatureKeys);
+assert.equal(new Set(nativeFeatureKeys).size, 25);
 assert.ok(nativeFeatureKeys.every(key => ids.includes(key)));
 assert.ok(nativeFeatureKeys.every(key => schema.defaults[key] === false));
-assert.deepEqual(nativeFeatureKeys, [...schema.nativeBehaviorIds]);
+const nativeStorageKeys = nativeFeatureEntries.flatMap(
+    entry => [entry.key, ...entry.companions]);
+assert.equal(nativeStorageKeys.length, 29);
+assert.equal(new Set(nativeStorageKeys).size, 29);
+assert.deepEqual(
+    [...nativeStorageKeys].sort(), [...schema.nativeBehaviorIds].sort());
+assert.deepEqual(
+    nativeFeatureEntries.filter(entry => entry.kind === 'CompositeFeature'),
+    [
+      {
+        kind: 'CompositeFeature',
+        group: 3,
+        key: 'remove_trending_page',
+        companions: ['remove_explore_link', 'remove_explore_section'],
+      },
+      {
+        kind: 'CompositeFeature',
+        group: 3,
+        key: 'remove_subscriptions_page',
+        companions: ['remove_subscriptions_link', 'remove_sub_section'],
+      },
+    ]);
 
 const nativeGroupBlock = nativeBubbleSource.match(
     /constexpr std::array<GroupSpec,\s*4>\s+kGroups\s*=\s*\{\{([\s\S]*?)\n\}\};/);
@@ -813,7 +892,8 @@ assert.equal(
     4);
 for (let group = 0; group < 4; ++group) {
   assert.equal(
-      nativeFeatureEntries.filter(entry => entry.group === group).length, 5,
+      nativeFeatureEntries.filter(entry => entry.group === group).length,
+      [6, 6, 7, 6][group],
       `Вкладка ${group} должна содержать ровно пять функций`);
 }
 assert.match(
@@ -824,9 +904,12 @@ assert.match(nativeBubbleHeader, /bool global_enabled_ = true;/);
 assert.match(nativeBubbleSource,
              /FindBool\("global_enable"\)\.value_or\(true\)/);
 assert.match(nativeBubbleSource, /feature_state_\.emplace\(key, false\)/);
-assert.match(nativeBubbleSource, /values\.FindBool\(key\)\.value_or\(false\)/);
 assert.match(nativeBubbleSource,
-             /constexpr int kFocusYoutubeSchemaVersion = 3;/);
+             /bool IsFeatureEnabled\([\s\S]*StorageKeys\(feature\)[\s\S]*values\.FindBool\(key\)\.value_or\(false\)/);
+assert.match(nativeBubbleSource,
+             /constexpr int kFocusYoutubeSchemaVersion = 4;/);
+assert.match(nativeBubbleSource,
+             /std::vector<std::string> FeatureKeys\(\)[\s\S]*StorageKeys\(feature\)/);
 const resetValuesBlock = nativeBubbleSource.match(
     /base::DictValue ResetValues\(\) \{([\s\S]*?)\n\}/)?.[1];
 assert.ok(resetValuesBlock, 'Не найдены полные defaults нативного Reset');
@@ -843,7 +926,7 @@ for (const [key, value] of [
 assert.match(resetValuesBlock,
              /values\.Set\("focus_youtube_schema_version", kFocusYoutubeSchemaVersion\)/);
 assert.match(resetValuesBlock,
-             /for \(const FeatureSpec& feature : kFeatures\)[\s\S]*values\.Set\(feature\.key, false\)/);
+              /for \(const FeatureSpec& feature : kFeatures\)[\s\S]*StorageKeys\(feature\)[\s\S]*values\.Set\(key, false\)/);
 
 const masterToggleHandler = nativeBubbleSource.match(
     /void FocusYoutubeBubbleView::OnMasterTogglePressed\([^)]*\) \{([\s\S]*?)\n\}/)?.[1];
@@ -863,6 +946,12 @@ for (const [key, value] of [
   assert.match(masterToggleHandler,
                new RegExp(`values\\.Set\\("${key}", ${value}\\)`));
 }
+assert.equal([...masterToggleHandler.matchAll(/storage->Set\s*\(/g)].length, 1,
+             'Master state and automation reset must use one atomic write');
+assert.match(featureToggleHandler,
+             /base::DictValue values;[\s\S]*StorageKeys\(\*feature\)[\s\S]*values\.Set\(storage_key, requested_value\)/);
+assert.equal([...featureToggleHandler.matchAll(/storage->Set\s*\(/g)].length, 1,
+             'Each composite control must use one atomic storage write');
 
 const resetHandler = nativeBubbleSource.match(
     /void FocusYoutubeBubbleView::OnResetPressed\([^)]*\) \{([\s\S]*?)\n\}/)?.[1];
@@ -897,20 +986,54 @@ assert.equal(
     'Reset must clear the whole component local storage before defaults');
 
 const toolbarButtonHandler = toolbarSource.match(
-    /void ToolbarView::FocusYoutubeButtonPressed\(const ui::Event& event\) \{([\s\S]*?)\n\}/)?.[1];
+    /void ToolbarView::ShowFocusYoutubePopup\(views::View\* anchor_view\) \{([\s\S]*?)\n\}/)?.[1];
 assert.ok(toolbarButtonHandler, 'Не найден обработчик нативной кнопки');
 assert.match(
     toolbarButtonHandler,
-    /FocusYoutubeBubbleView::ShowBubble\(browser_, focus_youtube_button_\);/);
+    /FocusYoutubeBubbleView::ShowBubble\(browser_, anchor_view\);/);
 assert.doesNotMatch(
     toolbarButtonHandler,
     /ExtensionPopup|ShowFocusComponentPopup|popup\.html|OpenURL|https?:\/\//,
     'Кнопка FocusYoutube не должна открывать extension popup или внешний URL');
+assert.doesNotMatch(toolbarHeader,
+                   /raw_ptr<ToolbarButton>\s+focus_youtube_button_/);
+assert.doesNotMatch(toolbarSource,
+                   /focus_youtube_button_\s*=\s*AddChildView\([\s\S]{0,120}ToolbarButton/);
+assert.doesNotMatch(toolbarSource,
+                   /ToolbarView::FocusYoutubeButtonPressed/);
+assert.match(locationBarHeader,
+             /virtual void ShowFocusYoutubePopup\(views::View\*\)/);
+assert.match(locationBarHeader,
+             /void SetFocusYoutubeButtonVisible\(bool visible\)/);
+assert.match(locationBarHeader,
+             /raw_ptr<views::ImageButton> focus_youtube_button_/);
+assert.match(locationBarSource,
+             /focus_youtube_button = views::CreateVectorImageButton\(/);
+assert.match(locationBarSource,
+             /focus_youtube_button_ = AddChildView\(std::move\(focus_youtube_button\)\)/);
+assert.match(locationBarSource,
+             /add_trailing_decoration\(focus_youtube_button_/);
+assert.match(locationBarSource,
+             /IncrementalMinimumWidth\(focus_youtube_button_\)/,
+             'FocusYoutube location-bar icon must never collapse into overflow');
+assert.match(locationBarSource, /vector_icons::kFocusYoutubeOffIcon/);
+assert.match(locationBarSource,
+             /delegate_->ShowFocusYoutubePopup\(focus_youtube_button_\)/);
+assert.match(focusYoutubeIcon, /PATH_MODE_CLEAR/);
+assert.match(focusYoutubeIcon,
+             /MOVE_TO, 3\.2f, 2\.2f,[\s\S]*LINE_TO, 17\.8f, 16\.8f/,
+             'FocusYoutube icon must contain the crossed-out YouTube slash');
 assert.doesNotMatch(
     nativeBubbleSource,
     /ExtensionPopup|ShowFocusComponentPopup|popup\.html|OpenURL|OpenURLParams|https?:\/\//,
     'Нативное окно FocusYoutube не должно содержать внешнюю навигацию');
 
+const youtubeUrlPredicate = toolbarSource.match(
+    /bool IsFocusYoutubeUrl\(const GURL& url\) \{([\s\S]*?)\n\}/)?.[1];
+assert.ok(youtubeUrlPredicate, 'FocusYoutube URL predicate was not found');
+assert.match(youtubeUrlPredicate, /url\.SchemeIs\(url::kHttpsScheme\)/);
+assert.match(youtubeUrlPredicate, /url\.DomainIs\("youtube\.com"\)/);
+assert.doesNotMatch(youtubeUrlPredicate, /host\s*==|ends_with|StartsWith/);
 const visibilityFunction = toolbarSource.match(
     /void ToolbarView::UpdateFocusYoutubeButtonVisibility\(WebContents\* tab\) \{([\s\S]*?)\n\}/)?.[1];
 assert.ok(visibilityFunction, 'Не найден контекстный фильтр FocusYoutube');
@@ -918,15 +1041,12 @@ assert.match(visibilityFunction, /tab->GetVisibleURL\(\)/,
              'GetVisibleURL нужен для pending navigation');
 assert.match(
     visibilityFunction,
-    /visible_url\.is_valid\(\) \? visible_url : tab->GetLastCommittedURL\(\)/);
+    /const GURL& committed_url = tab->GetLastCommittedURL\(\)/);
 assert.match(visibilityFunction,
-             /context_url\.SchemeIs\(url::kHttpsScheme\)/);
-assert.deepEqual(
-    [...visibilityFunction.matchAll(/host == "([^"]+)"/g)]
-        .map(match => match[1]),
-    ['youtube.com', 'www.youtube.com', 'm.youtube.com']);
-assert.doesNotMatch(visibilityFunction, /DomainIs|ends_with|StartsWith/,
-                    'YouTube host filtering must use exact equality');
+             /IsFocusYoutubeUrl\(visible_url\) \|\|[\s\S]*IsFocusYoutubeUrl\(committed_url\)/);
+assert.match(visibilityFunction,
+             /location_bar_view_->SetFocusYoutubeButtonVisible\(/);
+assert.match(visibilityFunction, /show_focus_youtube_button_\.GetValue\(\)/);
 
 const extensionUiUtil = fs.readFileSync(path.join(
     browserRoot, 'extensions/browser/ui_util.cc'), 'utf8');

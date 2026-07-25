@@ -10,7 +10,7 @@ param(
 
     [string]$BrowserPath,
     [string]$InstallerPath,
-    [string]$ExpectedVersion = '1.0.1.0',
+    [string]$ExpectedVersion = '1.0.2.0',
 
     [string]$UserDataPath =
         (Join-Path $env:LOCALAPPDATA 'FocusBrowser\Focus Browser\User Data'),
@@ -24,7 +24,18 @@ $ErrorActionPreference = 'Stop'
 $script:failureCount = 0
 $script:warningCount = 0
 $focusQaRoot = Split-Path -Parent $PSScriptRoot
+$focusSourceRoot = Join-Path $focusQaRoot 'build\src'
 $focusOutDir = Join-Path $focusQaRoot 'build\src\out\Default'
+if (-not [string]::IsNullOrWhiteSpace($env:FOCUS_ACTIVE_SOURCE_ROOT)) {
+    $focusSourceRoot = $env:FOCUS_ACTIVE_SOURCE_ROOT
+    $focusOutDir = Join-Path $focusSourceRoot 'out\Default'
+}
+$expectedVersionParts = @($ExpectedVersion.Split('.'))
+if ($expectedVersionParts.Count -ne 4 -or
+    @($expectedVersionParts | Where-Object { $_ -notmatch '^\d+$' }).Count -ne 0) {
+    throw "ExpectedVersion must contain four numeric components: $ExpectedVersion"
+}
+$expectedDisplayVersion = ($expectedVersionParts[0..2] -join '.')
 
 function Write-Pass([string]$Message) {
     Write-Host "[PASS] $Message" -ForegroundColor Green
@@ -61,7 +72,8 @@ function Resolve-ArtifactPaths {
         $candidate = $candidateRoots |
             Where-Object { Test-Path -LiteralPath $_ -PathType Container } |
             ForEach-Object {
-                Get-ChildItem -LiteralPath $_ -File -Filter '*FocusBrowser*1.0.1*installer.exe' |
+                Get-ChildItem -LiteralPath $_ -File `
+                    -Filter "*FocusBrowser*$expectedDisplayVersion*installer.exe" |
                     Where-Object { $_.Name -notmatch 'mini-installer' }
             } |
             Sort-Object LastWriteTimeUtc -Descending |
@@ -157,8 +169,8 @@ function Test-PeArtifact(
 function Test-ArtifactRelease {
     Resolve-ArtifactPaths
 
-    $installModesPath = Join-Path $focusQaRoot `
-        'build\src\chrome\install_static\chromium_install_modes.h'
+    $installModesPath = Join-Path $focusSourceRoot `
+        'chrome\install_static\chromium_install_modes.h'
     if (Test-Path -LiteralPath $installModesPath -PathType Leaf) {
         $installModesText = Get-Content -LiteralPath $installModesPath -Raw
         $progIdPrefixDefinitions = @(
@@ -206,13 +218,14 @@ function Test-ArtifactRelease {
     }
 
     if ([string]::IsNullOrWhiteSpace($script:InstallerPath)) {
-        Write-Fail 'Focus Browser 1.0.1 NSIS installer was not found; pass -InstallerPath explicitly'
+        Write-Fail "Focus Browser $expectedDisplayVersion NSIS installer was not found; pass -InstallerPath explicitly"
     } else {
         Test-PeArtifact $script:InstallerPath 'NSIS installer' $true
-        if ((Split-Path -Leaf $script:InstallerPath) -match '1[._-]0[._-]1') {
-            Write-Pass 'Installer filename carries release version 1.0.1'
+        if ((Split-Path -Leaf $script:InstallerPath) -match
+            [regex]::Escape($expectedDisplayVersion)) {
+            Write-Pass "Installer filename carries release version $expectedDisplayVersion"
         } else {
-            Write-Fail "Installer filename does not carry version 1.0.1: $script:InstallerPath"
+            Write-Fail "Installer filename does not carry version ${expectedDisplayVersion}: $script:InstallerPath"
         }
     }
 
@@ -222,20 +235,29 @@ function Test-ArtifactRelease {
             "Packaging payload exists: $required"
     }
 
-    $versionFile = Join-Path $focusQaRoot 'build\src\chrome\VERSION'
+    $versionFile = Join-Path $focusSourceRoot 'chrome\VERSION'
     if (Test-Path -LiteralPath $versionFile) {
         $versionText = Get-Content -LiteralPath $versionFile -Raw
-        Assert-Focus ($versionText -match '(?m)^FOCUS_MAJOR=1\s*$') 'FOCUS_MAJOR is 1'
-        Assert-Focus ($versionText -match '(?m)^FOCUS_MINOR=0\s*$') 'FOCUS_MINOR is 0'
-        Assert-Focus ($versionText -match '(?m)^FOCUS_PATCH=1\s*$') 'FOCUS_PATCH is 1'
-        Assert-Focus ($versionText -match '(?m)^FOCUS_PLATFORM=0\s*$') 'FOCUS_PLATFORM is 0'
+        $focusVersionFields = @(
+            'FOCUS_MAJOR',
+            'FOCUS_MINOR',
+            'FOCUS_PATCH',
+            'FOCUS_PLATFORM'
+        )
+        for ($index = 0; $index -lt $focusVersionFields.Count; $index++) {
+            $field = $focusVersionFields[$index]
+            $value = $expectedVersionParts[$index]
+            Assert-Focus ($versionText -match
+                "(?m)^$([regex]::Escape($field))=$([regex]::Escape($value))\s*$") `
+                "$field is $value"
+        }
     } else {
         Write-Fail "Version source is missing: $versionFile"
     }
 
     $componentVerifier = Join-Path $PSScriptRoot 'verify_focus_components.mjs'
     $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
-    $bundledNode = Join-Path $focusQaRoot 'build\src\third_party\node\win\node.exe'
+    $bundledNode = Join-Path $focusSourceRoot 'third_party\node\win\node.exe'
     $nodePath = if ($null -ne $nodeCommand) {
         $nodeCommand.Source
     } elseif (Test-Path -LiteralPath $bundledNode -PathType Leaf) {

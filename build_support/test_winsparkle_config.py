@@ -2,12 +2,16 @@
 """Lightweight validation for Focus Browser's WinSparkle configuration."""
 
 import importlib.util
+import os
 import re
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ACTIVE = Path(
+    os.environ.get("FOCUS_ACTIVE_SOURCE_ROOT", ROOT / "build" / "src")
+).resolve()
 
 
 def _load_build_module():
@@ -84,7 +88,7 @@ class WinSparkleConfigTest(unittest.TestCase):
         self.assertNotIn("custom-update-server-url", helper)
 
     def test_compile_time_key_and_url_are_both_required(self):
-        gni = (ROOT / "build/src/chrome/updater/winsparkle.gni").read_text(
+        gni = (ACTIVE / "chrome/updater/winsparkle.gni").read_text(
             encoding="utf-8")
         self.assertIn('winsparkle_ed_key = ""', gni)
         self.assertIn('winsparkle_appcast_url = ""', gni)
@@ -94,7 +98,7 @@ class WinSparkleConfigTest(unittest.TestCase):
             r'winsparkle_appcast_url != ""',
         )
 
-        glue = (ROOT / "build/src/chrome/browser/win/"
+        glue = (ACTIVE / "chrome/browser/win/"
                 "winsparkle_glue.cc").read_text(encoding="utf-8")
         self.assertIn("WINSPARKLE_APPCAST_URL", glue)
         self.assertIn("UpdaterRuntimeConfigured", glue)
@@ -141,7 +145,7 @@ class WinSparkleConfigTest(unittest.TestCase):
             with self.subTest(relative=relative):
                 self.assertEqual(
                     (ROOT / "source_overrides" / relative).read_bytes(),
-                    (ROOT / "build/src" / relative).read_bytes(),
+                    (ACTIVE / relative).read_bytes(),
                 )
 
 

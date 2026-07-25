@@ -1,0 +1,485 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "package": "@ghostery/adblocker",
+    "version": "2.18.1",
+    "tag": "v2.18.1",
+    "commit": "67ef23276e93ebc5dd4621cc9df2b09ad9f490d7",
+    "integrity": "sha512-pWMJqpXpuqIlcF3ZZQ2E7ixnC7xhtYn/bpOn3N69vFrAm4wrZCIbKzz1+xSxKWCmJvDT4fg7rN2R6jQwFXm5BA=="
+  },
+  "build": {
+    "tool": "esbuild",
+    "version": "0.28.1",
+    "format": "iife",
+    "platform": "browser",
+    "target": "chrome120",
+    "minified": false
+  },
+  "output": {
+    "file": "focus_ghostery_adblocker.js",
+    "bytes": 605285,
+    "sha256": "f0a48ad41e5d6fd1debdb44f15d7e5f7211d14fba4e33a5207ac2117903d631d"
+  },
+  "inputs": [
+    {
+      "path": "node_modules/@ghostery/adblocker-extended-selectors/dist/esm/eval.js",
+      "bytes": 22731
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker-extended-selectors/dist/esm/extended.js",
+      "bytes": 8423
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker-extended-selectors/dist/esm/index.js",
+      "bytes": 625
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker-extended-selectors/dist/esm/parse.js",
+      "bytes": 16325
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker-extended-selectors/dist/esm/types.js",
+      "bytes": 686
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/codebooks/cosmetic-selector.js",
+      "bytes": 3676
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/codebooks/network-csp.js",
+      "bytes": 1963
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/codebooks/network-filter.js",
+      "bytes": 4552
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/codebooks/network-hostname.js",
+      "bytes": 3028
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/codebooks/network-redirect.js",
+      "bytes": 1529
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/codebooks/raw-cosmetic.js",
+      "bytes": 3208
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/codebooks/raw-network.js",
+      "bytes": 3099
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/compact-set.js",
+      "bytes": 1639
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/compression.js",
+      "bytes": 1327
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/config.js",
+      "bytes": 3744
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/crc32.js",
+      "bytes": 1555
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/data-view.js",
+      "bytes": 15271
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/encoding.js",
+      "bytes": 3768
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/engine/bucket/cosmetic.js",
+      "bytes": 19110
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/engine/bucket/filters.js",
+      "bytes": 9742
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/engine/bucket/html.js",
+      "bytes": 5834
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/engine/bucket/network.js",
+      "bytes": 4329
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/engine/bucket/preprocessor.js",
+      "bytes": 3016
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/engine/domains.js",
+      "bytes": 7824
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/engine/engine.js",
+      "bytes": 49366
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/engine/map.js",
+      "bytes": 10875
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/engine/merger.js",
+      "bytes": 11245
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/engine/metadata.js",
+      "bytes": 6688
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/engine/metadata/categories.js",
+      "bytes": 1822
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/engine/metadata/organizations.js",
+      "bytes": 3312
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/engine/metadata/patterns.js",
+      "bytes": 4437
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/engine/optimizer.js",
+      "bytes": 6466
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/engine/reverse-index.js",
+      "bytes": 31936
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/events.js",
+      "bytes": 3080
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/fetch.js",
+      "bytes": 2952
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/filters/cosmetic.js",
+      "bytes": 36018
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/filters/dsl.js",
+      "bytes": 3078
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/filters/network.js",
+      "bytes": 75654
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/html-filtering.js",
+      "bytes": 9210
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/index.js",
+      "bytes": 1238
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/lists.js",
+      "bytes": 18906
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/preprocessor.js",
+      "bytes": 6159
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/punycode.js",
+      "bytes": 13091
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/queue-microtask.js",
+      "bytes": 538
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/request.js",
+      "bytes": 10078
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/resources.js",
+      "bytes": 13671
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/tokens-buffer.js",
+      "bytes": 1113
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/dist/esm/utils.js",
+      "bytes": 11846
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/node_modules/tldts-core/dist/es6/index.js",
+      "bytes": 219
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/node_modules/tldts-core/dist/es6/src/domain-without-suffix.js",
+      "bytes": 485
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/node_modules/tldts-core/dist/es6/src/domain.js",
+      "bytes": 3227
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/node_modules/tldts-core/dist/es6/src/extract-hostname.js",
+      "bytes": 21325
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/node_modules/tldts-core/dist/es6/src/factory.js",
+      "bytes": 5275
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/node_modules/tldts-core/dist/es6/src/is-ip.js",
+      "bytes": 2186
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/node_modules/tldts-core/dist/es6/src/is-special-use.js",
+      "bytes": 2792
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/node_modules/tldts-core/dist/es6/src/is-valid.js",
+      "bytes": 3307
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/node_modules/tldts-core/dist/es6/src/lookup/fast-path.js",
+      "bytes": 2248
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/node_modules/tldts-core/dist/es6/src/options.js",
+      "bytes": 693
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/node_modules/tldts-core/dist/es6/src/subdomain.js",
+      "bytes": 346
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/node_modules/tldts-experimental/dist/es6/index.js",
+      "bytes": 1946
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/node_modules/tldts-experimental/dist/es6/src/data/hashes.js",
+      "bytes": 106782
+    },
+    {
+      "path": "node_modules/@ghostery/adblocker/node_modules/tldts-experimental/dist/es6/src/packed-hashes.js",
+      "bytes": 9744
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/dist/esm/const.js",
+      "bytes": 474
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/dist/esm/immutable-url.js",
+      "bytes": 16576
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/dist/esm/index.js",
+      "bytes": 256
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/dist/esm/search-params-wrapper.js",
+      "bytes": 778
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/dist/esm/url-search-params.js",
+      "bytes": 5021
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/dist/esm/url.js",
+      "bytes": 7009
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/dist/esm/utils.js",
+      "bytes": 494
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/node_modules/tldts-core/dist/es6/index.js",
+      "bytes": 219
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/node_modules/tldts-core/dist/es6/src/domain-without-suffix.js",
+      "bytes": 485
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/node_modules/tldts-core/dist/es6/src/domain.js",
+      "bytes": 3227
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/node_modules/tldts-core/dist/es6/src/extract-hostname.js",
+      "bytes": 21325
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/node_modules/tldts-core/dist/es6/src/factory.js",
+      "bytes": 5275
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/node_modules/tldts-core/dist/es6/src/is-ip.js",
+      "bytes": 2186
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/node_modules/tldts-core/dist/es6/src/is-special-use.js",
+      "bytes": 2792
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/node_modules/tldts-core/dist/es6/src/is-valid.js",
+      "bytes": 3307
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/node_modules/tldts-core/dist/es6/src/lookup/fast-path.js",
+      "bytes": 2248
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/node_modules/tldts-core/dist/es6/src/options.js",
+      "bytes": 693
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/node_modules/tldts-core/dist/es6/src/subdomain.js",
+      "bytes": 346
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/node_modules/tldts-experimental/dist/es6/index.js",
+      "bytes": 1946
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/node_modules/tldts-experimental/dist/es6/src/data/hashes.js",
+      "bytes": 106782
+    },
+    {
+      "path": "node_modules/@ghostery/url-parser/node_modules/tldts-experimental/dist/es6/src/packed-hashes.js",
+      "bytes": 9744
+    },
+    {
+      "path": "node_modules/@remusao/guess-url-type/dist/esm/extensions/documents.js",
+      "bytes": 98
+    },
+    {
+      "path": "node_modules/@remusao/guess-url-type/dist/esm/extensions/fonts.js",
+      "bytes": 143
+    },
+    {
+      "path": "node_modules/@remusao/guess-url-type/dist/esm/extensions/images.js",
+      "bytes": 403
+    },
+    {
+      "path": "node_modules/@remusao/guess-url-type/dist/esm/extensions/medias.js",
+      "bytes": 175
+    },
+    {
+      "path": "node_modules/@remusao/guess-url-type/dist/esm/extensions/scripts.js",
+      "bytes": 98
+    },
+    {
+      "path": "node_modules/@remusao/guess-url-type/dist/esm/extensions/stylesheets.js",
+      "bytes": 91
+    },
+    {
+      "path": "node_modules/@remusao/guess-url-type/dist/esm/extname.js",
+      "bytes": 856
+    },
+    {
+      "path": "node_modules/@remusao/guess-url-type/dist/esm/index.js",
+      "bytes": 2737
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/flv.js",
+      "bytes": 568
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/gif.js",
+      "bytes": 340
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/html.js",
+      "bytes": 395
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/ico.js",
+      "bytes": 395
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/index.js",
+      "bytes": 6269
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/javascript.js",
+      "bytes": 461
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/jpeg.js",
+      "bytes": 447
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/json.js",
+      "bytes": 284
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/mp3.js",
+      "bytes": 414
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/mp4.js",
+      "bytes": 2500
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/pdf.js",
+      "bytes": 466
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/png.js",
+      "bytes": 376
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/svg.js",
+      "bytes": 344
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/txt.js",
+      "bytes": 305
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/types.js",
+      "bytes": 73
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/wav.js",
+      "bytes": 344
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/webm.js",
+      "bytes": 537
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/webp.js",
+      "bytes": 325
+    },
+    {
+      "path": "node_modules/@remusao/small/dist/esm/wmv.js",
+      "bytes": 1000
+    },
+    {
+      "path": "node_modules/@remusao/smaz-compress/dist/esm/index.js",
+      "bytes": 4011
+    },
+    {
+      "path": "node_modules/@remusao/smaz-decompress/dist/esm/index.js",
+      "bytes": 2575
+    },
+    {
+      "path": "node_modules/@remusao/smaz/dist/esm/index.js",
+      "bytes": 2209
+    },
+    {
+      "path": "node_modules/@remusao/trie/dist/esm/index.js",
+      "bytes": 928
+    },
+    {
+      "path": "src/focus_ghostery_adblocker.js",
+      "bytes": 9871
+    }
+  ]
+}

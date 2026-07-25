@@ -28,6 +28,7 @@ focus/windows/bundle-elevation-service.patch
 focus/windows/updater/winsparkle-drop-3rdparty-deps.patch
 focus/windows/updater/winsparkle-api-extensions.patch
 focus/windows/updater/winsparkle-headless-ui.patch
+focus/windows/updater/focus-update-prompt-ru.patch
 focus/windows/updater/glue.patch
 focus/windows/updater/build-wiring.patch
 focus/windows/updater/register.patch

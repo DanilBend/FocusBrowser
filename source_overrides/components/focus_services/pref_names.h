@@ -36,6 +36,15 @@ inline constexpr char kFocusBangsEnabled[] =
 inline constexpr char kFocusUpdateFetchingEnabled[] =
     "focus.services.browser_updates";
 
+// Browser-update discovery state is stored in Local State rather than a
+// profile so update prompts survive profile switches without being synced.
+inline constexpr char kFocusUpdaterAvailableVersion[] =
+    "focus.updater.available_version";
+inline constexpr char kFocusUpdaterSuppressedSession[] =
+    "focus.updater.suppressed_session";
+inline constexpr char kFocusUpdaterSkippedVersion[] =
+    "focus.updater.skipped_version";
+
 inline constexpr char kFocusSpellcheckEnabled[] =
     "focus.services.spellcheck_files";
 

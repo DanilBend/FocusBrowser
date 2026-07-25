@@ -11,10 +11,13 @@
 #include <string>
 #include <vector>
 
+#include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "base/observer_list_types.h"
+#include "base/threading/sequence_bound.h"
+#include "chrome/browser/focus_block/focus_block_ghostery_engine.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "components/prefs/pref_change_registrar.h"
 #include "url/gurl.h"
@@ -29,15 +32,17 @@ struct ResourceRequest;
 namespace focus_block {
 
 // Profile-scoped owner of the native ad/tracker blocking engine. All public
-// methods are called on the browser UI sequence. The compiled Rust engine is
-// built off-thread and published atomically back to that sequence.
+// methods are called on the browser UI sequence. Ghostery parsing and matching
+// run on a dedicated single-thread sequence and return asynchronously.
 class FocusBlockService : public KeyedService {
  public:
   struct CosmeticResources {
-    std::vector<std::string> hide_selectors;
-    std::vector<std::string> exceptions;
-    bool generichide = false;
+    std::string css;
   };
+
+  using ShouldBlockCallback = base::OnceCallback<void(bool)>;
+  using CosmeticResourcesCallback =
+      base::OnceCallback<void(std::optional<CosmeticResources>)>;
 
   class Observer : public base::CheckedObserver {
    public:
@@ -64,23 +69,23 @@ class FocusBlockService : public KeyedService {
   uint64_t blocked_count_session() const { return blocked_count_session_; }
   uint64_t GetBlockedCountForUrl(const GURL& url) const;
 
-  // Returns true only for a subresource matched by the native engine. The
-  // outermost main document and non-HTTP(S) schemes are never blocked.
+  // Asynchronously reports true only for a subresource matched by Ghostery.
+  // The outermost main document and non-HTTP(S) schemes are never blocked.
   // `top_level_url` exclusively controls the per-site exception and stats;
   // `source_url` is immutable adblock matching context for a redirect chain.
-  bool ShouldBlock(const network::ResourceRequest& request,
+  void ShouldBlock(const network::ResourceRequest& request,
                    const GURL& top_level_url,
-                   const GURL& source_url);
+                   const GURL& source_url,
+                   ShouldBlockCallback callback);
 
   // Scriptlets, procedural filters and CSP rewrites are deliberately excluded
   // from the initial native integration. These APIs expose CSS-only rules.
-  std::optional<CosmeticResources> GetCosmeticResourcesForUrl(
+  void GetCosmeticResourcesForUrl(
       const GURL& frame_url,
-      const GURL& top_level_url) const;
-  std::vector<std::string> GetGenericCosmeticSelectors(
-      const CosmeticResources& resources,
+      const GURL& top_level_url,
       const std::vector<std::string>& classes,
-      const std::vector<std::string>& ids) const;
+      const std::vector<std::string>& ids,
+      CosmeticResourcesCallback callback);
 
   void AddObserver(Observer* observer);
   void RemoveObserver(Observer* observer);
@@ -91,12 +96,15 @@ class FocusBlockService : public KeyedService {
   void Shutdown() override;
 
  private:
-  class EngineHolder;
-
-  static std::unique_ptr<EngineHolder> BuildEngine(
-      std::vector<std::vector<uint8_t>> filter_lists);
   void StartEngineBuild();
-  void OnEngineBuilt(std::unique_ptr<EngineHolder> engine);
+  void OnEngineReady(bool ready);
+  void OnMatchCompleted(const GURL& top_level_url,
+                        ShouldBlockCallback callback,
+                        GhosteryMatchResult result);
+  void OnCosmeticsCompleted(const GURL& frame_url,
+                            const GURL& top_level_url,
+                            CosmeticResourcesCallback callback,
+                            GhosteryCosmeticResult result);
   void OnProtectionPrefsChanged();
   void NotifyStateChanged();
   void NotifyStatsChanged();
@@ -107,7 +115,8 @@ class FocusBlockService : public KeyedService {
   raw_ptr<Profile> profile_;
   raw_ptr<PrefService> prefs_;
   PrefChangeRegistrar pref_change_registrar_;
-  std::unique_ptr<EngineHolder> engine_;
+  base::SequenceBound<FocusBlockGhosteryEngine> engine_;
+  bool engine_ready_ = false;
 
   uint64_t blocked_count_session_ = 0;
   std::map<std::string, uint64_t> blocked_count_by_site_;

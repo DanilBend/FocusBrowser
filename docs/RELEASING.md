@@ -1,7 +1,7 @@
 # Релизы Focus Browser для Windows
 
 Этот документ — runbook для текущего открытого репозитория
-`DanilBend/FocusBrowser` и выпуска версии 1.0.1. Он ничего не публикует и не
+`DanilBend/FocusBrowser` и выпуска версии 1.0.2. Он ничего не публикует и не
 содержит рабочих ключей.
 
 > Важно: текущий `.github/workflows/main.yml` нельзя включать для production-
@@ -60,22 +60,16 @@ Ed25519 не устраняет предупреждение Windows «Неиз�
 7. Не разрешайте workflow из fork/PR получать release-секреты. Все сторонние
    Actions должны быть закреплены на полном commit SHA после проверки исходника.
 
-### 2.2. Защищённое окружение `release`
+### 2.2. Защищённые окружения
 
-Создайте в `Settings -> Environments` окружение с точным именем `release`:
+Текущий `github-pages` environment разрешает deployment только из `main` и не
+содержит секретов. `publish-appcast.yml` проверяет уже опубликованные immutable
+assets публичным ключом.
 
-- добавьте required reviewer;
-- включите запрет self-review;
-- по возможности запретите administrator bypass;
-- разрешите deployment только тегам `v*` и/или защищённой `main`;
-- при желании добавьте wait timer;
-- укажите `environment: release` только у job, которые подписывают, создают
-  Release или обновляют production appcast.
-
-Секрет окружения становится доступен job только после одобрения. На GitHub
-Free/Pro/Team required reviewers для environments доступны в публичных
-репозиториях. Self-hosted runner не становится изолированным из-за environment;
-production-подпись безопаснее выполнять на одноразовом GitHub-hosted runner.
+Если позже появится полностью автоматизированный signing/publish job, создайте
+для него отдельное окружение `release`, добавьте независимого required reviewer,
+запретите self-review и administrator bypass и разрешите только защищённые
+`main`/`v*`. Не подключайте приватный Ed25519-ключ к Pages job.
 
 ### 2.3. Variables и secrets
 
@@ -86,7 +80,7 @@ production-подпись безопаснее выполнять на одно�
 | `WINSPARKLE_APPCAST_URL_X64` | Repository variable | Policy-вариант: `https://danilbend.github.io/FocusBrowser/appcast-x64.xml` | нет |
 | `WINSPARKLE_APPCAST_URL_ARM64` | Repository variable | Policy-вариант: `https://danilbend.github.io/FocusBrowser/appcast-arm64.xml` | нет |
 | `WINSPARKLE_AUTHENTICODE_ORG` | Repository variable | Точное поле `Subject O` сертификата; сравнение целой строки без учёта регистра ASCII; не задавать без fallback | нет |
-| `WINSPARKLE_ED_PRIVATE_KEY` | Environment secret в `release` | Точное содержимое файла приватного seed, созданного `winsparkle-tool` | да |
+| приватный Ed25519 seed | Только зашифрованные offline-копии вне GitHub и checkout | Файл, созданный `winsparkle-tool generate-key` | да |
 
 Исходный код сейчас ожидает переменную процесса
 `WINSPARKLE_APPCAST_URL`. Для двух архитектур будущий workflow должен выбрать
@@ -107,7 +101,7 @@ variable, исходники, артефакт сборки, кэш или ло�
 
 ### 2.4. Неизменяемые релизы
 
-До публикации 1.0.1 откройте repository `Settings`, прокрутите страницу до
+До публикации 1.0.2 откройте repository `Settings`, прокрутите страницу до
 раздела `Releases` и включите `Enable release immutability`. Настройка действует
 только на будущие релизы. После публикации GitHub запрещает перемещение тега и
 изменение/удаление assets и автоматически создаёт release attestation.
@@ -176,18 +170,11 @@ NuGet/архив, файл из предыдущего CI artifact или инс
 Первая команда сохраняет 32-байтовый seed в Base64. Вторая выводит публичный
 ключ. Скопируйте только публичный ключ в `WINSPARKLE_ED_KEY`.
 
-Не вставляйте значение приватного ключа в командную строку. Через GitHub UI
-создайте environment secret `WINSPARKLE_ED_PRIVATE_KEY`, вставив точное
-однострочное содержимое файла. Для автоматизации через `gh` используйте ввод из
-файла, а не аргумент `--body`:
-
-```powershell
-Get-Content -LiteralPath .\winsparkle-private.key -Raw |
-  gh secret set WINSPARKLE_ED_PRIVATE_KEY --env release
-```
-
-После загрузки удалите временную копию с рабочей машины безопасным способом,
-если она не является одной из утверждённых offline-копий.
+Не вставляйте значение приватного ключа в командную строку, GitHub variable,
+GitHub secret, исходники, workflow или release asset. Текущий
+`publish-appcast.yml` принципиально не получает приватный ключ: подпись
+создаётся локально до загрузки draft-релиза, а GitHub Actions повторно проверяет
+её только публичным ключом.
 
 ### 3.3. Хранение
 
@@ -195,37 +182,23 @@ Get-Content -LiteralPath .\winsparkle-private.key -Raw |
 - Доступ должен быть только у release-maintainers с 2FA.
 - В PR и обычных CI-сборках используйте отдельный тестовый ключ или полностью
   отключённый updater.
-- Release job создаёт временный key-файл в `$RUNNER_TEMP`, не печатает его и
-  удаляет в `finally`/последнем шаге с `if: always()`.
-- Не кэшируйте каталог, содержащий key-файл.
+- Не кэшируйте и не загружайте каталог, содержащий key-файл.
 - Потеря ключа означает, что уже установленные версии не смогут доверять
   обновлениям с новым ключом. Компрометация ключа требует немедленной остановки
   feed и ручного перехода на новый доверенный ключ.
 
-Пример безопасного восстановления файла на одноразовом Windows runner:
-
-```powershell
-$keyPath = Join-Path $env:RUNNER_TEMP 'winsparkle-private.key'
-Set-Content -LiteralPath $keyPath -Value $env:WINSPARKLE_ED_PRIVATE_KEY `
-  -Encoding ascii -NoNewline
-```
-
-`WINSPARKLE_ED_PRIVATE_KEY` передаётся в окружение шага из
-`${{ secrets.WINSPARKLE_ED_PRIVATE_KEY }}` только внутри job с
-`environment: release`.
-
-## 4. Версия 1.0.1 и имена артефактов
+## 4. Версия 1.0.2 и имена артефактов
 
 Внутренняя версия должна монотонно увеличиваться. Для текущего стабильного
-релиза используйте техническую версию `1.0.1.0` и тег `v1.0.1`.
+релиза используйте техническую версию `1.0.2.0` и тег `v1.0.2`.
 
-Короткая строка `1.0.1` относится только к presentation-слою упаковки:
+Короткая строка `1.0.2` относится только к presentation-слою упаковки:
 `package.py` использует её в именах assets, а NSIS — в тексте мастера и
 строковых version-resource полях wrapper. Установленная версия, каталог версии
 в `Application`, Windows uninstall `Version`/`DisplayVersion`, страница About,
 `--product-version` и сравнение версий WinSparkle используют полную строку
-`1.0.1.0`. Поэтому в appcast обязательно ставьте
-`sparkle:version="1.0.1.0"`; `sparkle:shortVersionString="1.0.1"` — только подпись
+`1.0.2.0`. Поэтому в appcast обязательно ставьте
+`sparkle:version="1.0.2.0"`; `sparkle:shortVersionString="1.0.2"` — только подпись
 для пользователя. Не переиспользуйте технический номер или тег после
 публикации.
 
@@ -233,8 +206,8 @@ Set-Content -LiteralPath $keyPath -Value $env:WINSPARKLE_ED_PRIVATE_KEY `
 
 | Архитектура | Ручная установка | Payload автообновления | Архив |
 | --- | --- | --- | --- |
-| x64 | `FocusBrowser_1.0.1_x64-installer.exe` | `FocusBrowser_1.0.1_x64-mini-installer.exe` | `FocusBrowser_1.0.1_x64-windows.zip` |
-| ARM64 | `FocusBrowser_1.0.1_arm64-installer.exe` | `FocusBrowser_1.0.1_arm64-mini-installer.exe` | `FocusBrowser_1.0.1_arm64-windows.zip` |
+| x64 | `FocusBrowser_1.0.2_x64-installer.exe` | `FocusBrowser_1.0.2_x64-mini-installer.exe` | `FocusBrowser_1.0.2_x64-windows.zip` |
+| ARM64 | `FocusBrowser_1.0.2_arm64-installer.exe` | `FocusBrowser_1.0.2_arm64-mini-installer.exe` | `FocusBrowser_1.0.2_arm64-windows.zip` |
 
 В Release также приложите:
 
@@ -275,7 +248,7 @@ pre-release каналы имеют разные правила. При policy �
 однозначно соответствовать архитектуре. Feed публикуется только после того, как
 неизменяемые assets уже доступны.
 
-Минимальный `appcast-x64.xml` для 1.0.1:
+Минимальный `appcast-x64.xml` для 1.0.2:
 
 ```xml
 <?xml version="1.0" encoding="utf-8"?>
@@ -287,13 +260,13 @@ pre-release каналы имеют разные правила. При policy �
     <description>Stable updates for Focus Browser x64</description>
     <language>ru</language>
     <item>
-      <title>Focus Browser 1.0.1</title>
-      <pubDate>Wed, 22 Jul 2026 12:00:00 +0000</pubDate>
-      <link>https://github.com/DanilBend/FocusBrowser/releases/tag/v1.0.1</link>
+      <title>Focus Browser 1.0.2</title>
+      <pubDate>Sat, 25 Jul 2026 12:00:00 +0000</pubDate>
+      <link>https://github.com/DanilBend/FocusBrowser/releases/tag/v1.0.2</link>
       <enclosure
-        url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.1/FocusBrowser_1.0.1_x64-mini-installer.exe"
-        sparkle:version="1.0.1.0"
-        sparkle:shortVersionString="1.0.1"
+        url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.2/FocusBrowser_1.0.2_x64-mini-installer.exe"
+        sparkle:version="1.0.2.0"
+        sparkle:shortVersionString="1.0.2"
         sparkle:os="windows-x64"
         sparkle:edSignature="&lt;BASE64_ED25519_SIGNATURE&gt;"
         length="&lt;BYTE_LENGTH&gt;"
@@ -309,14 +282,14 @@ pre-release каналы имеют разные правила. При policy �
 enclosure с разными URL, подписями, размерами и точными OS-маркерами:
 
 ```xml
-<sparkle:version>1.0.1.0</sparkle:version>
-<sparkle:shortVersionString>1.0.1</sparkle:shortVersionString>
-<enclosure url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.1/FocusBrowser_1.0.1_x64-mini-installer.exe"
+<sparkle:version>1.0.2.0</sparkle:version>
+<sparkle:shortVersionString>1.0.2</sparkle:shortVersionString>
+<enclosure url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.2/FocusBrowser_1.0.2_x64-mini-installer.exe"
            sparkle:os="windows-x64"
            sparkle:edSignature="&lt;X64_BASE64_ED25519_SIGNATURE&gt;"
            length="&lt;X64_BYTE_LENGTH&gt;"
            type="application/octet-stream" />
-<enclosure url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.1/FocusBrowser_1.0.1_arm64-mini-installer.exe"
+<enclosure url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.2/FocusBrowser_1.0.2_arm64-mini-installer.exe"
            sparkle:os="windows-arm64"
            sparkle:edSignature="&lt;ARM64_BASE64_ED25519_SIGNATURE&gt;"
            length="&lt;ARM64_BYTE_LENGTH&gt;"
@@ -336,7 +309,7 @@ code и формат stdout, затем переносите оба значен
 файл которого был подписан:
 
 ```powershell
-$payload = (Resolve-Path .\FocusBrowser_1.0.1_x64-mini-installer.exe).Path
+$payload = (Resolve-Path .\FocusBrowser_1.0.2_x64-mini-installer.exe).Path
 $fragment = ((& $tool sign --verbose `
   --private-key-file .\winsparkle-private.key $payload) | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or
@@ -350,13 +323,29 @@ if ($signedLength -ne (Get-Item -LiteralPath $payload).Length) {
 }
 ```
 
+Для production используйте проверяемый локальный генератор из репозитория,
+который дополнительно проверяет версию, имя payload, PE x64, расположение ключа
+вне репозитория, подпись и итоговый XML:
+
+```powershell
+.\build_support\prepare_winsparkle_appcast.ps1 `
+  -ToolPath $tool `
+  -PrivateKeyPath 'D:\offline\winsparkle-private.key' `
+  -PublicKey $env:WINSPARKLE_ED_KEY `
+  -PayloadPath .\build\FocusBrowser_1.0.2_x64-mini-installer.exe `
+  -OutputPath .\build\appcast-x64.xml `
+  -Version 1.0.2.0 `
+  -ShortVersion 1.0.2 `
+  -ReleaseTag v1.0.2
+```
+
 Локальная проверка до публикации:
 
 ```powershell
 & $tool verify `
   --public-key '<BASE64_ED25519_PUBLIC_KEY>' `
   --signature '<BASE64_ED25519_SIGNATURE>' `
-  .\FocusBrowser_1.0.1_x64-mini-installer.exe
+  .\FocusBrowser_1.0.2_x64-mini-installer.exe
 ```
 
 Угловые скобки — placeholders; их нельзя оставлять в production XML. Проверьте
@@ -365,27 +354,30 @@ XML-парсером, скачайте каждый enclosure по опубли�
 
 ## 6. Неизменяемый release: правильный порядок
 
-1. Зафиксируйте commit, версии зависимостей и номер `1.0.1.0`.
-2. Соберите x64 и ARM64 с одним публичным Ed25519-ключом, но с отдельным
-   appcast URL для каждой архитектуры.
-3. Выполните тесты на чистых Windows x64 и Windows ARM64, включая user-level и
-   system-level установку.
+1. Зафиксируйте commit, версии зависимостей и номер `1.0.2.0`.
+2. Соберите x64 с production public key и
+   `https://danilbend.github.io/FocusBrowser/appcast-x64.xml`. ARM64 выпускается
+   позже отдельным бинарником и отдельным feed, а не универсальным enclosure.
+3. Выполните тесты на чистой Windows x64, включая user-level и system-level
+   установку.
 4. Если есть Authenticode, сначала подпишите внутренние PE-файлы, затем
    упакуйте installer, подпишите финальные installer-файлы и получите timestamp.
 5. Только после всех модификаций Authenticode подпишите финальный
    `mini-installer.exe` через Ed25519. Любое последующее изменение файла делает
    Ed25519-подпись недействительной.
 6. Вычислите SHA-256 и точный размер каждого финального asset.
-7. Сгенерируйте два appcast и локально проверьте Ed25519-подписи.
-8. Создайте GitHub Release `v1.0.1` как draft.
-9. Загрузите в draft все x64/ARM64 assets, checksums, appcast-аудит-копии и
-   release notes. Скачайте их обратно и сравните SHA-256.
-10. Одобрите protected environment и опубликуйте draft. При включённой
-    immutable releases защита блокирует изменение tag и assets и создаёт release
-    attestation.
-11. Проверьте публичные download URL. Только затем атомарно разверните appcast
-    на GitHub Pages.
-12. На чистой машине с установленной `1.0.0.0` (release display `1.0`)
+7. Сгенерируйте `appcast-x64.xml` локальным helper-скриптом и повторно проверьте
+   Ed25519-подпись.
+8. Создайте GitHub Release `v1.0.2` как draft.
+9. Загрузите в draft x64 assets, checksums, точную аудит-копию
+   `appcast-x64.xml` и release notes. Скачайте их обратно и сравните SHA-256.
+10. Опубликуйте draft. Включённая immutable releases policy блокирует изменение
+    тега и assets и создаёт release attestation.
+11. Запустите `publish-appcast.yml` из `main`. Он без приватного ключа публично
+    скачает immutable mini-installer и аудит-копию appcast, сверит metadata,
+    SHA-256, PE x64, XML и Ed25519, запретит rollback и только затем развернёт
+    точные проверенные байты на GitHub Pages.
+12. На чистой машине с установленной `1.0.1.0` (release display `1.0.1`)
     выполните ручную проверку обновления. Для следующих выпусков дополнительно
     проверяйте обновление с предыдущей stable-версии.
 
@@ -393,15 +385,16 @@ XML-парсером, скачайте каждый enclosure по опубли�
 версию/тег, затем переведите feed на неё. Сначала draft и все assets, публикация
 — последним действием.
 
-## 7. Что исправить в workflow до первого production-релиза
+## 7. Разделение build/release и production appcast
 
-Текущий `.github/workflows/main.yml` является заготовкой. До его включения:
+Текущий `.github/workflows/main.yml` остаётся заготовкой, а `do-release` должен
+быть выключен до отдельного аудита. Перед его будущим включением:
 
 - замените все жёстко заданные внешние repository/description URL на
   `DanilBend/FocusBrowser` или `${{ github.repository }}`;
 - удалите либо сделайте условными существующие Azure Artifact Signing steps и
   соответствующие секреты, если используется unsigned-сборка или SignPath;
-- добавьте `environment: release` к signing/publish/Pages jobs;
+- добавьте защищённое окружение к signing/publish jobs;
 - оставьте `permissions: contents: read` глобально и выдавайте `contents: write`
   только publish job;
 - закрепите сторонние Actions на полном commit SHA;
@@ -416,7 +409,10 @@ XML-парсером, скачайте каждый enclosure по опубли�
 - добавьте smoke-test: загрузить enclosure, проверить размер, SHA-256,
   Ed25519-подпись и архитектуру PE-файла.
 
-Пока этот аудит не выполнен, `do-release` должен оставаться выключенным.
+Production-развёртывание feed выполняет отдельный
+`.github/workflows/publish-appcast.yml`: он запускается только из `main`,
+ограничен веточной policy окружения `github-pages`, требует stable immutable
+release и не имеет доступа к приватному ключу.
 
 ## 8. Обновление без потери профиля
 
@@ -514,17 +510,16 @@ SignPath принимает заявки open-source проектов на бе�
 Уберите/заморозьте feed до готовности assets, затем повторите полный download и
 signature smoke-test. Клиентам нельзя предлагать URL, который ещё не доступен.
 
-## 11. Финальный чек-лист 1.0.1
+## 11. Финальный чек-лист 1.0.2
 
 - [ ] В исходниках, артефактах, metadata и UI используется только актуальное имя.
-- [ ] `main` и `v*` защищены ruleset.
-- [ ] Окружение `release` требует независимого approval.
-- [ ] Production private key существует только как protected secret и offline backup.
+- [ ] Production private key существует только в зашифрованных offline-копиях.
+- [ ] Окружение `github-pages` разрешает deployment только из `main`.
 - [ ] Pinned `winsparkle-tool` archive совпал с зафиксированным SHA-256.
-- [ ] About/installed/WinSparkle и `sparkle:version` используют `1.0.1.0`;
-      `1.0.1` осталась только presentation-версией упаковки.
-- [ ] x64 и ARM64 собраны с правильными раздельными appcast URL.
-- [ ] Enclosure помечены `windows-x64` и `windows-arm64`, а не generic `windows`.
+- [ ] About/installed/WinSparkle и `sparkle:version` используют `1.0.2.0`;
+      `1.0.2` осталась только presentation-версией упаковки.
+- [ ] x64 собран с правильным appcast URL; будущий ARM64 получит отдельный feed.
+- [ ] Enclosure помечен `windows-x64`, а не generic `windows`.
 - [ ] WinSparkle registry identity осталась
       `HKCU\Software\Focus Browser\Focus Browser\WinSparkle`.
 - [ ] `WINSPARKLE_AUTHENTICODE_ORG` либо не задана, либо точно равна `Subject O`

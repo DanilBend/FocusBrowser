@@ -58,7 +58,7 @@ diff --git a/chrome/browser/resources/new_tab_page/app.ts b/chrome/browser/resou
 diff --git a/chrome/browser/resources/new_tab_page/app.html b/chrome/browser/resources/new_tab_page/app.html
 --- a/chrome/browser/resources/new_tab_page/app.html
 +++ b/chrome/browser/resources/new_tab_page/app.html
-@@ -1,36 +1,29 @@
+@@ -1,36 +1,26 @@
  <div id="content">
 -  ${this.lazyRender_ ? html`
 -    ${this.shortcutsEnabled_ ? html`
@@ -97,10 +97,7 @@ diff --git a/chrome/browser/resources/new_tab_page/app.html b/chrome/browser/res
 +          @focusout="${this.onSearchboxContainerFocusout_}">
 +        <ntp-searchbox id="searchbox" ?is-dark="${this.isThemeDark_()}"
 +            ?color-source-is-baseline="${this.colorSourceIsBaseline}"
-+            ?shown="${this.realboxShown_}"
-+            ?had-secondary-side="${this.realboxHadSecondarySide}"
-+            @had-secondary-side-changed="${this.onRealboxHadSecondarySideChanged_}"
-+            ?can-show-secondary-side="${this.realboxCanShowSecondarySide}">
++            ?shown="${this.realboxShown_}">
 +        </ntp-searchbox>
        </div>
 +    </section>
@@ -166,13 +163,14 @@ diff --git a/chrome/browser/resources/new_tab_page/app.css b/chrome/browser/reso
  /*
   * Below 900px, the threads rail will shift the main content aside.
   * This happens in conjunction with the realbox width change as well,
-@@ -191,12 +212,52 @@ cr-most-visited {
+@@ -191,12 +212,56 @@ cr-most-visited {
  
  #searchboxContainer {
    --cr-focus-outline-color: var(--color-searchbox-results-icon-focused-outline);
 -  display: inherit;
 -  margin-bottom: 16px;
 +  display: block;
++  height: var(--cr-searchbox-height);
 +  margin: 0;
    position: relative;
 +  width: var(--ntp-search-box-width);
@@ -180,6 +178,9 @@ diff --git a/chrome/browser/resources/new_tab_page/app.css b/chrome/browser/reso
  }
  
 +#searchboxContainer ntp-searchbox {
++  inset-block-start: 0;
++  inset-inline-start: 0;
++  position: absolute;
 +  width: 100%;
 +}
 +
@@ -221,7 +222,7 @@ diff --git a/chrome/browser/resources/new_tab_page/app.css b/chrome/browser/reso
  #modules:not([hidden]) {
    /* We use animation instead of transition to allow a fade-in out of
       display: none. */
-@@ -230,14 +291,6 @@ ntp-middle-slot-promo:not([hidden]) ~ #modules {
+@@ -230,14 +295,6 @@ ntp-middle-slot-promo:not([hidden]) ~ #modules {
    margin-top: 16px;
  }
  
@@ -236,7 +237,7 @@ diff --git a/chrome/browser/resources/new_tab_page/app.css b/chrome/browser/reso
  #backgroundImageAttribution {
    border-radius: 8px;
    bottom: 16px;
-@@ -294,25 +347,6 @@ ntp-middle-slot-promo:not([hidden]) ~ #modules {
+@@ -294,25 +351,6 @@ ntp-middle-slot-promo:not([hidden]) ~ #modules {
    font-size: 0.75rem;
  }
  

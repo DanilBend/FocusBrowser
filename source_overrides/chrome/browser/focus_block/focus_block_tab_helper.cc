@@ -3,8 +3,6 @@
 
 #include "chrome/browser/focus_block/focus_block_tab_helper.h"
 
-#include <string_view>
-
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/json/json_writer.h"
@@ -24,8 +22,6 @@ namespace {
 // DOM. Keeping the owned style node in that private global avoids selecting,
 // overwriting, or deleting a page-authored element with a look-alike marker.
 constexpr char kStyleSlot[] = "__focusBrowserNativeBlockerStyle_1_0";
-constexpr size_t kMaxCosmeticCssBytes = 1024 * 1024;
-
 GURL TopLevelUrlForFrame(content::RenderFrameHost* render_frame_host) {
   content::RenderFrameHost* outermost_main_frame =
       render_frame_host ? render_frame_host->GetOutermostMainFrame() : nullptr;
@@ -99,22 +95,12 @@ void FocusBlockTabHelper::ApplyToFrame(
     return;
   }
 
-  std::optional<FocusBlockService::CosmeticResources> resources =
-      service_->GetCosmeticResourcesForUrl(
-          render_frame_host->GetLastCommittedURL(),
-          TopLevelUrlForFrame(render_frame_host));
-  if (!resources) {
-    ClearFrame(render_frame_host);
-    return;
-  }
-
-  const std::string css = BuildCss(resources->hide_selectors);
-  render_frame_host->ExecuteJavaScriptInIsolatedWorld(
-      BuildApplyCssScript(css, /*collect_element_names=*/true),
-      base::BindOnce(&FocusBlockTabHelper::OnElementNamesCollected,
+  service_->GetCosmeticResourcesForUrl(
+      render_frame_host->GetLastCommittedURL(),
+      TopLevelUrlForFrame(render_frame_host), {}, {},
+      base::BindOnce(&FocusBlockTabHelper::OnInitialCosmetics,
                      weak_ptr_factory_.GetWeakPtr(),
-                     render_frame_host->GetWeakDocumentPtr()),
-      ISOLATED_WORLD_ID_CHROME_INTERNAL);
+                     render_frame_host->GetWeakDocumentPtr()));
 }
 
 void FocusBlockTabHelper::ClearFrame(
@@ -132,6 +118,27 @@ void FocusBlockTabHelper::ClearFrame(
       ISOLATED_WORLD_ID_CHROME_INTERNAL);
 }
 
+void FocusBlockTabHelper::OnInitialCosmetics(
+    content::WeakDocumentPtr document,
+    std::optional<FocusBlockService::CosmeticResources> resources) {
+  content::RenderFrameHost* render_frame_host =
+      document.AsRenderFrameHostIfValid();
+  if (!render_frame_host || !render_frame_host->IsRenderFrameLive() ||
+      content::WebContents::FromRenderFrameHost(render_frame_host) !=
+          web_contents()) {
+    return;
+  }
+  if (!resources) {
+    ClearFrame(render_frame_host);
+    return;
+  }
+  render_frame_host->ExecuteJavaScriptInIsolatedWorld(
+      BuildApplyCssScript(resources->css, /*collect_element_names=*/true),
+      base::BindOnce(&FocusBlockTabHelper::OnElementNamesCollected,
+                     weak_ptr_factory_.GetWeakPtr(), document),
+      ISOLATED_WORLD_ID_CHROME_INTERNAL);
+}
+
 void FocusBlockTabHelper::OnElementNamesCollected(
     content::WeakDocumentPtr document,
     base::Value result) {
@@ -145,15 +152,6 @@ void FocusBlockTabHelper::OnElementNamesCollected(
           web_contents()) {
     return;
   }
-  std::optional<FocusBlockService::CosmeticResources> current_resources =
-      service_->GetCosmeticResourcesForUrl(
-          render_frame_host->GetLastCommittedURL(),
-          TopLevelUrlForFrame(render_frame_host));
-  if (!current_resources) {
-    ClearFrame(render_frame_host);
-    return;
-  }
-
   std::vector<std::string> classes;
   std::vector<std::string> ids;
   if (const base::ListValue* class_values =
@@ -173,14 +171,29 @@ void FocusBlockTabHelper::OnElementNamesCollected(
     }
   }
 
-  std::vector<std::string> generic_selectors =
-      service_->GetGenericCosmeticSelectors(*current_resources, classes, ids);
-  current_resources->hide_selectors.insert(
-      current_resources->hide_selectors.end(), generic_selectors.begin(),
-      generic_selectors.end());
+  service_->GetCosmeticResourcesForUrl(
+      render_frame_host->GetLastCommittedURL(),
+      TopLevelUrlForFrame(render_frame_host), classes, ids,
+      base::BindOnce(&FocusBlockTabHelper::OnFinalCosmetics,
+                     weak_ptr_factory_.GetWeakPtr(), document));
+}
+
+void FocusBlockTabHelper::OnFinalCosmetics(
+    content::WeakDocumentPtr document,
+    std::optional<FocusBlockService::CosmeticResources> resources) {
+  content::RenderFrameHost* render_frame_host =
+      document.AsRenderFrameHostIfValid();
+  if (!render_frame_host || !render_frame_host->IsRenderFrameLive() ||
+      content::WebContents::FromRenderFrameHost(render_frame_host) !=
+          web_contents()) {
+    return;
+  }
+  if (!resources) {
+    ClearFrame(render_frame_host);
+    return;
+  }
   render_frame_host->ExecuteJavaScriptInIsolatedWorld(
-      BuildApplyCssScript(BuildCss(current_resources->hide_selectors),
-                          /*collect_element_names=*/false),
+      BuildApplyCssScript(resources->css, /*collect_element_names=*/false),
       base::DoNothing(), ISOLATED_WORLD_ID_CHROME_INTERNAL);
 }
 
@@ -213,26 +226,6 @@ std::u16string FocusBlockTabHelper::BuildApplyCssScript(
   }
   script.append("})();");
   return base::UTF8ToUTF16(script);
-}
-
-std::string FocusBlockTabHelper::BuildCss(
-    const std::vector<std::string>& selectors) const {
-  std::string css;
-  for (const std::string& selector : selectors) {
-    if (selector.empty()) {
-      continue;
-    }
-    constexpr std::string_view kRuleSuffix = "{display:none!important;}\n";
-    if (selector.size() > kMaxCosmeticCssBytes ||
-        css.size() > kMaxCosmeticCssBytes - selector.size() ||
-        css.size() + selector.size() >
-            kMaxCosmeticCssBytes - kRuleSuffix.size()) {
-      break;
-    }
-    css.append(selector);
-    css.append(kRuleSuffix);
-  }
-  return css;
 }
 
 WEB_CONTENTS_USER_DATA_KEY_IMPL(FocusBlockTabHelper);

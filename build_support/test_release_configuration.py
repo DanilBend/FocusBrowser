@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static checks for Focus Browser 1.0.1 release metadata.
+"""Static checks for Focus Browser 1.0.2 release metadata.
 
 This intentionally does not build, sign, install, or launch the browser.
 """
@@ -7,12 +7,16 @@ This intentionally does not build, sign, install, or launch the browser.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ACTIVE = Path(
+    os.environ.get("FOCUS_ACTIVE_SOURCE_ROOT", ROOT / "build" / "src")
+).resolve()
 FAILURES: list[str] = []
 
 
@@ -34,18 +38,18 @@ focus_dotted = (
     "@FOCUS_MAJOR@.@FOCUS_MINOR@.@FOCUS_PATCH@.@FOCUS_PLATFORM@"
 )
 rc_templates = (
-    "build/src/chrome/app/chrome_version.rc.version",
-    "build/src/chrome/installer/mini_installer/mini_installer_exe_version.rc.version",
-    "build/src/chrome/installer/setup/setup_exe_version.rc.version",
+    "chrome/app/chrome_version.rc.version",
+    "chrome/installer/mini_installer/mini_installer_exe_version.rc.version",
+    "chrome/installer/setup/setup_exe_version.rc.version",
 )
 
 for relative_path in rc_templates:
     # build/src is a prepared local Chromium tree and is intentionally absent
     # from a clean repository checkout. The patch mirror below is mandatory in
     # both environments; inspect active templates as an additional local gate.
-    if not (ROOT / relative_path).is_file():
+    if not (ACTIVE / relative_path).is_file():
         continue
-    text = read(relative_path)
+    text = (ACTIVE / relative_path).read_text(encoding="utf-8")
     check(
         text.count(f" FILEVERSION {focus_numeric}") == 1,
         f"{relative_path}: FILEVERSION is not the four-part Focus version",
@@ -74,9 +78,9 @@ release_source_parts = (
     int(read("focus-chromium/revision.txt").splitlines()[0].split(".")[0]),
     int(read("revision.txt").splitlines()[0].split(".")[0]),
 )
-check(release_source_parts == (1, 0, 1, 0), "release inputs must resolve to Focus 1.0.1.0")
+check(release_source_parts == (1, 0, 2, 0), "release inputs must resolve to Focus 1.0.2.0")
 
-active_version_path = ROOT / "build/src/chrome/VERSION"
+active_version_path = ACTIVE / "chrome/VERSION"
 if active_version_path.is_file():
     version_values = {}
     for line in active_version_path.read_text(encoding="utf-8").splitlines():
@@ -86,8 +90,8 @@ if active_version_path.is_file():
     check(
         tuple(version_values.get(key) for key in (
             "FOCUS_MAJOR", "FOCUS_MINOR", "FOCUS_PATCH", "FOCUS_PLATFORM"
-        )) == ("1", "0", "1", "0"),
-        "prepared chrome/VERSION must define Focus 1.0.1.0",
+        )) == ("1", "0", "2", "0"),
+        "prepared chrome/VERSION must define Focus 1.0.2.0",
     )
 
 version_patch = read("patches/focus/windows/focus-versioning.patch")
@@ -134,7 +138,7 @@ for required_text in (
 
 verifier = read("build_support/verify_focus_release.ps1")
 for required_text in (
-    "[string]$ExpectedVersion = '1.0.1.0'",
+    "[string]$ExpectedVersion = '1.0.2.0'",
     "$versionInfo.FileVersion -eq $ExpectedVersion",
     "$versionInfo.ProductVersion -eq $ExpectedVersion",
     "(Join-Path $focusOutDir 'chrome.dll') 'chrome.dll' $true",
@@ -207,15 +211,15 @@ for label, text, signing_steps, final_jobs in (
         check(secret in text, f"{label}: signing prerequisite {secret} is missing")
     check(
         "prerelease: false" in text and "prerelease: true" not in text,
-        f"{label}: Focus 1.0.1 must be a stable release",
+        f"{label}: Focus 1.0.2 must be a stable release",
     )
     check(
         "name: Focus Browser ${{ needs.build-final.outputs.display_version }}" in text,
-        f"{label}: release name is not derived as Focus Browser 1.0.1",
+        f"{label}: release name is not derived as Focus Browser 1.0.2",
     )
     check(
         "tag_name: ${{ needs.build-final.outputs.release_tag }}" in text,
-        f"{label}: release tag is not derived as v1.0.1",
+        f"{label}: release tag is not derived as v1.0.2",
     )
     legacy_brand = "".join(("he", "li", "um"))
     check(
@@ -244,14 +248,15 @@ check(
 # These embedded component versions are independent from the browser's release
 # version. Pinning them here catches accidental rewrites during release work.
 for relative_path, expected_name, expected_version, prepared_only in (
-    ("build/src/third_party/focus_youtube/manifest.json", "FocusYoutube", "1.6.9.1", True),
+    ("third_party/focus_youtube/manifest.json", "FocusYoutube", "1.6.9.1", True),
     ("source_overrides/third_party/focus_youtube/manifest.json", "FocusYoutube", "1.6.9.1", False),
-    ("build/src/third_party/ublock/manifest.json", "FocusBlock", "1.72.2.2", True),
+    ("third_party/ublock/manifest.json", "FocusBlock", "1.72.2.2", True),
     ("source_overrides/third_party/ublock/manifest.json", "FocusBlock", "1.72.2.2", False),
 ):
-    if prepared_only and not (ROOT / relative_path).is_file():
+    manifest_path = (ACTIVE if prepared_only else ROOT) / relative_path
+    if prepared_only and not manifest_path.is_file():
         continue
-    manifest = json.loads(read(relative_path) or "{}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8") or "{}")
     check(manifest.get("name") == expected_name, f"{relative_path}: component name changed")
     check(
         manifest.get("version") == expected_version,
@@ -269,7 +274,7 @@ for safe_default in winsparkle_defaults:
         f"+  {safe_default}" in updater_patch,
         f"updater patch has an unsafe default: expected {safe_default}",
     )
-active_winsparkle_path = ROOT / "build/src/chrome/updater/winsparkle.gni"
+active_winsparkle_path = ACTIVE / "chrome/updater/winsparkle.gni"
 if active_winsparkle_path.is_file():
     active_winsparkle = active_winsparkle_path.read_text(encoding="utf-8")
     for safe_default in winsparkle_defaults:
@@ -298,4 +303,4 @@ if FAILURES:
         print(f"  - {failure}")
     sys.exit(1)
 
-print("PASS: Focus Browser 1.0.1 release configuration is internally consistent")
+print("PASS: Focus Browser 1.0.2 release configuration is internally consistent")

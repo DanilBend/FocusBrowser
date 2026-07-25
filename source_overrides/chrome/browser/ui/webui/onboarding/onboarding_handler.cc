@@ -447,13 +447,9 @@ void OnboardingMessageHandler::HandleSetNtpShortcuts(
     manager->Uninitialize();
   }
 
-  if (requested.empty()) {
-    pref_service_->SetBoolean(ntp_prefs::kNtpCustomLinksVisible, false);
-    pref_service_->SetBoolean(ntp_prefs::kNtpShortcutsVisible, false);
-    pref_service_->SetBoolean(ntp_prefs::kNtpPersonalShortcutsVisible, false);
-    return ResolveJavascriptCallback(callback_id, base::Value(0));
-  }
-
+  // An empty onboarding selection still initializes an empty custom-links
+  // collection. This keeps the clean NTP free of suggested sites while
+  // leaving its localized "Add shortcut" tile available.
   if (!manager->Initialize(ntp_tiles::NTPTilesVector{})) {
     return RejectJavascriptCallback(callback_id,
                                     "failed to initialize shortcuts");

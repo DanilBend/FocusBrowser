@@ -10,13 +10,14 @@
      libs += [
 --- /dev/null
 +++ b/chrome/installer/focus_update_helper/BUILD.gn
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,87 @@
 +# Copyright 2026 The Focus Authors
 +# You can use, redistribute, and/or modify this source code under
 +# the terms of the GPL-3.0 license that can be found in the LICENSE file.
 +
 +import("//build/config/win/manifest.gni")
 +import("//chrome/updater/winsparkle.gni")
++import("//testing/test.gni")
 +
 +assert(is_win)
 +
@@ -76,6 +77,7 @@
 +    "event_log.cc",
 +    "payload_verifier.cc",
 +    "payload_verifier_unittest.cc",
++    "update_install_status_unittest.cc",
 +  ]
 +
 +  defines = [

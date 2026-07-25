@@ -1,0 +1,27 @@
+Name: Ghostery Adblocker
+Short Name: ghostery_adblocker
+URL: https://github.com/ghostery/adblocker
+Version: 2.18.1
+Revision: 67ef23276e93ebc5dd4621cc9df2b09ad9f490d7
+License: MPL-2.0
+License File: LICENSE
+Security Critical: yes
+Shipped: yes
+
+Description:
+Ghostery's embeddable EasyList/uBlock-compatible filtering engine. Focus
+Browser consumes only the platform-independent @ghostery/adblocker core; the
+Ghostery extension UI and product are not included.
+
+Local Modifications:
+The upstream npm module and its transitive dependencies are bundled without
+source modifications. src/focus_ghostery_adblocker.js is a Focus-owned,
+browser-compatible adapter that exposes JSON-safe initialization, request
+matching, serialization and cosmetic-filter entry points. Advanced scriptlet,
+HTML, CSP and extended-selector behavior is disabled by the adapter defaults.
+
+Update Mechanism:
+Update UPSTREAM.json and the exact dependency in package.json, regenerate the
+npm lock file, run `npm ci`, then run `npm run verify`. Never build from an
+unlocked dependency tree and never fetch filter assets from a mutable upstream
+branch at browser runtime.

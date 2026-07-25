@@ -13,6 +13,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "base/base64.h"
 #include "base/base_paths.h"
@@ -34,6 +35,7 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/thread_pool.h"
 #include "base/time/time.h"
+#include "base/version.h"
 #include "base/version_info/version_info.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/buildflags.h"
@@ -41,6 +43,11 @@
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/browser/profiles/profile_manager_observer.h"
 #include "chrome/browser/profiles/profile_observer.h"
+#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "chrome/browser/ui/webui/help/version_updater.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/grit/generated_resources.h"
@@ -56,6 +63,15 @@
 #include "content/public/browser/web_contents.h"
 #include "third_party/winsparkle/include/winsparkle.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
+#include "ui/base/mojom/ui_base_types.mojom-shared.h"
+#include "ui/base/ui_base_types.h"
+#include "ui/views/controls/button/md_text_button.h"
+#include "ui/views/controls/label.h"
+#include "ui/views/layout/box_layout.h"
+#include "ui/views/layout/layout_provider.h"
+#include "ui/views/widget/widget.h"
+#include "ui/views/window/dialog_delegate.h"
 #include "url/gurl.h"
 #include "url/url_constants.h"
 
@@ -123,6 +139,144 @@ std::string SessionToken() {
                                   .ToDeltaSinceWindowsEpoch()
                                   .InMicroseconds());
 }
+
+enum class UpdatePromptResult {
+  kUpdateNow,
+  kRemindLater,
+  kSkipVersion,
+};
+
+// Pure state rules are kept separate from Views and PrefService so the
+// same-session and exact-version behavior remains compile-time testable.
+constexpr bool IsNewUpdateDiscovery(std::string_view stored_version,
+                                    std::string_view discovered_version) {
+  return !discovered_version.empty() &&
+         stored_version != discovered_version;
+}
+
+constexpr bool ShouldOfferStoredUpdate(std::string_view available_version,
+                                       std::string_view skipped_version,
+                                       std::string_view suppressed_session,
+                                       std::string_view current_session) {
+  return !available_version.empty() && available_version != skipped_version &&
+         suppressed_session != current_session;
+}
+
+static_assert(!IsNewUpdateDiscovery("1.0.2", "1.0.2"));
+static_assert(IsNewUpdateDiscovery("1.0.2", "1.0.3"));
+static_assert(!ShouldOfferStoredUpdate("1.0.2", "", "session-a",
+                                      "session-a"));
+static_assert(!ShouldOfferStoredUpdate("1.0.2", "1.0.2", "session-a",
+                                      "session-b"));
+static_assert(ShouldOfferStoredUpdate("1.0.3", "1.0.2", "session-a",
+                                     "session-b"));
+
+PrefService* GetUpdaterLocalState() {
+  return g_browser_process ? g_browser_process->local_state() : nullptr;
+}
+
+bool IsAvailableVersionNewerThanCurrent(std::string_view available_version) {
+  const base::Version available{std::string(available_version)};
+  const base::Version current{
+      std::string(version_info::GetFocusVersionNumber())};
+  return available.IsValid() && current.IsValid() &&
+         current.CompareTo(available) < 0;
+}
+
+class FocusUpdatePrompt final : public views::DialogDelegate {
+ public:
+  using ResultCallback =
+      base::OnceCallback<void(UpdatePromptResult, const std::string&)>;
+
+  FocusUpdatePrompt(std::string version,
+                    ResultCallback result_callback,
+                    base::OnceClosure widget_zombie_callback)
+      : version_(std::move(version)),
+        result_callback_(std::move(result_callback)),
+        widget_zombie_callback_(std::move(widget_zombie_callback)) {
+    SetTitle(l10n_util::GetStringUTF16(IDS_FOCUS_UPDATE_PROMPT_TITLE));
+    SetButtons(static_cast<int>(ui::mojom::DialogButton::kOk) |
+               static_cast<int>(ui::mojom::DialogButton::kCancel));
+    SetButtonLabel(
+        ui::mojom::DialogButton::kOk,
+        l10n_util::GetStringUTF16(IDS_FOCUS_UPDATE_PROMPT_UPDATE_NOW));
+    SetButtonLabel(
+        ui::mojom::DialogButton::kCancel,
+        l10n_util::GetStringUTF16(IDS_FOCUS_UPDATE_PROMPT_REMIND_LATER));
+    SetButtonStyle(ui::mojom::DialogButton::kOk,
+                   ui::ButtonStyle::kProminent);
+    SetButtonStyle(ui::mojom::DialogButton::kCancel,
+                   ui::ButtonStyle::kTonal);
+    SetDefaultButton(static_cast<int>(ui::mojom::DialogButton::kOk));
+    SetAcceptCallback(base::BindOnce(&FocusUpdatePrompt::Resolve,
+                                     base::Unretained(this),
+                                     UpdatePromptResult::kUpdateNow));
+    SetCancelCallback(base::BindOnce(&FocusUpdatePrompt::Resolve,
+                                     base::Unretained(this),
+                                     UpdatePromptResult::kRemindLater));
+    SetCloseCallback(base::BindOnce(&FocusUpdatePrompt::Resolve,
+                                    base::Unretained(this),
+                                    UpdatePromptResult::kRemindLater));
+    auto* skip_button =
+        SetExtraView(std::make_unique<views::MdTextButton>(
+            base::BindRepeating(&FocusUpdatePrompt::SkipVersion,
+                                base::Unretained(this)),
+            l10n_util::GetStringUTF16(
+                IDS_FOCUS_UPDATE_PROMPT_SKIP_VERSION)));
+    skip_button->SetStyle(ui::ButtonStyle::kTonal);
+
+    SetModalType(ui::mojom::ModalType::kWindow);
+    set_fixed_width(views::LayoutProvider::Get()->GetDistanceMetric(
+        views::DISTANCE_MODAL_DIALOG_PREFERRED_WIDTH));
+    views::LayoutProvider* provider = views::LayoutProvider::Get();
+    auto contents = std::make_unique<views::View>();
+    contents->SetLayoutManager(std::make_unique<views::BoxLayout>(
+        views::BoxLayout::Orientation::kVertical,
+        provider->GetInsetsMetric(views::InsetsMetric::INSETS_DIALOG),
+        provider->GetDistanceMetric(
+            views::DISTANCE_RELATED_CONTROL_VERTICAL)));
+
+    auto message = std::make_unique<views::Label>(l10n_util::GetStringFUTF16(
+        IDS_FOCUS_UPDATE_PROMPT_BODY, base::UTF8ToUTF16(version_)));
+    message->SetMultiLine(true);
+    message->SetHorizontalAlignment(gfx::ALIGN_LEFT);
+    contents->AddChildView(std::move(message));
+    SetContentsView(std::move(contents));
+  }
+
+  FocusUpdatePrompt(const FocusUpdatePrompt&) = delete;
+  FocusUpdatePrompt& operator=(const FocusUpdatePrompt&) = delete;
+  ~FocusUpdatePrompt() override = default;
+
+  void ResolveIfPending(UpdatePromptResult result) { Resolve(result); }
+
+ private:
+  void WidgetIsZombie(views::Widget*) override {
+    if (widget_zombie_callback_) {
+      std::move(widget_zombie_callback_).Run();
+    }
+  }
+
+  void Resolve(UpdatePromptResult result) {
+    if (result_callback_) {
+      std::move(result_callback_).Run(result, version_);
+    }
+  }
+
+  void SkipVersion() {
+    Resolve(UpdatePromptResult::kSkipVersion);
+    if (GetWidget()) {
+      GetWidget()->Close();
+    }
+  }
+
+  const std::string version_;
+  ResultCallback result_callback_;
+  base::OnceClosure widget_zombie_callback_;
+};
+
+void PostDiscoveredUpdateVersion(std::string version);
+void PostNoUpdateAvailable();
 
 void MarkSystemUpdatePending() {
   const base::FilePath path = SystemUpdateMarkerPath();
@@ -200,10 +354,15 @@ void PostStatus(VersionUpdater::Status status,
 
 // WinSparkle C callbacks
 void __cdecl OnDidFindUpdate() {
+  char version[128] = {};
+  if (win_sparkle_get_pending_update_version(version, sizeof(version)) > 0) {
+    PostDiscoveredUpdateVersion(version);
+  }
   PostStatus(VersionUpdater::UPDATING);
 }
 
 void __cdecl OnDidNotFindUpdate() {
+  PostNoUpdateAvailable();
   PostStatus(VersionUpdater::UPDATED);
 }
 
@@ -282,7 +441,8 @@ void ApplyAppcastUrl() {
 }
 
 class WinSparkleController : public ProfileObserver,
-                             public ProfileManagerObserver {
+                             public ProfileManagerObserver,
+                             public BrowserCollectionObserver {
  public:
   static WinSparkleController& GetInstance() {
     static base::NoDestructor<WinSparkleController> instance;
@@ -300,7 +460,62 @@ class WinSparkleController : public ProfileObserver,
     if (ProfileManager* manager = GetProfileManager()) {
       profile_manager_observation_.Observe(manager);
     }
+    if (GlobalBrowserCollection* browsers =
+            GlobalBrowserCollection::GetInstance()) {
+      browser_collection_observation_.Observe(browsers);
+    }
+    DiscardObsoleteStoredUpdate();
     AcquireProfile(initial_profile, /*exclude=*/nullptr);
+    if (GlobalBrowserCollection* browsers =
+            GlobalBrowserCollection::GetInstance()) {
+      if (BrowserWindowInterface* active = browsers->GetActiveBrowser()) {
+        MaybeShowUpdatePrompt(active);
+      }
+    }
+  }
+
+  void RecordDiscoveredVersion(const std::string& version) {
+    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+    PrefService* local_state = GetUpdaterLocalState();
+    if (!local_state || !IsAvailableVersionNewerThanCurrent(version)) {
+      return;
+    }
+
+    const std::string stored =
+        local_state->GetString(prefs::kFocusUpdaterAvailableVersion);
+    if (!IsNewUpdateDiscovery(stored, version)) {
+      return;
+    }
+
+    local_state->SetString(prefs::kFocusUpdaterAvailableVersion, version);
+    local_state->SetString(prefs::kFocusUpdaterSuppressedSession,
+                           SessionToken());
+    if (local_state->GetString(prefs::kFocusUpdaterSkippedVersion) !=
+        version) {
+      local_state->ClearPref(prefs::kFocusUpdaterSkippedVersion);
+    }
+  }
+
+  void ClearDiscoveredVersion() {
+    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+    PrefService* local_state = GetUpdaterLocalState();
+    if (!local_state) {
+      return;
+    }
+    const std::string available =
+        local_state->GetString(prefs::kFocusUpdaterAvailableVersion);
+    local_state->ClearPref(prefs::kFocusUpdaterAvailableVersion);
+    local_state->ClearPref(prefs::kFocusUpdaterSuppressedSession);
+    if (!available.empty() &&
+        local_state->GetString(prefs::kFocusUpdaterSkippedVersion) ==
+            available) {
+      local_state->ClearPref(prefs::kFocusUpdaterSkippedVersion);
+    }
+  }
+
+  // BrowserCollectionObserver:
+  void OnBrowserActivated(BrowserWindowInterface* browser) override {
+    MaybeShowUpdatePrompt(browser);
   }
 
   // ProfileManagerObserver:
@@ -342,6 +557,132 @@ class WinSparkleController : public ProfileObserver,
 
   static bool ProfileCanUpdate(Profile* profile) {
     return profile && focus::WinSparkleEnabled(profile->GetPrefs());
+  }
+
+  void DiscardObsoleteStoredUpdate() {
+    PrefService* local_state = GetUpdaterLocalState();
+    if (!local_state) {
+      return;
+    }
+    const std::string available =
+        local_state->GetString(prefs::kFocusUpdaterAvailableVersion);
+    if (available.empty() || IsAvailableVersionNewerThanCurrent(available)) {
+      return;
+    }
+    local_state->ClearPref(prefs::kFocusUpdaterAvailableVersion);
+    local_state->ClearPref(prefs::kFocusUpdaterSuppressedSession);
+    if (local_state->GetString(prefs::kFocusUpdaterSkippedVersion) ==
+        available) {
+      local_state->ClearPref(prefs::kFocusUpdaterSkippedVersion);
+    }
+  }
+
+  void MaybeShowUpdatePrompt(BrowserWindowInterface* browser) {
+    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+    if (prompt_visible_ || !browser ||
+        browser->GetType() != BrowserWindowInterface::TYPE_NORMAL ||
+        !browser->GetProfile() ||
+        !browser->GetProfile()->IsRegularProfile() ||
+        !ProfileCanUpdate(browser->GetProfile())) {
+      return;
+    }
+
+    PrefService* local_state = GetUpdaterLocalState();
+    if (!local_state) {
+      return;
+    }
+    const std::string available =
+        local_state->GetString(prefs::kFocusUpdaterAvailableVersion);
+    if (!IsAvailableVersionNewerThanCurrent(available) ||
+        !ShouldOfferStoredUpdate(
+            available,
+            local_state->GetString(prefs::kFocusUpdaterSkippedVersion),
+            local_state->GetString(prefs::kFocusUpdaterSuppressedSession),
+            SessionToken())) {
+      return;
+    }
+
+    Browser* legacy_browser = browser->GetBrowserForMigrationOnly();
+    if (!legacy_browser || !legacy_browser->window()) {
+      return;
+    }
+
+    // Mark the process session before creating the widget. This makes both
+    // window close and any activation reentrancy a single prompt per launch.
+    local_state->SetString(prefs::kFocusUpdaterSuppressedSession,
+                           SessionToken());
+    prompt_visible_ = true;
+    auto prompt = std::make_unique<FocusUpdatePrompt>(
+        available,
+        base::BindOnce(&WinSparkleController::OnUpdatePromptResult,
+                       base::Unretained(this)),
+        base::BindOnce(
+            &WinSparkleController::OnUpdatePromptWidgetBecameZombie,
+            base::Unretained(this)));
+    prompt->SetOwnershipOfNewWidget(
+        views::Widget::InitParams::CLIENT_OWNS_WIDGET);
+    update_prompt_ = std::move(prompt);
+    update_prompt_widget_.reset(views::DialogDelegate::CreateDialogWidget(
+        update_prompt_.get(), legacy_browser->window()->GetNativeWindow(),
+        nullptr));
+    update_prompt_widget_->MakeCloseSynchronous(base::BindOnce(
+        &WinSparkleController::OnUpdatePromptCloseRequested,
+        base::Unretained(this)));
+    update_prompt_widget_->Show();
+  }
+
+  void OnUpdatePromptResult(UpdatePromptResult result,
+                            const std::string& version) {
+    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+    switch (result) {
+      case UpdatePromptResult::kUpdateNow:
+        // This is the only prompt action that starts an update download.
+        win_sparkle_check_update_with_ui_and_install();
+        return;
+      case UpdatePromptResult::kRemindLater:
+        return;
+      case UpdatePromptResult::kSkipVersion:
+        if (PrefService* local_state = GetUpdaterLocalState()) {
+          const std::string available = local_state->GetString(
+              prefs::kFocusUpdaterAvailableVersion);
+          if (available == version) {
+            local_state->SetString(prefs::kFocusUpdaterSkippedVersion,
+                                   version);
+          }
+        }
+        return;
+    }
+  }
+
+  void OnUpdatePromptCloseRequested(views::Widget::ClosedReason) {
+    ScheduleUpdatePromptDestruction();
+  }
+
+  void OnUpdatePromptWidgetBecameZombie() {
+    ScheduleUpdatePromptDestruction();
+  }
+
+  void ScheduleUpdatePromptDestruction() {
+    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+    if (update_prompt_) {
+      update_prompt_->ResolveIfPending(UpdatePromptResult::kRemindLater);
+    }
+    if (prompt_destruction_scheduled_) {
+      return;
+    }
+    prompt_destruction_scheduled_ = true;
+    content::GetUIThreadTaskRunner({})->PostTask(
+        FROM_HERE,
+        base::BindOnce(&WinSparkleController::DestroyUpdatePrompt,
+                       base::Unretained(this)));
+  }
+
+  void DestroyUpdatePrompt() {
+    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+    update_prompt_widget_.reset();
+    update_prompt_.reset();
+    prompt_destruction_scheduled_ = false;
+    prompt_visible_ = false;
   }
 
   // Adopts a profile to drive updates if none is active. No-op if one
@@ -443,11 +784,32 @@ class WinSparkleController : public ProfileObserver,
   raw_ptr<Profile> profile_ = nullptr;
   bool initialized_ = false;
   bool started_ = false;
+  bool prompt_visible_ = false;
+  bool prompt_destruction_scheduled_ = false;
+  std::unique_ptr<FocusUpdatePrompt> update_prompt_;
+  std::unique_ptr<views::Widget> update_prompt_widget_;
   PrefChangeRegistrar registrar_;
   base::ScopedObservation<Profile, ProfileObserver> profile_observation_{this};
   base::ScopedObservation<ProfileManager, ProfileManagerObserver>
       profile_manager_observation_{this};
+  base::ScopedObservation<GlobalBrowserCollection, BrowserCollectionObserver>
+      browser_collection_observation_{this};
 };
+
+void PostDiscoveredUpdateVersion(std::string version) {
+  content::GetUIThreadTaskRunner({})->PostTask(
+      FROM_HERE,
+      base::BindOnce(&WinSparkleController::RecordDiscoveredVersion,
+                     base::Unretained(&WinSparkleController::GetInstance()),
+                     std::move(version)));
+}
+
+void PostNoUpdateAvailable() {
+  content::GetUIThreadTaskRunner({})->PostTask(
+      FROM_HERE,
+      base::BindOnce(&WinSparkleController::ClearDiscoveredVersion,
+                     base::Unretained(&WinSparkleController::GetInstance())));
+}
 
 class VersionUpdaterWinSparkle : public VersionUpdater {
  public:
