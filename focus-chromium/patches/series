@@ -236,6 +236,7 @@ focus/ui/update-cr-components.patch
 focus/ui/always-use-better-ntp.patch
 focus/ui/clean-new-tab-page.patch
 focus/ui/focus-new-tab-page.patch
+focus/ui/focus-new-tab-controls.patch
 focus/ui/remove-toolbar-corners.patch
 focus/ui/location-bar.patch
 focus/ui/location-bar-page-action.patch

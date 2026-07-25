@@ -101,7 +101,7 @@
          Notifies the UI that a new version is available.
 --- /dev/null
 +++ b/third_party/winsparkle/src/ui_headless.cpp
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,162 @@
 +// Copyright 2026 The Focus Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -196,14 +196,28 @@
 +}
 +
 +// static
-+void UI::NotifyUpdateAvailable(const Appcast& info, bool) {
-+  if (UpdateAlreadyDownloaded(info.Version)) {
++void UI::NotifyUpdateAvailable(const Appcast& info,
++                               bool installAutomatically) {
++  // Focus Browser only supports the signed enclosure installer flow. A
++  // WebBrowserURL-only appcast is not actionable by the browser-owned update
++  // prompt, so treat it as no installable update and clear any stale pending
++  // version instead of presenting a button that can never download.
++  if (!info.HasDownload()) {
++    ApplicationController::NotifyUpdateNotFound();
 +    return;
 +  }
 +
++  ApplicationController::SetPendingUpdateVersion(info.Version);
 +  ApplicationController::NotifyUpdateFound();
 +
-+  if (!info.HasDownload()) {
++  // Periodic and one-shot background checks only report discovery. The
++  // browser-owned prompt (or an explicit About-page check) starts the signed
++  // download through ManualAutoInstallUpdateChecker.
++  if (!installAutomatically) {
++    return;
++  }
++
++  if (UpdateAlreadyDownloaded(info.Version)) {
 +    return;
 +  }
 +

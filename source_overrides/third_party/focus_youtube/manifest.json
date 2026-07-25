@@ -30,8 +30,7 @@
     {
       "matches": [
         "https://youtube.com/*",
-        "https://www.youtube.com/*",
-        "https://m.youtube.com/*"
+        "https://*.youtube.com/*"
       ],
       "css": [
         "content-script/main.css"
@@ -51,7 +50,6 @@
   ],
   "host_permissions": [
     "https://youtube.com/*",
-    "https://www.youtube.com/*",
-    "https://m.youtube.com/*"
+    "https://*.youtube.com/*"
   ]
 }

@@ -9,7 +9,9 @@ import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const sourceRoot = path.join(repoRoot, 'build', 'src');
+const sourceRoot = process.env.FOCUS_ACTIVE_SOURCE_ROOT ?
+  path.resolve(process.env.FOCUS_ACTIVE_SOURCE_ROOT) :
+  path.join(repoRoot, 'build', 'src');
 const overridesRoot = path.join(repoRoot, 'source_overrides');
 
 function walk(root, predicate = () => true) {
@@ -27,6 +29,14 @@ function walk(root, predicate = () => true) {
 
 function read(relativePath) {
   return fs.readFileSync(path.join(sourceRoot, relativePath), 'utf8');
+}
+
+function readMirroredFile(file) {
+  const bytes = fs.readFileSync(file);
+  if (!/\.(?:cc|css|gn|gni|grd|grdp|h|html|icon|js|json|mojom|py|svelte|svg|ts|txt|chromium)$/i.test(file)) {
+    return bytes;
+  }
+  return Buffer.from(bytes.toString('utf8').replace(/\r\n?/g, '\n'), 'utf8');
 }
 
 function parseJson(file) {
@@ -105,8 +115,7 @@ assert.equal(focusYoutubeManifest.options_ui, undefined);
 assert.deepEqual(focusYoutubeManifest.permissions, ['storage', 'alarms']);
 assert.deepEqual(focusYoutubeManifest.host_permissions, [
   'https://youtube.com/*',
-  'https://www.youtube.com/*',
-  'https://m.youtube.com/*',
+  'https://*.youtube.com/*',
 ]);
 assert.deepEqual(focusYoutubeManifest.content_scripts[0].matches,
                  focusYoutubeManifest.host_permissions);
@@ -178,6 +187,9 @@ vm.runInContext(
 const focusYoutubeSchema = schemaContext.FocusYoutubeSettings;
 assert.equal(focusYoutubeSchema.behaviorIds.length, 93);
 assert.equal(new Set(focusYoutubeSchema.behaviorIds).size, 93);
+assert.equal(focusYoutubeSchema.defaults.focus_youtube_schema_version, 4);
+assert.equal(focusYoutubeSchema.nativeBehaviorIds.length, 29);
+assert.equal(new Set(focusYoutubeSchema.nativeBehaviorIds).size, 29);
 assert.ok(Object.values(focusYoutubeSchema.behaviorDefaults)
     .every(value => value === false));
 assert.equal(focusYoutubeSchema.defaults.global_enable, true);
@@ -555,8 +567,12 @@ assert.match(focusBlockProxy, /class FocusBlockProxyingURLLoaderFactory/);
 assert.match(focusBlockProxy, /class FocusBlockURLLoader/);
 assert.match(
     focusBlockProxy,
-    /OnReceiveRedirect\([\s\S]*?ShouldBlock\(redirected_request\)/,
+    /OnReceiveRedirect\([\s\S]*?CheckRequest\([\s\S]*?OnReceiveRedirectDecision/,
     'Redirect targets must be checked before reaching the renderer');
+assert.match(
+    focusBlockProxy,
+    /OnFollowRedirectDecision[\s\S]*?ERR_BLOCKED_BY_CLIENT/,
+    'Caller-supplied redirect targets must also wait for Ghostery');
 assert.match(focusBlockProxy, /net::ERR_BLOCKED_BY_CLIENT/);
 assert.match(focusBlockProxy, /client_receiver_\.set_disconnect_handler/);
 assert.match(focusBlockProxy, /GetOutermostMainFrame\(\)/);
@@ -571,9 +587,27 @@ assert.match(
     /ShouldBlock\([\s\S]*?top_level_url[\s\S]*?source_url/);
 assert.match(focusBlockService, /blocked_count_by_site_/);
 assert.match(focusBlockService, /GetCosmeticResourcesForUrl/);
-
-const focusBlockRustBuild = read('components/focus_block/rs/BUILD.gn');
-assert.match(focusBlockRustBuild, /third_party\/rust\/adblock\/v0_13:lib/);
+assert.match(focusBlockService, /EnsureGhosteryV8Initialized/);
+assert.match(focusBlockService, /CreateSingleThreadTaskRunner/);
+assert.match(focusBlockService, /FocusBlockGhosteryEngine::Match/);
+assert.match(focusBlockService, /FocusBlockGhosteryEngine::GetCosmetics/);
+assert.doesNotMatch(focusBlockService, /rust::|engine_from_filter_set/);
+assert.match(focusBlockBuild, /third_party\/ghostery_adblocker:resources/);
+assert.doesNotMatch(focusBlockBuild, /components\/focus_block:native_engine/);
+const focusBlockGhosteryEngine = read(
+    'chrome/browser/focus_block/focus_block_ghostery_engine.cc');
+assert.match(focusBlockGhosteryEngine, /gin::IsolateHolder/);
+assert.match(focusBlockGhosteryEngine, /matchRawDetails/);
+assert.match(focusBlockGhosteryEngine, /cosmeticsRawDetails/);
+assert.match(focusBlockGhosteryEngine, /TextEncoder/);
+const ghosteryMetadata = JSON.parse(read(
+    'third_party/ghostery_adblocker/UPSTREAM.json'));
+assert.equal(ghosteryMetadata.version, '2.18.1');
+assert.equal(
+    ghosteryMetadata.commit,
+    '67ef23276e93ebc5dd4621cc9df2b09ad9f490d7');
+assert.match(read('chrome/chrome_paks.gni'),
+             /third_party\/ghostery_adblocker\/resources\/ghostery_adblocker_resources\.pak/);
 assert.match(read('chrome/browser/extensions/BUILD.gn'),
              /\/\/components\/focus_services/);
 assert.match(read('extensions/browser/BUILD.gn'),
@@ -644,10 +678,12 @@ const focusYoutubeBubble = read(
     'chrome/browser/ui/views/toolbar/focus_youtube_bubble_view.cc');
 const focusYoutubeBubbleHeader = read(
     'chrome/browser/ui/views/toolbar/focus_youtube_bubble_view.h');
+const focusYoutubeIcon = read(
+    'components/vector_icons/focus_youtube_off.icon');
 assert.doesNotMatch(toolbarView,
                     /focus_block_button_ = AddChildView\(std::make_unique<ToolbarButton>/);
-assert.match(toolbarView,
-             /focus_youtube_button_ = AddChildView\(std::make_unique<ToolbarButton>/);
+assert.doesNotMatch(toolbarView,
+                    /focus_youtube_button_ = AddChildView\(std::make_unique<ToolbarButton>/);
 assert.doesNotMatch(toolbarView, /ReorderChildView\(focus_block_button_/);
 assert.doesNotMatch(toolbarViewHeader,
                     /raw_ptr<ToolbarButton> focus_block_button_/);
@@ -665,14 +701,38 @@ assert.match(locationBarViewHeader,
              /void SetFocusBlockButtonVisible\(bool visible\)/);
 assert.match(locationBarViewHeader,
              /virtual void ShowFocusBlockPopup\(views::View\*\)/);
-assert.match(toolbarViewHeader, /raw_ptr<ToolbarButton> focus_youtube_button_/);
+assert.doesNotMatch(toolbarViewHeader,
+                    /raw_ptr<ToolbarButton> focus_youtube_button_/);
+assert.match(locationBarView,
+             /focus_youtube_button = views::CreateVectorImageButton\(/);
+assert.match(locationBarView,
+             /focus_youtube_button_ = AddChildView\(std::move\(focus_youtube_button\)\)/);
+assert.match(locationBarView,
+             /add_trailing_decoration\(focus_youtube_button_/,
+             'FocusYoutube must live inside the address field');
+assert.match(locationBarView,
+             /IncrementalMinimumWidth\(focus_youtube_button_\)/,
+             'Narrow omnibox layouts must reserve space for FocusYoutube');
+assert.match(locationBarView,
+             /vector_icons::kFocusYoutubeOffIcon/,
+             'FocusYoutube must use the crossed-out YouTube icon');
+assert.match(locationBarView,
+             /delegate_->ShowFocusYoutubePopup\(focus_youtube_button_\)/);
+assert.match(locationBarViewHeader,
+             /raw_ptr<views::ImageButton> focus_youtube_button_/);
+assert.match(locationBarViewHeader,
+             /void SetFocusYoutubeButtonVisible\(bool visible\)/);
+assert.match(locationBarViewHeader,
+             /virtual void ShowFocusYoutubePopup\(views::View\*\)/);
+assert.match(focusYoutubeIcon,
+             /MOVE_TO, 3\.2f, 2\.2f,[\s\S]*LINE_TO, 17\.8f, 16\.8f/);
 assert.match(toolbarView,
              /FocusBlockBubbleView::ShowBubble\(browser_, anchor_view\)/,
              'FocusBlock must open its native Views bubble');
 assert.doesNotMatch(toolbarView,
                     /ShowFocusComponentPopup\(focus::kUBlockOriginComponentId/);
 assert.match(toolbarView,
-             /FocusYoutubeBubbleView::ShowBubble\(browser_, focus_youtube_button_\)/,
+             /FocusYoutubeBubbleView::ShowBubble\(browser_, anchor_view\)/,
              'FocusYoutube must open its native Views bubble');
 assert.doesNotMatch(toolbarView,
                     /ShowFocusComponentPopup\(focus::kFocusYoutubeComponentId/);
@@ -683,7 +743,21 @@ assert.match(focusYoutubeBubbleHeader,
 assert.match(focusYoutubeBubble,
              /FocusYoutubeBubbleView::ShowBubble\(Browser\* browser,/);
 assert.match(focusYoutubeBubble,
-             /constexpr std::array<FeatureSpec, 20> kFeatures/);
+             /constexpr std::array<FeatureSpec, 25> kFeatures/);
+assert.match(focusYoutubeBubble,
+             /constexpr int kFocusYoutubeSchemaVersion = 4/);
+assert.match(focusYoutubeBubble,
+             /CompositeFeature\(3, "remove_trending_page", "remove_explore_link",[\s\S]*?"remove_explore_section"/);
+assert.match(focusYoutubeBubble,
+             /CompositeFeature\(3, "remove_subscriptions_page",[\s\S]*?"remove_subscriptions_link", "remove_sub_section"/);
+const focusYoutubeFeatureWrite = focusYoutubeBubble.match(
+    /void FocusYoutubeBubbleView::OnFeatureTogglePressed\([\s\S]*?\) \{([\s\S]*?)\n\}/)?.[1];
+assert.ok(focusYoutubeFeatureWrite);
+assert.match(focusYoutubeFeatureWrite,
+             /base::DictValue values;[\s\S]*StorageKeys\(\*feature\)[\s\S]*values\.Set\(storage_key, requested_value\)/);
+assert.equal(
+    [...focusYoutubeFeatureWrite.matchAll(/storage->Set\s*\(/g)].length, 1,
+    'Composite FocusYoutube controls must use one atomic storage write');
 assert.match(focusYoutubeBubble,
              /constexpr std::array<GroupSpec, 4> kGroups/);
 assert.match(focusYoutubeBubble,
@@ -708,15 +782,19 @@ assert.match(focusBlockBubble,
 assert.match(focusBlockBubble,
              /blocked_count_session\(\)/);
 assert.match(focusBlockBubble,
-             /EasyList \+ EasyPrivacy[\s\S]*?adblock-rust 0\.13\.2/);
+             /EasyList \+ EasyPrivacy[\s\S]*?Ghostery 2\.18\.1/);
 assert.doesNotMatch(focusBlockBubble, /https?:\/\//,
                     'Native FocusBlock bubble must not link outside the browser');
 assert.match(toolbarView,
-             /host == "youtube\.com" \|\| host == "www\.youtube\.com" \|\|[\s\S]{0,40}host == "m\.youtube\.com"/);
+             /bool IsFocusYoutubeUrl\(const GURL& url\) \{[\s\S]*?url\.SchemeIs\(url::kHttpsScheme\)[\s\S]*?url\.DomainIs\("youtube\.com"\)/);
+assert.doesNotMatch(toolbarView,
+                    /bool IsFocusYoutubeUrl[\s\S]{0,240}(?:host\s*==|ends_with|StartsWith)/);
 assert.match(toolbarView, /GetVisibleURL\(\)/);
-assert.match(toolbarView, /visible_url\.is_valid\(\) \? visible_url : tab->GetLastCommittedURL\(\)/);
-assert.match(toolbarView, /context_url\.SchemeIs\(url::kHttpsScheme\)/);
-assert.doesNotMatch(toolbarView, /DomainIs\("youtube\.com"\)|ends_with|StartsWith/);
+assert.match(toolbarView, /GetLastCommittedURL\(\)/);
+assert.match(toolbarView,
+             /IsFocusYoutubeUrl\(visible_url\) \|\|[\s\S]*?IsFocusYoutubeUrl\(committed_url\)/);
+assert.match(toolbarView,
+             /location_bar_view_->SetFocusYoutubeButtonVisible\(/);
 
 // Default-browser handoff must fail closed. The native handler is shared by
 // Settings and onboarding, so neither stale policy state nor malformed WebUI
@@ -876,7 +954,7 @@ for (const overrideFile of relevantOverrideFiles) {
   const relative = path.relative(overridesRoot, overrideFile);
   const sourceFile = path.join(sourceRoot, relative);
   assert.ok(fs.existsSync(sourceFile), `Override target is missing: ${relative}`);
-  assert.deepEqual(fs.readFileSync(overrideFile), fs.readFileSync(sourceFile),
+  assert.deepEqual(readMirroredFile(overrideFile), readMirroredFile(sourceFile),
                    `Override differs from active source: ${relative}`);
 }
 

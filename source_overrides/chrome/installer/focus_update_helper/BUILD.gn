@@ -4,6 +4,7 @@
 
 import("//build/config/win/manifest.gni")
 import("//chrome/updater/winsparkle.gni")
+import("//testing/test.gni")
 
 assert(is_win)
 

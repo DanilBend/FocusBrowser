@@ -1,0 +1,10 @@
+{
+  "name": "@ghostery/adblocker",
+  "version": "2.18.1",
+  "repository": "https://github.com/ghostery/adblocker",
+  "tag": "v2.18.1",
+  "commit": "67ef23276e93ebc5dd4621cc9df2b09ad9f490d7",
+  "npmTarball": "https://registry.npmjs.org/@ghostery/adblocker/-/adblocker-2.18.1.tgz",
+  "npmIntegrity": "sha512-pWMJqpXpuqIlcF3ZZQ2E7ixnC7xhtYn/bpOn3N69vFrAm4wrZCIbKzz1+xSxKWCmJvDT4fg7rN2R6jQwFXm5BA==",
+  "license": "MPL-2.0"
+}

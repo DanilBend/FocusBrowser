@@ -268,6 +268,24 @@
   <release seq="1">
     <!-- IMPORTANT: .grdp files must be in the same directory as this file -->
     <messages fallback_to_english="true">
+      <if expr="is_win">
+        <message name="IDS_FOCUS_UPDATE_PROMPT_TITLE" desc="Title of the Focus Browser update prompt shown on the launch after an update is discovered.">
+          Focus Browser update available
+        </message>
+        <message name="IDS_FOCUS_UPDATE_PROMPT_BODY" desc="Body of the Focus Browser update prompt. The placeholder is the available browser version.">
+          Focus Browser version <ph name="VERSION">$1<ex>1.0.2</ex></ph> is available. Your bookmarks, passwords, and other profile data will be kept.
+        </message>
+        <message name="IDS_FOCUS_UPDATE_PROMPT_UPDATE_NOW" desc="Button that starts downloading and installing a discovered Focus Browser update.">
+          Update now
+        </message>
+        <message name="IDS_FOCUS_UPDATE_PROMPT_REMIND_LATER" desc="Button that dismisses the Focus Browser update prompt until the next browser launch.">
+          Remind me later
+        </message>
+        <message name="IDS_FOCUS_UPDATE_PROMPT_SKIP_VERSION" desc="Button that suppresses the currently offered Focus Browser version while still allowing later versions to be offered.">
+          Skip this version
+        </message>
+      </if>
+
       <!-- Access Code Cast specific strings -->
       <part file="access_code_cast_strings.grdp" />
 

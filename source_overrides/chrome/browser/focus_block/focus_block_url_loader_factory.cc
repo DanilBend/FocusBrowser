@@ -111,13 +111,6 @@ GURL MatchSourceUrlForRequest(const network::ResourceRequest& request,
   return top_level_url;
 }
 
-void CompleteBlocked(
-    mojo::PendingRemote<network::mojom::URLLoaderClient> client) {
-  mojo::Remote<network::mojom::URLLoaderClient>(std::move(client))
-      ->OnComplete(
-          network::URLLoaderCompletionStatus(net::ERR_BLOCKED_BY_CLIENT));
-}
-
 class FocusBlockURLLoader final : public network::mojom::URLLoader,
                                   public network::mojom::URLLoaderClient {
  public:
@@ -131,22 +124,22 @@ class FocusBlockURLLoader final : public network::mojom::URLLoader,
       base::WeakPtr<FocusBlockService> service,
       GURL top_level_url,
       GURL match_source_url)
-      : request_(request),
+      : request_id_(request_id),
+        options_(options),
+        request_(request),
         client_(std::move(client)),
+        traffic_annotation_(traffic_annotation),
         service_(std::move(service)),
         top_level_url_(std::move(top_level_url)),
         match_source_url_(std::move(match_source_url)) {
     target_factory_.Bind(std::move(target_factory));
-    mojo::PendingRemote<network::mojom::URLLoaderClient> proxy_client;
-    client_receiver_.Bind(proxy_client.InitWithNewPipeAndPassReceiver());
-    client_receiver_.set_disconnect_handler(base::BindOnce(
-        &FocusBlockURLLoader::OnTargetDisconnected, base::Unretained(this)));
     client_.set_disconnect_handler(base::BindOnce(
         &FocusBlockURLLoader::OnUpstreamClientDisconnected,
         base::Unretained(this)));
-    target_factory_->CreateLoaderAndStart(
-        target_loader_.BindNewPipeAndPassReceiver(), request_id, options,
-        request_, std::move(proxy_client), traffic_annotation);
+    CheckRequest(
+        request_,
+        base::BindOnce(&FocusBlockURLLoader::OnInitialDecision,
+                       weak_ptr_factory_.GetWeakPtr()));
   }
 
   FocusBlockURLLoader(const FocusBlockURLLoader&) = delete;
@@ -161,21 +154,31 @@ class FocusBlockURLLoader final : public network::mojom::URLLoader,
       return;
     }
 
-    if (pending_redirect_request_) {
-      request_ = std::move(*pending_redirect_request_);
-      pending_redirect_request_.reset();
+    if (!pending_redirect_request_) {
+      return;
     }
+    request_ = std::move(*pending_redirect_request_);
+    pending_redirect_request_.reset();
     if (new_url) {
-      request_.url = *new_url;
-      if (request_.trusted_params) {
-        request_.trusted_params->isolation_info =
-            request_.trusted_params->isolation_info.CreateForRedirect(
+      network::ResourceRequest redirected_request = request_;
+      redirected_request.url = *new_url;
+      if (redirected_request.trusted_params) {
+        redirected_request.trusted_params->isolation_info =
+            redirected_request.trusted_params->isolation_info.CreateForRedirect(
                 url::Origin::Create(*new_url));
       }
-      if (ShouldBlock(request_)) {
-        BlockRequest();
-        return;
-      }
+      // Keep the request inspected by Ghostery independent from the request
+      // moved into the completion callback. Function argument evaluation order
+      // is not guaranteed, so moving and inspecting one instance in the same
+      // full-expression could otherwise produce a moved-from match request.
+      network::ResourceRequest request_for_match = redirected_request;
+      CheckRequest(
+          request_for_match,
+          base::BindOnce(&FocusBlockURLLoader::OnFollowRedirectDecision,
+                         weak_ptr_factory_.GetWeakPtr(),
+                         std::move(headers_update_params), new_url,
+                         std::move(redirected_request)));
+      return;
     }
 
     target_loader_->FollowRedirect(std::move(headers_update_params), new_url);
@@ -213,15 +216,15 @@ class FocusBlockURLLoader final : public network::mojom::URLLoader,
 
     network::ResourceRequest redirected_request = request_;
     redirected_request.UpdateOnRedirect(redirect_info);
-    if (ShouldBlock(redirected_request)) {
-      BlockRequest();
-      return;
-    }
-
-    pending_redirect_request_ = std::move(redirected_request);
-    if (client_) {
-      client_->OnReceiveRedirect(redirect_info, std::move(head));
-    }
+    // Use a separate match copy for the same evaluation-order reason as the
+    // caller-supplied redirect path in FollowRedirect().
+    network::ResourceRequest request_for_match = redirected_request;
+    CheckRequest(
+        request_for_match,
+        base::BindOnce(&FocusBlockURLLoader::OnReceiveRedirectDecision,
+                       weak_ptr_factory_.GetWeakPtr(),
+                       std::move(redirected_request), redirect_info,
+                       std::move(head)));
   }
 
   void OnUploadProgress(int64_t current_position,
@@ -254,9 +257,73 @@ class FocusBlockURLLoader final : public network::mojom::URLLoader,
   }
 
  private:
-  bool ShouldBlock(const network::ResourceRequest& request) {
-    return service_ &&
-           service_->ShouldBlock(request, top_level_url_, match_source_url_);
+  void CheckRequest(const network::ResourceRequest& request,
+                    FocusBlockService::ShouldBlockCallback callback) {
+    if (!service_) {
+      std::move(callback).Run(false);
+      return;
+    }
+    service_->ShouldBlock(request, top_level_url_, match_source_url_,
+                          std::move(callback));
+  }
+
+  void OnInitialDecision(bool should_block) {
+    if (completed_) {
+      return;
+    }
+    if (should_block) {
+      BlockRequest();
+      return;
+    }
+    if (!target_factory_) {
+      completed_ = true;
+      if (client_) {
+        client_->OnComplete(
+            network::URLLoaderCompletionStatus(net::ERR_FAILED));
+      }
+      return;
+    }
+    mojo::PendingRemote<network::mojom::URLLoaderClient> proxy_client;
+    client_receiver_.Bind(proxy_client.InitWithNewPipeAndPassReceiver());
+    client_receiver_.set_disconnect_handler(base::BindOnce(
+        &FocusBlockURLLoader::OnTargetDisconnected, base::Unretained(this)));
+    target_factory_->CreateLoaderAndStart(
+        target_loader_.BindNewPipeAndPassReceiver(), request_id_, options_,
+        request_, std::move(proxy_client), traffic_annotation_);
+  }
+
+  void OnReceiveRedirectDecision(
+      network::ResourceRequest redirected_request,
+      net::RedirectInfo redirect_info,
+      network::mojom::URLResponseHeadPtr head,
+      bool should_block) {
+    if (completed_) {
+      return;
+    }
+    if (should_block) {
+      BlockRequest();
+      return;
+    }
+    pending_redirect_request_ = std::move(redirected_request);
+    if (client_) {
+      client_->OnReceiveRedirect(redirect_info, std::move(head));
+    }
+  }
+
+  void OnFollowRedirectDecision(
+      network::HttpRequestHeadersUpdateParams headers_update_params,
+      std::optional<GURL> new_url,
+      network::ResourceRequest redirected_request,
+      bool should_block) {
+    if (completed_ || !target_loader_) {
+      return;
+    }
+    if (should_block) {
+      BlockRequest();
+      return;
+    }
+    request_ = std::move(redirected_request);
+    target_loader_->FollowRedirect(std::move(headers_update_params), new_url);
   }
 
   void BlockRequest() {
@@ -290,16 +357,20 @@ class FocusBlockURLLoader final : public network::mojom::URLLoader,
     client_receiver_.reset();
   }
 
+  const int32_t request_id_;
+  const uint32_t options_;
   network::ResourceRequest request_;
   std::optional<network::ResourceRequest> pending_redirect_request_;
   mojo::Remote<network::mojom::URLLoaderClient> client_;
   mojo::Remote<network::mojom::URLLoaderFactory> target_factory_;
   mojo::Remote<network::mojom::URLLoader> target_loader_;
   mojo::Receiver<network::mojom::URLLoaderClient> client_receiver_{this};
+  const net::MutableNetworkTrafficAnnotationTag traffic_annotation_;
   base::WeakPtr<FocusBlockService> service_;
   const GURL top_level_url_;
   const GURL match_source_url_;
   bool completed_ = false;
+  base::WeakPtrFactory<FocusBlockURLLoader> weak_ptr_factory_{this};
 };
 
 class FocusBlockProxyingURLLoaderFactory final
@@ -358,13 +429,9 @@ class FocusBlockProxyingURLLoaderFactory final
     const GURL match_source_url =
         MatchSourceUrlForRequest(request, factory_initiator_url_,
                                  top_level_url);
-    if (service_->ShouldBlock(request, top_level_url, match_source_url)) {
-      CompleteBlocked(std::move(client));
-      return;
-    }
-
-    // Even an initially allowed request needs a proxy URLLoader so redirect
-    // targets are checked before they are exposed to the renderer.
+    // The per-request proxy holds the Mojo request while Ghostery makes the
+    // initial asynchronous decision. Allowed requests are then started and
+    // every redirect target is checked before it reaches the renderer.
     mojo::PendingRemote<network::mojom::URLLoaderFactory> target_factory;
     target_factory_->Clone(
         target_factory.InitWithNewPipeAndPassReceiver());

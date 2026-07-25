@@ -49,14 +49,18 @@ class FocusBlockTabHelper
 
   void ApplyToFrame(content::RenderFrameHost* render_frame_host);
   void ClearFrame(content::RenderFrameHost* render_frame_host);
+  void OnInitialCosmetics(
+      content::WeakDocumentPtr document,
+      std::optional<FocusBlockService::CosmeticResources> resources);
   void OnElementNamesCollected(
       content::WeakDocumentPtr document,
       base::Value result);
+  void OnFinalCosmetics(
+      content::WeakDocumentPtr document,
+      std::optional<FocusBlockService::CosmeticResources> resources);
 
   std::u16string BuildApplyCssScript(const std::string& css,
                                      bool collect_element_names) const;
-  std::string BuildCss(
-      const std::vector<std::string>& selectors) const;
 
   raw_ptr<FocusBlockService> service_ = nullptr;
   base::WeakPtrFactory<FocusBlockTabHelper> weak_ptr_factory_{this};

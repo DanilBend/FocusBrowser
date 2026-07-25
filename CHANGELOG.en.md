@@ -2,6 +2,29 @@
 
 <p><a href="CHANGELOG.md">Русский</a> · <strong>English</strong></p>
 
+## 1.0.2 — 2026-07-25
+
+- FocusBlock's native engine was updated while retaining its interface, global
+  and per-site controls, and blocked-request counters.
+- FocusYoutube now has a stable native crossed-out YouTube icon inside the
+  address bar and 25 essential controls.
+- Added a native next-launch prompt for discovered updates: **Update now**,
+  **Remind later**, or skip that exact version. The production feed is published
+  separately as part of the release process.
+- Restored **Add shortcut** and **Customize this page** on the new tab without
+  adding unrelated elements to the main surface.
+- Expanded regression QA for the blocking engine, FocusYoutube readiness,
+  new-tab geometry and update-prompt lifetime.
+
+### Windows x64 artifacts
+
+- `FocusBrowser_1.0.2_x64-installer.exe` — SHA-256
+  `E58E0579E46641A5E88E7FA92556189EA21815B1B5EE6221EBF1C102321B0B5C`
+- `FocusBrowser_1.0.2_x64-mini-installer.exe` — SHA-256
+  `A4ADF9D049182F4D2C282CF57BEFCB926B58F1C3A74C1A99329C61A4D0C47E2E`
+- `FocusBrowser_1.0.2_x64-windows.zip` — SHA-256
+  `53574E9546AA9A846868850C1DF62FAF760655664A7BD38A8660C972513AE9EC`
+
 ## 1.0.1 — 2026-07-22
 
 - Text entry now follows a crisp Word-like model: each glyph is painted at its
@@ -40,8 +63,8 @@
 
 - Initial public Windows x64 release of Focus Browser.
 - Full Focus Browser branding with transparent monochrome target icon.
-- Native FocusBlock protection powered by `adblock-rust 0.13.2`, with a simple
-  Russian control surface and a shield at the right edge inside the address bar.
+- Native FocusBlock protection with a simple Russian control surface and a
+  shield at the right edge inside the address bar.
 - Built-in FocusYoutube panel with 20 essential distraction controls.
 - Russian first-run setup, detected-profile Chrome bookmark/history import and
   shortcut selection.

@@ -244,7 +244,7 @@ void FocusBlockBubbleView::Init() {
   AddChildView(std::move(counters));
 
   auto footer = std::make_unique<views::Label>(
-      u"EasyList + EasyPrivacy  •  adblock-rust 0.13.2");
+      u"EasyList + EasyPrivacy  •  Ghostery 2.18.1");
   footer->SetHorizontalAlignment(gfx::ALIGN_LEFT);
   footer->SetTextStyle(views::style::STYLE_SECONDARY);
   footer->SetEnabledColor(ui::kColorSysOnSurfaceVariant);

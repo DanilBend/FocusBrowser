@@ -1,4 +1,4 @@
-# Focus Browser 1.0.1 — Windows release QA
+# Focus Browser 1.0.2 — Windows release QA
 
 This checklist keeps every unrelated browser profile and process out of scope.
 Never terminate every `chrome.exe`; identify Focus Browser by its full
@@ -29,7 +29,7 @@ built and packaging has finished:
 $repo = (Resolve-Path '.').Path
 $qaNode = Join-Path $repo 'build\src\third_party\node\win\node.exe'
 $qaBrowser = Join-Path $repo 'build\src\out\Default\chrome.exe'
-$qaInstaller = Join-Path $repo 'build\FocusBrowser_1.0.1_x64-installer.exe'
+$qaInstaller = Join-Path $repo 'build\FocusBrowser_1.0.2_x64-installer.exe'
 $qaVerifier = Join-Path $repo 'build_support\verify_focus_release.ps1'
 $qaPowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 
@@ -45,7 +45,7 @@ if ($LASTEXITCODE -ne 0) { throw 'FocusYoutube full contract failed' }
 ```
 
 The PowerShell verifier is read-only in `Artifacts` mode. It checks Focus
-branding and exact PE FileVersion/ProductVersion `1.0.1.0` for `chrome.exe`,
+branding and exact PE FileVersion/ProductVersion `1.0.2.0` for `chrome.exe`,
 `chrome.dll`, `setup.exe`, and `mini_installer.exe`, plus packaging payloads,
 SHA-256 hashes, monochrome embedded icon, signature state, and static
 browser-owned component integration. An
@@ -58,7 +58,7 @@ Do not pass `--no-first-run`; the point is to exercise the real first launch.
 
 ```powershell
 $qaRoot = Join-Path $env:TEMP `
-    ('FocusBrowser-QA-1.0.1-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    ('FocusBrowser-QA-1.0.2-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 $qaProfile = Join-Path $qaRoot 'User Data'
 $qaLog = Join-Path $qaRoot 'focus-browser.log'
 New-Item -ItemType Directory -Path $qaProfile -Force | Out-Null
@@ -84,12 +84,13 @@ First-run/onboarding checks:
 - [ ] Appearance offers the three address-bar styles (full, centered, minimal)
   and the smooth-animation switch. There is no obsolete tab-layout step.
   Selections apply without a crash.
-- [ ] Newly entered graphemes use the Focus settle (opacity `0.12`, vertical
-  offset `3px`, `180ms`) in the new-tab search, native address bar, and
-  editable fields on HTTP/HTTPS pages. Multi-grapheme paste cascades, the
-  surviving boundary settles after Backspace/Delete, and the caret glides to
-  its committed position without delaying DOM, IME, or accessibility state.
-  Disabling smooth animations stops all three paths immediately.
+- [ ] Newly entered graphemes appear immediately in their final position without
+  a translucent duplicate, blur, or fractional vertical shift in the new-tab
+  search, native address bar, and editable fields on HTTP/HTTPS pages. Paste,
+  Backspace/Delete, and IME composition preserve committed text and selection;
+  the caret glides to its committed position without delaying DOM, IME, or
+  accessibility state. Disabling smooth animations stops caret motion
+  immediately.
 - [ ] Search-engine and browser-import rows have visible, non-broken logos.
 - [ ] If Google Chrome is detected, the one-click Chrome import card is shown.
   It offers the Chromium importer categories implemented by this build
@@ -107,6 +108,10 @@ First-run/onboarding checks:
   **Пропустить**. Selecting an item changes it to **Начать**.
 - [ ] Select YouTube and Codex, finish onboarding, and verify their real logos
   appear as shortcuts on the new tab page.
+- [ ] The new tab exposes localized **Добавить ярлык** and
+  **Настроить эту страницу** controls. Opening search suggestions does not move
+  the search field or caret, and no logo, meditation card, or Focus Mode control
+  is added to the main surface.
 - [ ] The new-tab favicon/logo is the monochrome Focus target, not the old
   letter/star/arrow.
 
@@ -114,14 +119,7 @@ Repeat the first-run check with a second disposable profile and select no
 shortcuts. Press **Пропустить** and verify no preset shortcuts are silently
 added.
 
-## 3. Built-in FocusBlock and FocusYouTube
-
-Clean-profile component URLs:
-
-- FocusBlock:
-  `chrome-extension://blockjmkbacgjkknlgpkjjiijinjdanf/popup-fenix.html`
-- FocusYouTube:
-  `chrome-extension://jafokmemnknjknbdiklabcnhlpheefbm/popup.html`
+## 3. Built-in FocusBlock and FocusYoutube
 
 Checks:
 
@@ -129,12 +127,14 @@ Checks:
   address field on a fresh profile. Verify normal, centered, compact, minimal
   and vertical toolbar layouts, including a deliberately narrow window; the
   shield must stay in the field and must open its popup from that same anchor.
-  FocusYoutube appears only on `www.youtube.com` and `m.youtube.com`. Both use
-  black/white Focus styling with Russian text.
+  The crossed-out FocusYoutube icon appears only on supported YouTube URLs,
+  remains stable across pending/committed navigation, and opens its popup from
+  the same address-field anchor. Both use black/white Focus styling with Russian
+  text.
 - [ ] FocusBlock opens a simple native panel, not an extension popup. It shows
   engine state, the browser-wide switch, the current-site switch, blocked
-  counts for the site/session and `EasyList + EasyPrivacy / adblock-rust
-  0.13.2`; it contains no links to external settings sites.
+  counts for the site/session and current engine attribution; it contains no
+  links to external settings sites.
 - [ ] Both controls can be hidden from toolbar customization; restart and
   confirm the hidden state persists. They can be restored from toolbar
   customization, not from the generic extensions menu.
@@ -145,11 +145,14 @@ Checks:
   it back on before finishing QA.
 - [ ] FocusBlock's per-site power control still works independently of the
   global switch and its state persists after reload.
-- [ ] FocusYoutube itself is enabled by default, but all 20 main controls are
-  off. Enable **Скрывать рекомендации на главной**, reload YouTube, verify the
-  feed disappears, then disable it and verify the feed returns.
-- [ ] Disable and re-enable the whole FocusYouTube module. It must not crash the
+- [ ] FocusYoutube itself is enabled by default, but all 25 distraction controls
+  are off. Enable **Скрывать рекомендации на главной**, reload YouTube,
+  verify the feed disappears, then disable it and verify the feed returns.
+- [ ] Disable and re-enable the whole FocusYoutube module. It must not crash the
   tab or lose the individual control state.
+- [ ] On a local direct/redirect fixture, FocusBlock allows an ordinary request
+  and blocks a matching advertising/tracker request before it reaches the
+  target. Repeat after a browser restart to catch engine-startup regressions.
 
 For a network behavior check, use a disposable profile only. A public adblock
 test page and YouTube may change independently of Focus Browser, so failures
@@ -167,7 +170,7 @@ must be distinguished from offline/network failures.
 - [ ] Install one harmless test extension from the Chrome Web Store into the
   disposable profile. It downloads from Google's Chrome Web Store/update
   endpoints and appears as an ordinary removable extension; FocusBlock and
-  FocusYouTube remain browser-owned.
+  FocusYoutube remain browser-owned.
 - [ ] `chrome://components` contains **Widevine Content Decryption Module**.
   Use **Check for update**, then test licensed playback on a Widevine demo.
   Record `component present`, `download succeeded`, and `playback succeeded` as
@@ -194,7 +197,7 @@ snapshot contains only sizes, timestamps, paths, and SHA-256 hashes—never
 password/history contents:
 
 ```powershell
-$qaUpgradeRoot = Join-Path $env:TEMP 'FocusBrowser-QA-Upgrade-1.0.1'
+$qaUpgradeRoot = Join-Path $env:TEMP 'FocusBrowser-QA-Upgrade-1.0.2'
 New-Item -ItemType Directory -Path $qaUpgradeRoot -Force | Out-Null
 $qaBefore = Join-Path $qaUpgradeRoot 'before.json'
 $qaAfter = Join-Path $qaUpgradeRoot 'after.json'
@@ -229,7 +232,7 @@ Installer checks:
   0 and behaves as repair/up-to-date, not as an error.
 - [ ] Installed executable is
   `%LOCALAPPDATA%\FocusBrowser\Focus Browser\Application\chrome.exe` and its
-  FileVersion and ProductVersion are exactly `1.0.1.0`.
+  FileVersion and ProductVersion are exactly `1.0.2.0`.
 - [ ] `RegisteredApplications`, `StartMenuInternet`, `FocusHTM*`, and
   `FocusPDF*` registry entries point to that executable.
 - [ ] No new `chrome.exe*.dmp`, `setup.exe*.dmp`, or installer crash dump was
@@ -249,7 +252,25 @@ Default-browser crash regression:
   requested. If manually selected, HTTPS/HTTP UserChoice should resolve to a
   `FocusHTM*` ProgID.
 
-## 6. Cleanup and evidence
+## 6. Next-launch update prompt
+
+Use a disposable profile and a staging appcast signed by the same Ed25519 key
+as the test build. This checklist does not imply that the production Pages feed
+has already been published.
+
+- [ ] Discovery records an available version without interrupting the current
+  session. After a normal exit, the next browser launch shows one native Focus
+  prompt.
+- [ ] **Обновить сейчас** starts download only for an enclosure with a valid
+  signature; an unsigned or missing enclosure is never offered.
+- [ ] **Напомнить позже** and closing the dialog suppress it for the current
+  session and allow it on a later launch.
+- [ ] Skipping a version suppresses exactly that version; a newer signed version
+  supersedes the skip.
+- [ ] An unavailable or empty feed produces no prompt, startup crash, or stale
+  offer.
+
+## 7. Cleanup and evidence
 
 Exit the disposable Focus Browser from its menu and wait for only processes
 whose command line contains the exact `$qaProfile` path to close. Verify the

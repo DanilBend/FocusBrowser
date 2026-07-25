@@ -1,0 +1,20 @@
+# Copyright 2026 Focus Browser contributors.
+# Use of this source code is governed by the license in the project root.
+
+import("//tools/grit/grit_rule.gni")
+
+# The bundle is generated and verified before the Chromium source preparation
+# step. Chromium builds consume the checked-in deterministic output and never
+# run npm or access the network.
+grit("resources") {
+  source = "ghostery_adblocker_resources.grd"
+  use_brotli = true
+
+  output_dir = "$target_gen_dir/resources"
+  outputs = [
+    "grit/ghostery_adblocker_resources.h",
+    "grit/ghostery_adblocker_resources_map.cc",
+    "grit/ghostery_adblocker_resources_map.h",
+    "ghostery_adblocker_resources.pak",
+  ]
+}

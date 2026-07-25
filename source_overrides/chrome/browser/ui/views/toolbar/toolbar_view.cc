@@ -194,11 +194,8 @@ constexpr int kExtensionsFlexOrder = kToolbarFlexOrderOffset + 3;
 
 constexpr int kDynamicNewTabButtonIconSize = 16;
 
-bool UseRussianFocusUi() {
-  const std::string locale =
-      l10n_util::GetApplicationLocale(std::string(), false);
-  return locale == "ru" || locale.starts_with("ru-") ||
-         locale.starts_with("ru_");
+bool IsFocusYoutubeUrl(const GURL& url) {
+  return url.SchemeIs(url::kHttpsScheme) && url.DomainIs("youtube.com");
 }
 
 class DynamicNewTabToolbarButton : public ToolbarButton {
@@ -528,22 +525,6 @@ void ToolbarView::Init() {
   } else {
     location_bar_ = toolbar_webview_->GetLocationBar();
   }
-
-  // FocusYoutube uses its component extension only as an internal engine. Its
-  // control remains a first-class browser button, deliberately separate from
-  // the user extension container and its install/pin UI. FocusBlock is owned
-  // by LocationBarView so its shield is inside the address field.
-  focus_youtube_button_ = AddChildView(std::make_unique<ToolbarButton>(
-      base::BindRepeating(&ToolbarView::FocusYoutubeButtonPressed,
-                          base::Unretained(this))));
-  focus_youtube_button_->SetVectorIcon(vector_icons::kVideoLibraryIcon);
-  focus_youtube_button_->SetTooltipText(UseRussianFocusUi()
-                                            ? u"FocusYoutube — настройка ленты YouTube"
-                                            : u"FocusYoutube — tune your YouTube feed");
-  focus_youtube_button_->GetViewAccessibility().SetName(
-      UseRussianFocusUi() ? u"Открыть встроенную защиту FocusYoutube"
-                          : u"Open built-in FocusYoutube controls");
-  focus_youtube_button_->SetVisible(false);
 
   if (auto* vertical_tab_strip_state_controller =
           tabs::VerticalTabStripStateController::From(
@@ -1746,8 +1727,8 @@ void ToolbarView::ShowFocusBlockPopup(views::View* anchor_view) {
   FocusBlockBubbleView::ShowBubble(browser_, anchor_view);
 }
 
-void ToolbarView::FocusYoutubeButtonPressed(const ui::Event& event) {
-  FocusYoutubeBubbleView::ShowBubble(browser_, focus_youtube_button_);
+void ToolbarView::ShowFocusYoutubePopup(views::View* anchor_view) {
+  FocusYoutubeBubbleView::ShowBubble(browser_, anchor_view);
 }
 
 bool ToolbarView::AcceleratorPressed(const ui::Accelerator& accelerator) {
@@ -2389,29 +2370,20 @@ void ToolbarView::OnShowFocusYoutubeButtonChanged() {
 }
 
 void ToolbarView::UpdateFocusYoutubeButtonVisibility(WebContents* tab) {
-  focus_youtube_context_available_ = false;
+  bool focus_youtube_context_available = false;
   if (tab) {
-    // FocusYoutube is contextual: keep its browser-owned control out of the
-    // way everywhere except YouTube, where its settings are useful.
-    // `GetVisibleURL()` includes a pending navigation. Using only the last
-    // committed URL made the control appear after YouTube had already spent
-    // time loading, and kept it visible briefly while navigating away. The
-    // exact apex host is included too, so the control is already available
-    // while youtube.com is redirecting to www.youtube.com.
+    // Keep the address-field control stable throughout YouTube redirects. A
+    // pending non-YouTube URL does not hide it until that navigation commits;
+    // a pending YouTube URL makes it available immediately.
     const GURL& visible_url = tab->GetVisibleURL();
-    const GURL& context_url =
-        visible_url.is_valid() ? visible_url : tab->GetLastCommittedURL();
-    const auto& host = context_url.host();
-    focus_youtube_context_available_ =
-        context_url.SchemeIs(url::kHttpsScheme) &&
-        (host == "youtube.com" || host == "www.youtube.com" ||
-         host == "m.youtube.com");
+    const GURL& committed_url = tab->GetLastCommittedURL();
+    focus_youtube_context_available = IsFocusYoutubeUrl(visible_url) ||
+                                      IsFocusYoutubeUrl(committed_url);
   }
-  if (focus_youtube_button_) {
-    focus_youtube_button_->SetVisible(
-        focus_youtube_context_available_ &&
+  if (location_bar_view_) {
+    location_bar_view_->SetFocusYoutubeButtonVisible(
+        focus_youtube_context_available &&
         show_focus_youtube_button_.GetValue());
-    InvalidateLayout();
   }
 }
 
@@ -2421,21 +2393,14 @@ void ToolbarView::DidStartNavigation(
     return;
   }
 
-  // The toolbar can be initialized before a command-line URL becomes the
-  // tab's pending visible URL. Observe the primary navigation directly so the
-  // native control is ready on the first frame, including the apex
-  // youtube.com URL before it redirects to www.youtube.com.
+  // A YouTube navigation may begin before it becomes the tab's visible URL.
+  // Show the non-collapsible address-field control immediately. Navigations
+  // away deliberately do nothing here; the normal committed-tab update hides
+  // the control, avoiding redirect flicker.
   const GURL& navigation_url = navigation_handle->GetURL();
-  const auto& host = navigation_url.host();
-  focus_youtube_context_available_ =
-      navigation_url.SchemeIs(url::kHttpsScheme) &&
-      (host == "youtube.com" || host == "www.youtube.com" ||
-       host == "m.youtube.com");
-  if (focus_youtube_button_) {
-    focus_youtube_button_->SetVisible(
-        focus_youtube_context_available_ &&
+  if (location_bar_view_ && IsFocusYoutubeUrl(navigation_url)) {
+    location_bar_view_->SetFocusYoutubeButtonVisible(
         show_focus_youtube_button_.GetValue());
-    InvalidateLayout();
   }
 }
 

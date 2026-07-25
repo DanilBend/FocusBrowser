@@ -2,7 +2,11 @@
 # Use of this source code is governed by the license in the project root.
 
 source_set("focus_block") {
+  configs += [ "//v8:external_startup_data" ]
+
   sources = [
+    "focus_block_ghostery_engine.cc",
+    "focus_block_ghostery_engine.h",
     "focus_block_service.cc",
     "focus_block_service.h",
     "focus_block_service_factory.cc",
@@ -17,17 +21,20 @@ source_set("focus_block") {
     "//base",
     "//chrome/browser/profiles:profile",
     "//chrome/common",
-    "//components/focus_block:native_engine",
     "//components/focus_services",
     "//components/keyed_service/core",
     "//components/prefs",
     "//content/public/browser",
+    "//gin",
     "//mojo/public/cpp/bindings",
     "//net",
     "//services/network/public/cpp",
     "//services/network/public/mojom",
+    "//third_party/ghostery_adblocker:resources",
     "//third_party/ublock",
+    "//tools/v8_context_snapshot:buildflags",
     "//ui/base",
     "//url",
+    "//v8",
   ]
 }

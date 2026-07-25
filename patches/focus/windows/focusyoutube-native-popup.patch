@@ -29,3 +29,168 @@
 +    "//extensions/browser/api/storage",
      "//extensions/common",
      "//media",
+--- a/components/vector_icons/BUILD.gn
++++ b/components/vector_icons/BUILD.gn
+@@ -181,7 +181,8 @@ if (current_toolchain == default_toolchain) {
+       "file_download_old.icon",
+       "filter_old.icon",
+       "fingerprint.icon",
+       "fingerprint_old.icon",
++      "focus_youtube_off.icon",
+       "flight.icon",
+       "flight_old.icon",
+       "folder_chrome_refresh_old.icon",
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.h
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.h
+@@ -130,6 +130,10 @@ class LocationBarView
+     // location bar. Non-browser embedders do not expose FocusBlock.
+     virtual void ShowFocusBlockPopup(views::View*) {}
+ 
++    // Opens the browser-owned FocusYoutube surface from its contextual
++    // address-field control.
++    virtual void ShowFocusYoutubePopup(views::View*) {}
++
+    protected:
+     virtual ~Delegate() = default;
+   };
+@@ -154,6 +158,9 @@ class LocationBarView
+   // extension action. The shield remains owned and laid out by this view.
+   void SetFocusBlockButtonVisible(bool visible);
+ 
++  // Controls the browser-owned FocusYoutube button inside the address field.
++  void SetFocusYoutubeButtonVisible(bool visible);
++
+   bool in_popup_state_transition() const override;
+ 
+   // Returns a background that paints an (optionally stroked) rounded rect with
+@@ -395,9 +402,15 @@ class LocationBarView
+   // Updates the FocusBlock shield for the current theme and density.
+   void RefreshFocusBlockButtonIcon();
+ 
++  // Updates the crossed-out YouTube icon for the current theme and density.
++  void RefreshFocusYoutubeButtonIcon();
++
+   // Opens FocusBlock from its fixed location-bar shield.
+   void FocusBlockButtonPressed(const ui::Event& event);
+ 
++  // Opens FocusYoutube from its contextual location-bar control.
++  void FocusYoutubeButtonPressed(const ui::Event& event);
++
+   // Returns true if a keyword is selected in the model.
+   bool ShouldShowKeywordBubble() const;
+ 
+@@ -627,6 +640,10 @@ class LocationBarView
+   // decoration, so it stays at the right edge for every native omnibox layout.
+   raw_ptr<views::ImageButton> focus_block_button_ = nullptr;
+ 
++  // Browser-owned, non-removable FocusYoutube control. It is laid out directly
++  // beside FocusBlock and cannot overflow into the toolbar menu.
++  raw_ptr<views::ImageButton> focus_youtube_button_ = nullptr;
++
+   // An [x] that appears in touch mode (when the OSK is visible) and allows the
+   // user to clear all text.
+   raw_ptr<views::ImageButton> clear_all_button_ = nullptr;
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+@@ -502,6 +502,22 @@ void LocationBarView::Init() {
+     views::InstallCircleHighlightPathGenerator(focus_block_button.get());
+     focus_block_button_ = AddChildView(std::move(focus_block_button));
+     RefreshFocusBlockButtonIcon();
++
++    auto focus_youtube_button = views::CreateVectorImageButton(
++        base::BindRepeating(&LocationBarView::FocusYoutubeButtonPressed,
++                            base::Unretained(this)));
++    focus_youtube_button->SetTooltipText(
++        use_russian_ui ? u"FocusYoutube — убрать отвлекающие элементы"
++                       : u"FocusYoutube — remove YouTube distractions");
++    focus_youtube_button->GetViewAccessibility().SetName(
++        use_russian_ui ? u"Открыть встроенные настройки FocusYoutube"
++                       : u"Open built-in FocusYoutube controls");
++    focus_youtube_button->SetFocusBehavior(
++        views::View::FocusBehavior::ACCESSIBLE_ONLY);
++    focus_youtube_button->SetVisible(false);
++    views::InstallCircleHighlightPathGenerator(focus_youtube_button.get());
++    focus_youtube_button_ = AddChildView(std::move(focus_youtube_button));
++    RefreshFocusYoutubeButtonIcon();
+   }
+ 
+   std::vector<actions::ActionItem*> page_action_items = {};
+@@ -982,6 +998,11 @@ void LocationBarView::Layout(PassKey) {
+                             trailing_decorations_edge_padding);
+   }
+ 
++  if (focus_youtube_button_) {
++    add_trailing_decoration(focus_youtube_button_, /*intra_item_padding=*/0,
++                            trailing_decorations_edge_padding);
++  }
++
+   // When the AIM page action is shown as the right-most page action in the
+   // location bar, it should be positioned flush against the right edge of the
+   // location bar.
+@@ -1142,6 +1163,7 @@ void LocationBarView::OnThemeChanged() {
+   RefreshBackground();
+   RefreshClearAllButtonIcon();
+   RefreshFocusBlockButtonIcon();
++  RefreshFocusYoutubeButtonIcon();
+ }
+ 
+ void LocationBarView::ChildPreferredSizeChanged(views::View* child) {
+@@ -1537,6 +1559,7 @@ int LocationBarView::GetMinimumLeadingWidth() const {
+ 
+ int LocationBarView::GetMinimumTrailingWidth() const {
+   int trailing_width = IncrementalMinimumWidth(focus_block_button_) +
++                       IncrementalMinimumWidth(focus_youtube_button_) +
+                        IncrementalMinimumWidth(page_action_icon_container_) +
+                        IncrementalMinimumWidth(page_action_container_);
+ 
+@@ -1744,6 +1767,26 @@ void LocationBarView::FocusBlockButtonPressed(const ui::Event&) {
+   }
+ }
+ 
++void LocationBarView::RefreshFocusYoutubeButtonIcon() {
++  if (!focus_youtube_button_) {
++    return;
++  }
++
++  views::SetImageFromVectorIconWithColor(
++      focus_youtube_button_, vector_icons::kFocusYoutubeOffIcon,
++      views::IconColors(kColorOmniboxActionIcon, kColorOmniboxActionIcon,
++                        kColorOmniboxActionIconHover),
++      GetLayoutConstant(LayoutConstant::kLocationBarTrailingIconSize));
++  focus_youtube_button_->SetBorder(views::CreateEmptyBorder(
++      GetLayoutInsets(LOCATION_BAR_PAGE_ACTION_ICON_PADDING)));
++}
++
++void LocationBarView::FocusYoutubeButtonPressed(const ui::Event&) {
++  if (delegate_ && focus_youtube_button_) {
++    delegate_->ShowFocusYoutubePopup(focus_youtube_button_);
++  }
++}
++
+ void LocationBarView::SetFocusBlockButtonVisible(bool visible) {
+   if (!focus_block_button_ || focus_block_button_->GetVisible() == visible) {
+     return;
+@@ -1760,6 +1803,23 @@ void LocationBarView::SetFocusBlockButtonVisible(bool visible) {
+   InvalidateLayout();
+ }
+ 
++void LocationBarView::SetFocusYoutubeButtonVisible(bool visible) {
++  if (!focus_youtube_button_ ||
++      focus_youtube_button_->GetVisible() == visible) {
++    return;
++  }
++  if (!visible) {
++    if (views::DialogDelegate* bubble =
++            focus_youtube_button_->GetProperty(views::kAnchoredDialogKey)) {
++      if (views::Widget* widget = bubble->GetWidget()) {
++        widget->Close();
++      }
++    }
++  }
++  focus_youtube_button_->SetVisible(visible);
++  InvalidateLayout();
++}
++
+ bool LocationBarView::ShouldShowKeywordBubble() const {
+   return GetOmniboxController()->edit_model()->is_keyword_selected();
+ }

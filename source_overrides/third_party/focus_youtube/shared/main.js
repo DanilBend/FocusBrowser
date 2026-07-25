@@ -267,33 +267,42 @@
   const BEHAVIOR_ID_SET = new Set(BEHAVIOR_IDS);
   const BEHAVIOR_DEFAULTS = Object.fromEntries(
       BEHAVIOR_IDS.map(id => [id, false]));
-  // Schema v3 intentionally keeps the native surface compact. During the
-  // one-time upgrade, only these browser-owned controls retain their values;
-  // every option that existed only in the former extension UI is turned off.
+  // Schema v4 exposes the original Unhook 1.6.9 controls in the compact
+  // browser-owned surface. Every option outside this set remains available to
+  // the compatibility engine but is disabled during migration.
   const NATIVE_BEHAVIOR_IDS = Object.freeze([
     'remove_homepage',
+    'remove_entire_sidebar',
     'remove_sidebar',
+    'remove_chat',
+    'remove_playlist_panel',
     'remove_end_of_video',
-    'remove_all_shorts',
-    'disable_play_on_hover',
-    'disable_autoplay',
-    'auto_skip_ads',
     'remove_info_cards',
-    'remove_overlay_suggestions',
-    'disable_ambient_mode',
     'remove_comments',
-    'remove_left_nav_bar',
-    'remove_notif_bell',
+    'remove_comment_profiles',
+    'remove_mixes',
+    'remove_merch_shelves',
+    'remove_video_metadata',
     'remove_menu_buttons',
-    'grayscale_mode',
-    'remove_search_suggestions',
-    'remove_search_promoted',
-    'remove_shorts_results',
-    'disable_channel_autoplay',
-    'remove_channel_for_you',
+    'remove_channel_owner',
+    'remove_vid_description',
+    'remove_top_header',
+    'remove_notif_bell',
+    'remove_extra_results',
+    'remove_explore_link',
+    'remove_explore_section',
+    'remove_trending_page',
+    'remove_more_section',
+    'remove_all_shorts',
+    'remove_subscriptions_link',
+    'remove_sub_section',
+    'remove_subscriptions_page',
+    'redirect_to_subs',
+    'disable_autoplay',
+    'disable_annotations',
   ]);
   const NATIVE_BEHAVIOR_ID_SET = new Set(NATIVE_BEHAVIOR_IDS);
-  const CURRENT_SCHEMA_VERSION = 3;
+  const CURRENT_SCHEMA_VERSION = 4;
   const REDIRECT_IDS = Object.freeze([
     'redirect_to_subs',
     'redirect_to_wl',

@@ -1,0 +1,333 @@
+name: Publish WinSparkle appcast
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published release tag
+        required: true
+        default: v1.0.2
+      version:
+        description: Four-part Focus Browser version
+        required: true
+        default: 1.0.2.0
+      short_version:
+        description: User-facing Focus Browser version
+        required: true
+        default: 1.0.2
+      asset_name:
+        description: Final x64 mini-installer asset
+        required: true
+        default: FocusBrowser_1.0.2_x64-mini-installer.exe
+
+permissions:
+  contents: read
+
+concurrency:
+  group: focus-winsparkle-appcast-x64
+  cancel-in-progress: false
+
+jobs:
+  verify-appcast:
+    name: Verify immutable x64 release and appcast
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2022
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      FOCUS_VERSION: ${{ inputs.version }}
+      FOCUS_SHORT_VERSION: ${{ inputs.short_version }}
+      ASSET_NAME: ${{ inputs.asset_name }}
+      WINSPARKLE_ED_KEY: ${{ vars.WINSPARKLE_ED_KEY }}
+      PRODUCTION_APPCAST_URL: https://danilbend.github.io/FocusBrowser/appcast-x64.xml
+    steps:
+      - name: Validate release inputs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?$') {
+            throw "Invalid release tag"
+          }
+          if ($env:FOCUS_VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "Invalid four-part version"
+          }
+          if ($env:FOCUS_SHORT_VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "Invalid short version"
+          }
+          if ($env:RELEASE_TAG -cne "v$($env:FOCUS_SHORT_VERSION)") {
+            throw "Release tag and short version do not match"
+          }
+          if ($env:FOCUS_VERSION -cne "$($env:FOCUS_SHORT_VERSION).0") {
+            throw "Production x64 releases require a zero platform revision"
+          }
+          $expectedAsset = "FocusBrowser_$($env:FOCUS_SHORT_VERSION)_x64-mini-installer.exe"
+          if ($env:ASSET_NAME -cne $expectedAsset) {
+            throw "Asset name must be exactly $expectedAsset"
+          }
+          if ($env:WINSPARKLE_ED_KEY -notmatch '^[A-Za-z0-9+/]{43}=$') {
+            throw "WINSPARKLE_ED_KEY is missing or malformed"
+          }
+
+          $release = gh api -H 'X-GitHub-Api-Version: 2026-03-10' `
+            "repos/$($env:GITHUB_REPOSITORY)/releases/tags/$($env:RELEASE_TAG)" |
+            ConvertFrom-Json
+          if ($release.draft -or $release.prerelease -or $null -eq $release.published_at) {
+            throw "The production appcast requires a published stable release"
+          }
+          if ([string]$release.tag_name -cne $env:RELEASE_TAG) {
+            throw "GitHub release tag does not match the requested tag"
+          }
+          if ($release.immutable -ne $true) {
+            throw "The production appcast requires an immutable GitHub release"
+          }
+          $payloadAssets = @($release.assets | Where-Object name -CEQ $env:ASSET_NAME)
+          $appcastAssets = @($release.assets | Where-Object name -CEQ 'appcast-x64.xml')
+          if ($payloadAssets.Count -ne 1) {
+            throw "The release must contain exactly one $($env:ASSET_NAME) asset"
+          }
+          if ($appcastAssets.Count -ne 1) {
+            throw "The release must contain exactly one appcast-x64.xml audit asset"
+          }
+          if ([string]$payloadAssets[0].state -cne 'uploaded' -or
+              [string]$appcastAssets[0].state -cne 'uploaded') {
+            throw "Every release asset must be fully uploaded"
+          }
+          $comparison = gh api `
+            "repos/$($env:GITHUB_REPOSITORY)/compare/$($env:RELEASE_TAG)...main" |
+            ConvertFrom-Json
+          if ($comparison.status -notin @('ahead', 'identical')) {
+            throw "The release tag commit is not an ancestor of main"
+          }
+
+      - name: Download and validate immutable release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $payloadDir = Join-Path $env:RUNNER_TEMP 'focus-update-payload'
+          New-Item -ItemType Directory -Path $payloadDir -Force | Out-Null
+          $payload = Join-Path $payloadDir $env:ASSET_NAME
+          $appcast = Join-Path $payloadDir 'appcast-x64.xml'
+
+          $release = gh api -H 'X-GitHub-Api-Version: 2026-03-10' `
+            "repos/$($env:GITHUB_REPOSITORY)/releases/tags/$($env:RELEASE_TAG)" |
+            ConvertFrom-Json
+          $payloadAsset = @($release.assets |
+            Where-Object name -CEQ $env:ASSET_NAME)[0]
+          $appcastAsset = @($release.assets |
+            Where-Object name -CEQ 'appcast-x64.xml')[0]
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri $payloadAsset.browser_download_url `
+            -OutFile $payload
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri $appcastAsset.browser_download_url `
+            -OutFile $appcast
+          if (-not (Test-Path -LiteralPath $payload -PathType Leaf) -or
+              -not (Test-Path -LiteralPath $appcast -PathType Leaf)) {
+            throw "Public release asset download failed"
+          }
+          if ((Get-Item -LiteralPath $payload).Length -lt 1MB) {
+            throw "Downloaded mini-installer is unexpectedly small"
+          }
+          $payloadLength = (Get-Item -LiteralPath $payload).Length
+          $appcastLength = (Get-Item -LiteralPath $appcast).Length
+          if ($payloadLength -ne [int64]$payloadAsset.size -or
+              $appcastLength -ne [int64]$appcastAsset.size) {
+            throw "Downloaded asset length does not match GitHub metadata"
+          }
+          $payloadDigest = 'sha256:' +
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $payload).Hash.ToLowerInvariant()
+          $appcastDigest = 'sha256:' +
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $appcast).Hash.ToLowerInvariant()
+          if ($payloadDigest -cne [string]$payloadAsset.digest -or
+              $appcastDigest -cne [string]$appcastAsset.digest) {
+            throw "Downloaded asset SHA-256 does not match GitHub metadata"
+          }
+
+          $stream = [IO.File]::OpenRead($payload)
+          try {
+            $reader = [IO.BinaryReader]::new($stream)
+            if ($reader.ReadUInt16() -ne 0x5A4D) {
+              throw "Downloaded payload is not a PE file"
+            }
+            $stream.Position = 0x3C
+            $peOffset = $reader.ReadInt32()
+            if ($peOffset -lt 0x40 -or $peOffset -gt ($stream.Length - 6)) {
+              throw "Invalid PE header offset"
+            }
+            $stream.Position = $peOffset
+            if ($reader.ReadUInt32() -ne 0x00004550) {
+              throw "Invalid PE signature"
+            }
+            if ($reader.ReadUInt16() -ne 0x8664) {
+              throw "The update payload is not Windows x64"
+            }
+          } finally {
+            $stream.Dispose()
+          }
+          "FOCUS_UPDATE_PAYLOAD=$payload" | Out-File `
+            -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FOCUS_UPDATE_APPCAST=$appcast" | Out-File `
+            -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Acquire pinned WinSparkle signing tool
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $toolVersion = '0.9.3'
+          $toolUrl = "https://github.com/vslavik/winsparkle/releases/download/v$toolVersion/WinSparkle-$toolVersion.zip"
+          $expectedSha256 = '745985f41d2ab26b2d5a1cf87d76e4ed851039db19038e50610eb25ea0b73772'
+          $toolRoot = Join-Path $env:RUNNER_TEMP "winsparkle-tool-$toolVersion"
+          $toolZip = Join-Path $toolRoot "WinSparkle-$toolVersion.zip"
+          New-Item -ItemType Directory -Path $toolRoot -Force | Out-Null
+          Invoke-WebRequest -UseBasicParsing -Uri $toolUrl -OutFile $toolZip
+          $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $toolZip).Hash.ToLowerInvariant()
+          if ($actualSha256 -cne $expectedSha256) {
+            throw "WinSparkle tool archive SHA-256 mismatch"
+          }
+          Expand-Archive -LiteralPath $toolZip -DestinationPath $toolRoot -Force
+          $tool = Join-Path $toolRoot "WinSparkle-$toolVersion\bin\winsparkle-tool.exe"
+          $reportedVersion = ((& $tool --version) | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $reportedVersion -cne $toolVersion) {
+            throw "Unexpected winsparkle-tool version"
+          }
+          "WINSPARKLE_TOOL=$tool" | Out-File `
+            -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Validate appcast and verify Ed25519 signature
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $siteRoot = Join-Path $env:RUNNER_TEMP 'focus-pages'
+          New-Item -ItemType Directory -Path $siteRoot -Force | Out-Null
+
+          function Read-SafeXml([string]$Path) {
+            $settings = [Xml.XmlReaderSettings]::new()
+            $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+            $settings.XmlResolver = $null
+            $reader = [Xml.XmlReader]::Create($Path, $settings)
+            try {
+              $document = [Xml.XmlDocument]::new()
+              $document.XmlResolver = $null
+              $document.Load($reader)
+              return $document
+            } finally {
+              $reader.Dispose()
+            }
+          }
+
+          $document = Read-SafeXml $env:FOCUS_UPDATE_APPCAST
+          $channels = @($document.SelectNodes('/rss/channel'))
+          $items = @($document.SelectNodes('/rss/channel/item'))
+          $enclosures = @($document.SelectNodes('/rss/channel/item/enclosure'))
+          if ($channels.Count -ne 1 -or $items.Count -ne 1) {
+            throw "Appcast must contain exactly one channel and one item"
+          }
+          if ($enclosures.Count -ne 1) {
+            throw "Appcast must contain exactly one enclosure"
+          }
+          $enclosure = $enclosures[0]
+          $sparkleNamespace = 'http://www.andymatuschak.org/xml-namespaces/sparkle'
+          $release = gh api -H 'X-GitHub-Api-Version: 2026-03-10' `
+            "repos/$($env:GITHUB_REPOSITORY)/releases/tags/$($env:RELEASE_TAG)" |
+            ConvertFrom-Json
+          $asset = @($release.assets |
+            Where-Object name -CEQ $env:ASSET_NAME)[0]
+          if ([string]$enclosure.url -cne [string]$asset.browser_download_url) {
+            throw "Appcast enclosure URL does not match the immutable release asset"
+          }
+          if ($enclosure.GetAttribute('version', $sparkleNamespace) -cne
+              $env:FOCUS_VERSION) {
+            throw "Appcast full version mismatch"
+          }
+          if ($enclosure.GetAttribute('shortVersionString', $sparkleNamespace) -cne
+              $env:FOCUS_SHORT_VERSION) {
+            throw "Appcast short version mismatch"
+          }
+          if ($enclosure.GetAttribute('os', $sparkleNamespace) -cne 'windows-x64') {
+            throw "Appcast OS must be windows-x64"
+          }
+          if ([string]$enclosure.type -cne 'application/octet-stream') {
+            throw "Unexpected appcast enclosure content type"
+          }
+          $actualLength = (Get-Item -LiteralPath $env:FOCUS_UPDATE_PAYLOAD).Length
+          if ([int64]$enclosure.length -ne $actualLength) {
+            throw "Appcast enclosure length mismatch"
+          }
+          $signature = $enclosure.GetAttribute('edSignature', $sparkleNamespace)
+          if ($signature -notmatch '^[A-Za-z0-9+/]{86}==$') {
+            throw "Appcast Ed25519 signature is malformed"
+          }
+
+          & $env:WINSPARKLE_TOOL verify `
+            --public-key $env:WINSPARKLE_ED_KEY `
+            --signature $signature `
+            $env:FOCUS_UPDATE_PAYLOAD
+          if ($LASTEXITCODE -ne 0) {
+            throw "WinSparkle signature verification failed"
+          }
+
+          $previousPath = Join-Path $env:RUNNER_TEMP 'previous-appcast-x64.xml'
+          $previousExists = $false
+          try {
+            Invoke-WebRequest -UseBasicParsing `
+              -Uri $env:PRODUCTION_APPCAST_URL `
+              -OutFile $previousPath
+            $previousExists = $true
+          } catch {
+            $statusCode = $_.Exception.Response.StatusCode.value__
+            if ($statusCode -ne 404) {
+              throw
+            }
+          }
+          if ($previousExists) {
+            $previousDocument = Read-SafeXml $previousPath
+            $previousEnclosures = @(
+              $previousDocument.SelectNodes('/rss/channel/item/enclosure'))
+            if ($previousEnclosures.Count -ne 1) {
+              throw "Existing production appcast is malformed"
+            }
+            $previousVersionText = $previousEnclosures[0].GetAttribute(
+              'version',
+              $sparkleNamespace)
+            $previousVersion = [Version]$previousVersionText
+            $candidateVersion = [Version]$env:FOCUS_VERSION
+            if ($candidateVersion -lt $previousVersion) {
+              throw "Refusing to roll the production appcast back"
+            }
+            if ($candidateVersion -eq $previousVersion) {
+              $previousHash = (Get-FileHash -Algorithm SHA256 `
+                -LiteralPath $previousPath).Hash
+              $candidateHash = (Get-FileHash -Algorithm SHA256 `
+                -LiteralPath $env:FOCUS_UPDATE_APPCAST).Hash
+              if ($candidateHash -cne $previousHash) {
+                throw "Refusing to replace an existing version with different bytes"
+              }
+            }
+          }
+
+          Copy-Item -LiteralPath $env:FOCUS_UPDATE_APPCAST `
+            -Destination (Join-Path $siteRoot 'appcast-x64.xml')
+          [IO.File]::WriteAllText(
+            (Join-Path $siteRoot '.nojekyll'),
+            '',
+            [Text.UTF8Encoding]::new($false))
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: ${{ runner.temp }}/focus-pages
+          include-hidden-files: true
+
+  deploy-appcast:
+    name: Deploy production appcast
+    needs: verify-appcast
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5

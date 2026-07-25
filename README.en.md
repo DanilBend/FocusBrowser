@@ -16,23 +16,23 @@
   · <a href="docs/RELEASING.md">Release guide</a>
 </p>
 
-## Focus Browser 1.0.1
+## Focus Browser 1.0.2
 
 Focus Browser keeps the familiar Chromium engine while reducing distractions
-and integrating focus tools directly into the browser interface. Version 1.0.1
+and integrating focus tools directly into the browser interface. Version 1.0.2
 is based on Chromium 150.0.7871.128 and targets 64-bit Windows 10 and Windows
 11.
 
 ### Main features
 
-- **FocusBlock** — built-in, non-removable protection powered by the native
-  `adblock-rust 0.13.2` engine. It is enabled by default, can be disabled
-  globally or per site, and its shield is located on the right inside the
-  address bar.
-- **FocusYoutube** — 20 essential local controls for reducing YouTube
-  distractions. Individual filters are off by default and no external settings
-  site is required.
-- **Clean new tab** — search and user-selected shortcuts only.
+- **FocusBlock** — built-in, non-removable native ad and tracker protection. It
+  is enabled by default, can be disabled globally or per site, and its shield
+  is located on the right inside the address bar.
+- **FocusYoutube** — a stable crossed-out YouTube icon inside the address bar
+  and 25 essential local controls. Individual filters are off by default and
+  no external settings site is required.
+- **Clean new tab** — search, user-selected shortcuts, an add-shortcut button
+  and a compact page-customization button.
 - **Russian first-run setup** — search and appearance choices, Chrome data
   import, password manager, default-browser flow and optional shortcuts.
 - **Smooth motion** — one switch for interface and text-entry motion. Operating
@@ -41,20 +41,24 @@ is based on Chromium 150.0.7871.128 and targets 64-bit Windows 10 and Windows
   directly on YouTube, avoiding embedded-player error 153.
 - Chromium password manager, direct Chrome Web Store extension installation,
   proprietary media codecs and Widevine integration hooks.
+- **Non-disruptive updates** — a discovered update is offered on the next
+  launch, with options to update now, remind later or skip that exact version.
 
 ## Download and installation
 
 Download the installer or portable archive from
 [Releases](https://github.com/DanilBend/FocusBrowser/releases).
 
-The 1.0.1 installer is not Authenticode-signed, so Windows SmartScreen may show
+The 1.0.2 installer is not Authenticode-signed, so Windows SmartScreen may show
 **Unknown publisher**. Verify the SHA-256 values published with each release
 before running the installer.
 
 Installing a newer build over an existing Focus Browser installation preserves
-the browser profile. Production automatic updates are not enabled in the 1.0.1
-binary; install newer GitHub releases manually until a signed update channel is
-configured.
+the browser profile. Version 1.0.2 includes a next-launch update prompt, but it
+offers installation only through a published, Ed25519-signed production
+channel at
+`https://danilbend.github.io/FocusBrowser/appcast-x64.xml`. If the channel is
+temporarily unavailable, use a manual GitHub Releases installation.
 
 ## Privacy and external services
 
@@ -109,9 +113,9 @@ Project-specific GPL-covered code is licensed under GPL-3.0; see
 licenses. Component-specific terms are documented in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-FocusBlock uses `adblock-rust` under MPL-2.0 and compatible filter lists.
-FocusYoutube material derived from Unhook is used by the project owner under
-separate written permission and is not relicensed under GPL-3.0.
+Terms and mandatory notices for bundled third-party components remain available
+in their license files and in
+[Third-party notices](THIRD_PARTY_NOTICES.md).
 
 ## Contributing
 

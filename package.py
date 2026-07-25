@@ -30,7 +30,8 @@ from _common import ENCODING, get_chromium_version
 sys.path.pop(0)
 
 _ROOT_DIR = Path(__file__).resolve().parent
-_BUILD_SRC = _ROOT_DIR / 'build' / 'src'
+_BUILD_SRC = Path(os.environ.get(
+    'FOCUS_ACTIVE_SOURCE_ROOT', _ROOT_DIR / 'build' / 'src')).resolve()
 _ICON_PATH = _BUILD_SRC / 'chrome' / 'app' / 'theme' / 'chromium' / 'win' / 'chromium.ico'
 
 _cached_target_cpu = None
@@ -88,7 +89,7 @@ def main():
               'Default (from platform.architecture()): %(default)s'))
     args = parser.parse_args()
 
-    build_outputs = Path('build/src/out/Default')
+    build_outputs = _BUILD_SRC / 'out' / 'Default'
 
     version_parts = focus_version.get_version_parts(_ROOT_DIR / 'focus-chromium', _ROOT_DIR)
     version = f"{version_parts['FOCUS_MAJOR']}.{version_parts['FOCUS_MINOR']}." + \
@@ -97,8 +98,10 @@ def main():
 
     target_cpu = _get_target_cpu(build_outputs)
 
+    package_output_dir = _ROOT_DIR / 'build'
+    package_output_dir.mkdir(parents=True, exist_ok=True)
     installer_output = (
-        _ROOT_DIR / 'build' /
+        package_output_dir /
         f'FocusBrowser_{display_version}_{target_cpu}-installer.exe')
     _build_nsis_installer(
         version, display_version, target_cpu, build_outputs, installer_output)
@@ -106,18 +109,18 @@ def main():
     mini_installer = build_outputs / 'mini_installer.exe'
     shutil.copy2(
         mini_installer,
-        _ROOT_DIR / 'build' /
+        package_output_dir /
         f'FocusBrowser_{display_version}_{target_cpu}-mini-installer.exe')
 
     timestamp = None
     try:
-        with open('build/src/build/util/LASTCHANGE.committime', 'r') as ct:
+        with open(_BUILD_SRC / 'build' / 'util' / 'LASTCHANGE.committime', 'r') as ct:
             timestamp = int(ct.read())
     except FileNotFoundError:
         pass
 
-    output = Path('build/FocusBrowser_{}_{}-windows.zip'.format(
-        display_version, target_cpu))
+    output = package_output_dir / 'FocusBrowser_{}_{}-windows.zip'.format(
+        display_version, target_cpu)
 
     excluded_files = set([
         Path('mini_installer.exe'),
@@ -125,8 +128,14 @@ def main():
         Path('setup.exe'),
         Path('focus_browser.packed.7z'),
     ])
+    # Incremental Chromium output directories can retain version manifests
+    # from an earlier Focus build. Never ship a stale side-by-side manifest in
+    # the portable archive.
+    for manifest in build_outputs.glob('*.manifest'):
+        if manifest.name != f'{version}.manifest':
+            excluded_files.add(Path(manifest.name))
     files_generator = filescfg.filescfg_generator(
-        Path('build/src/chrome/tools/build/win/FILES.cfg'),
+        _BUILD_SRC / 'chrome' / 'tools' / 'build' / 'win' / 'FILES.cfg',
         build_outputs, args.cpu_arch, excluded_files)
     filescfg.create_archive(
         files_generator, tuple(), build_outputs, output, timestamp)

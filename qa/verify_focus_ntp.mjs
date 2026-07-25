@@ -134,7 +134,7 @@ try {
     const forbiddenSelectors = [
       '#focusBrand', '#focusMark', '#focusMessage',
       '#focusShortcutsHeading', '#focusMeditationLink', 'ntp-logo',
-      'ntp-customize-buttons', '#customizeButtons', '#themeAttribution',
+      '#themeAttribution',
       '#contentBottomSpacer', '#backgroundImageAttribution',
       'ntp-middle-slot-promo', 'ntp-modules', '#modules', '#oneGoogleBar',
       'individual-promos', '#focusTypingMirror',
@@ -153,6 +153,8 @@ try {
     const shortcutsRect = mostVisited.getBoundingClientRect();
     const fill = getComputedStyle(realInput)
         .getPropertyValue('-webkit-text-fill-color');
+    const addShortcut = deepQuery(appRoot, '#addShortcut');
+    const customizeButton = deepQuery(appRoot, '#customizeButton');
 
     return {
       href: location.href,
@@ -163,13 +165,22 @@ try {
       searchBeforeShortcuts: searchRect.bottom <= shortcutsRect.top + 0.5,
       forbidden: forbiddenSelectors.filter(selector =>
         deepQuery(appRoot, selector)),
-      customizePencilPresent: Boolean(deepQuery(appRoot, '#customizeButton')),
+      addShortcutPresent: Boolean(addShortcut),
+      addShortcutVisible: Boolean(addShortcut && isVisible(addShortcut)),
+      addShortcutLabel:
+          addShortcut?.getAttribute('aria-label') ||
+          addShortcut?.getAttribute('title') || '',
+      customizePencilPresent: Boolean(customizeButton),
+      customizePencilVisible:
+          Boolean(customizeButton && isVisible(customizeButton)),
+      customizePencilLabel: customizeButton?.getAttribute('title') || '',
       productCopyPresent:
           /Focus Browser|Один экран|Полный фокус/.test(
               appRoot.textContent || ''),
       expectedStructure:
-          contentChildren.length === 1 &&
+          contentChildren.length === 2 &&
           contentChildren[0] === 'focusHome' &&
+          contentChildren[1] === 'customizeButtons' &&
           homeChildren.length === 2 &&
           homeChildren[0] === 'focusSearch' &&
           homeChildren[1] === 'focusShortcuts' &&
@@ -305,18 +316,24 @@ try {
     shortcutsPresent: initial.shortcutsPresent,
     searchboxVisible: initial.searchboxVisible,
     shortcutsVisible: initial.shortcutsVisible,
+    addShortcutPresentAndVisible:
+        initial.addShortcutPresent && initial.addShortcutVisible,
+    addShortcutLocalized: initial.addShortcutLabel.length > 0,
     searchBeforeShortcuts: initial.searchBeforeShortcuts,
     onlySearchAndPinnedShortcuts: initial.expectedStructure,
     forbiddenElementsAbsent: initial.forbidden.length === 0,
-    customizePencilAbsent: !initial.customizePencilPresent,
+    compactCustomizationPresentAndVisible:
+        initial.customizePencilPresent && initial.customizePencilVisible,
+    customizationLocalized: initial.customizePencilLabel.length > 0,
     productCopyAbsent: !initial.productCopyPresent,
     soleVisibleNativeInput:
         initial.soleEditableRealInput && initial.realInputTextVisible,
     shortcutsOffLeavesOnlySearch:
         shortcutsDisabled.searchboxPresent &&
         !shortcutsDisabled.shortcutsPresent &&
-        shortcutsDisabled.contentChildren.length === 1 &&
+        shortcutsDisabled.contentChildren.length === 2 &&
         shortcutsDisabled.contentChildren[0] === 'focusHome' &&
+        shortcutsDisabled.contentChildren[1] === 'customizeButtons' &&
         shortcutsDisabled.homeChildren.length === 1 &&
         shortcutsDisabled.homeChildren[0] === 'focusSearch',
     shortcutsRestored: shortcutsDisabled.shortcutsRestored,

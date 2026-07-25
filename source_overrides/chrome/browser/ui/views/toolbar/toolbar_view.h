@@ -386,7 +386,7 @@ class ToolbarView : public views::AccessiblePaneView,
   void NewTabButtonPressed(const ui::Event& event);
   void VerticalTabsCollapseButtonPressed(const ui::Event& event);
   void ShowFocusBlockPopup(views::View* anchor_view) override;
-  void FocusYoutubeButtonPressed(const ui::Event& event);
+  void ShowFocusYoutubePopup(views::View* anchor_view) override;
   void UpdateFocusYoutubeButtonVisibility(content::WebContents* tab);
 
   // content::WebContentsObserver:
@@ -447,7 +447,6 @@ class ToolbarView : public views::AccessiblePaneView,
 
   // An alias for `location_bar_view_` or `toolbar_webview_->GetLocationBar()`.
   raw_ptr<LocationBar> location_bar_ = nullptr;
-  raw_ptr<ToolbarButton> focus_youtube_button_ = nullptr;
   raw_ptr<ExtensionsToolbarDesktop> extensions_container_ = nullptr;
   raw_ptr<ToolbarDivider> toolbar_divider_ = nullptr;
   raw_ptr<BatterySaverButton> battery_saver_button_ = nullptr;
@@ -541,8 +540,6 @@ class ToolbarView : public views::AccessiblePaneView,
 
   // Whether this toolbar has been initialized.
   bool initialized_ = false;
-
-  bool focus_youtube_context_available_ = false;
 
   // A chevron button that indicates some toolbar elements have overflowed
   // due to small toolbar view width. Visibility controlled by

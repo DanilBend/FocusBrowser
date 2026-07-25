@@ -14,11 +14,14 @@ import {fileURLToPath} from 'node:url';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDir, '..');
+const activeSourceRoot = process.env.FOCUS_ACTIVE_SOURCE_ROOT ?
+  path.resolve(process.env.FOCUS_ACTIVE_SOURCE_ROOT) :
+  path.join(projectRoot, 'build', 'src');
 const staticOnly = process.argv.includes('--static-only');
 const positionalArgs = process.argv.slice(2).filter(arg => arg !== '--static-only');
 const chromePath = path.resolve(
     positionalArgs[0] ||
-    path.join(projectRoot, 'build', 'src', 'out', 'Default', 'chrome.exe'));
+    path.join(activeSourceRoot, 'out', 'Default', 'chrome.exe'));
 const reportPath = positionalArgs[1] ? path.resolve(positionalArgs[1]) : null;
 const extensionId = 'jafokmemnknjknbdiklabcnhlpheefbm';
 const extensionPage = `chrome-extension://${extensionId}/popup.html?runtime-qa=1`;
@@ -34,8 +37,8 @@ if (!staticOnly) {
 const schemaPathCandidates = [
   path.join(projectRoot, 'source_overrides', 'third_party', 'focus_youtube',
       'shared', 'main.js'),
-  path.join(projectRoot, 'build', 'src', 'third_party', 'focus_youtube',
-      'shared', 'main.js'),
+  path.join(activeSourceRoot, 'third_party', 'focus_youtube', 'shared',
+      'main.js'),
 ];
 const schemaPath = schemaPathCandidates.find(candidate => fs.existsSync(candidate));
 assert.ok(schemaPath, 'FocusYoutube shared/main.js was not found');
@@ -51,29 +54,56 @@ const behaviorIds = [...schema.behaviorIds];
 const nativeBehaviorIds = [...schema.nativeBehaviorIds];
 const hiddenBehaviorIds = behaviorIds.filter(
     id => !nativeBehaviorIds.includes(id));
+const nativeUiControlCount = 25;
 assert.equal(behaviorIds.length, 93);
-assert.equal(nativeBehaviorIds.length, 20);
-assert.equal(hiddenBehaviorIds.length, 73);
+assert.equal(schema.defaults.focus_youtube_schema_version, 4);
+assert.equal(nativeBehaviorIds.length, 29);
+assert.equal(hiddenBehaviorIds.length, 64);
 
-function verifyExactHostPredicate() {
+function verifyWildcardManifest() {
+  const candidates = [
+    path.join(projectRoot, 'source_overrides', 'third_party', 'focus_youtube',
+        'manifest.json'),
+    path.join(activeSourceRoot, 'third_party', 'focus_youtube',
+        'manifest.json'),
+  ];
+  const manifestPath = candidates.find(candidate => fs.existsSync(candidate));
+  assert.ok(manifestPath, 'FocusYoutube manifest.json was not found');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const wildcardMatches = [
+    'https://youtube.com/*',
+    'https://*.youtube.com/*',
+  ];
+  assert.deepEqual(manifest.host_permissions, wildcardMatches);
+  assert.deepEqual(manifest.content_scripts[0].matches, wildcardMatches);
+  return {manifestPath, wildcardMatches};
+}
+
+function verifyWildcardHostPredicate() {
   const candidates = [
     path.join(projectRoot, 'source_overrides', 'chrome', 'browser', 'ui',
         'views', 'toolbar', 'toolbar_view.cc'),
-    path.join(projectRoot, 'build', 'src', 'chrome', 'browser', 'ui', 'views',
-        'toolbar', 'toolbar_view.cc'),
+    path.join(activeSourceRoot, 'chrome', 'browser', 'ui', 'views', 'toolbar',
+        'toolbar_view.cc'),
   ];
   const toolbarPath = candidates.find(candidate => fs.existsSync(candidate));
   assert.ok(toolbarPath, 'toolbar_view.cc was not found for visibility audit');
   const source = fs.readFileSync(toolbarPath, 'utf8');
-  const body = source.match(
+  const predicate = source.match(
+      /bool IsFocusYoutubeUrl\(const GURL& url\) \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(predicate, 'FocusYoutube URL predicate was not found');
+  assert.match(predicate, /url\.SchemeIs\(url::kHttpsScheme\)/);
+  assert.match(predicate, /url\.DomainIs\("youtube\.com"\)/);
+  assert.doesNotMatch(predicate, /host\s*==|ends_with|StartsWith/);
+  const visibility = source.match(
       /void ToolbarView::UpdateFocusYoutubeButtonVisibility\(WebContents\* tab\) \{([\s\S]*?)\n\}/)?.[1];
-  assert.ok(body, 'FocusYoutube visibility function was not found');
-  assert.match(body, /tab->GetVisibleURL\(\)/);
-  assert.match(body, /context_url\.SchemeIs\(url::kHttpsScheme\)/);
-  assert.deepEqual(
-      [...body.matchAll(/host == "([^"]+)"/g)].map(match => match[1]),
-      ['youtube.com', 'www.youtube.com', 'm.youtube.com']);
-  assert.doesNotMatch(body, /DomainIs|ends_with|StartsWith/);
+  assert.ok(visibility, 'FocusYoutube visibility function was not found');
+  assert.match(visibility, /tab->GetVisibleURL\(\)/);
+  assert.match(visibility, /tab->GetLastCommittedURL\(\)/);
+  assert.match(visibility,
+      /IsFocusYoutubeUrl\(visible_url\) \|\|[\s\S]*IsFocusYoutubeUrl\(committed_url\)/);
+  assert.match(visibility,
+      /location_bar_view_->SetFocusYoutubeButtonVisible\(/);
   return toolbarPath;
 }
 
@@ -81,8 +111,8 @@ function verifyNativeBubbleReadinessContract() {
   const sourceCandidates = [
     path.join(projectRoot, 'source_overrides', 'chrome', 'browser', 'ui',
         'views', 'toolbar', 'focus_youtube_bubble_view.cc'),
-    path.join(projectRoot, 'build', 'src', 'chrome', 'browser', 'ui', 'views',
-        'toolbar', 'focus_youtube_bubble_view.cc'),
+    path.join(activeSourceRoot, 'chrome', 'browser', 'ui', 'views', 'toolbar',
+        'focus_youtube_bubble_view.cc'),
   ];
   const sourcePath = sourceCandidates.find(candidate => fs.existsSync(candidate));
   assert.ok(sourcePath, 'focus_youtube_bubble_view.cc was not found');
@@ -120,11 +150,77 @@ function verifyNativeBubbleReadinessContract() {
   assert.doesNotMatch(source,
       /TabbedPane::Orientation::kHorizontal,\s*views::TabbedPane::TabStripStyle::kHighlight/,
       'Chromium rejects horizontal highlight tabs at runtime');
-  return {sourcePath, attempts, retryDelayMs};
+  assert.match(source, /constexpr int kFocusYoutubeSchemaVersion = 4;/);
+  assert.match(source, /constexpr std::array<FeatureSpec, 25> kFeatures/);
+  assert.match(source,
+      /CompositeFeature\(3, "remove_trending_page", "remove_explore_link",[\s\S]*?"remove_explore_section"/);
+  assert.match(source,
+      /CompositeFeature\(3, "remove_subscriptions_page",[\s\S]*?"remove_subscriptions_link", "remove_sub_section"/);
+  const featureWrite = source.match(
+      /void FocusYoutubeBubbleView::OnFeatureTogglePressed\([\s\S]*?\) \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(featureWrite, 'native feature write handler was not found');
+  assert.match(featureWrite,
+      /base::DictValue values;[\s\S]*StorageKeys\(\*feature\)[\s\S]*values\.Set\(storage_key, requested_value\)/);
+  assert.equal([...featureWrite.matchAll(/storage->Set\s*\(/g)].length, 1,
+      'compound controls must write their storage keys atomically');
+  return {
+    sourcePath,
+    attempts,
+    retryDelayMs,
+    nativeUiControlCount,
+    nativeStorageKeyCount: nativeBehaviorIds.length,
+  };
 }
 
-const toolbarPath = verifyExactHostPredicate();
+function verifyLocationBarContract(toolbarPath) {
+  const rootCandidates = [
+    activeSourceRoot,
+    path.join(projectRoot, 'source_overrides'),
+  ];
+  const find = relative => {
+    const candidate = rootCandidates
+        .map(root => path.join(root, relative))
+        .find(file => fs.existsSync(file));
+    assert.ok(candidate, `${relative} was not found`);
+    return candidate;
+  };
+  const locationBarPath = find(
+      path.join('chrome', 'browser', 'ui', 'views', 'location_bar',
+          'location_bar_view.cc'));
+  const locationBarHeaderPath = find(
+      path.join('chrome', 'browser', 'ui', 'views', 'location_bar',
+          'location_bar_view.h'));
+  const iconPath = find(
+      path.join('components', 'vector_icons', 'focus_youtube_off.icon'));
+  const toolbar = fs.readFileSync(toolbarPath, 'utf8');
+  const locationBar = fs.readFileSync(locationBarPath, 'utf8');
+  const locationBarHeader = fs.readFileSync(locationBarHeaderPath, 'utf8');
+  const icon = fs.readFileSync(iconPath, 'utf8');
+  assert.doesNotMatch(toolbar,
+      /focus_youtube_button_\s*=\s*AddChildView\([\s\S]{0,120}ToolbarButton/);
+  assert.doesNotMatch(toolbar, /ToolbarView::FocusYoutubeButtonPressed/);
+  assert.match(locationBarHeader,
+      /raw_ptr<views::ImageButton> focus_youtube_button_/);
+  assert.match(locationBarHeader,
+      /virtual void ShowFocusYoutubePopup\(views::View\*\)/);
+  assert.match(locationBar,
+      /focus_youtube_button = views::CreateVectorImageButton\(/);
+  assert.match(locationBar,
+      /focus_youtube_button_ = AddChildView\(std::move\(focus_youtube_button\)\)/);
+  assert.match(locationBar, /add_trailing_decoration\(focus_youtube_button_/);
+  assert.match(locationBar, /IncrementalMinimumWidth\(focus_youtube_button_\)/);
+  assert.match(locationBar, /vector_icons::kFocusYoutubeOffIcon/);
+  assert.match(locationBar,
+      /delegate_->ShowFocusYoutubePopup\(focus_youtube_button_\)/);
+  assert.match(icon,
+      /MOVE_TO, 3\.2f, 2\.2f,[\s\S]*LINE_TO, 17\.8f, 16\.8f/);
+  return {locationBarPath, locationBarHeaderPath, iconPath};
+}
+
+const manifestContract = verifyWildcardManifest();
+const toolbarPath = verifyWildcardHostPredicate();
 const bubbleReadinessContract = verifyNativeBubbleReadinessContract();
+const locationBarContract = verifyLocationBarContract(toolbarPath);
 if (staticOnly) {
   console.log(JSON.stringify({
     ok: true,
@@ -132,10 +228,14 @@ if (staticOnly) {
     schemaVersion: schema.defaults.focus_youtube_schema_version,
     behaviorCount: behaviorIds.length,
     nativeBehaviorCount: nativeBehaviorIds.length,
+    nativeUiControlCount,
     hiddenBehaviorCount: hiddenBehaviorIds.length,
+    manifestContract,
     toolbarSource: toolbarPath,
     bubbleReadinessContract,
-    exactHosts: ['youtube.com', 'www.youtube.com', 'm.youtube.com'],
+    locationBarContract,
+    wildcardHosts: ['youtube.com', '*.youtube.com'],
+    rejectsLookalikesViaDomainIs: true,
   }, null, 2));
   process.exit(0);
 }
@@ -284,8 +384,8 @@ $focusTabNamesSeen = [System.Collections.Generic.HashSet[string]]::new()
 $focusTabNames = [System.Collections.Generic.HashSet[string]]::new(
   [System.StringComparer]::OrdinalIgnoreCase)
 foreach ($name in @(
-    'Feed', 'Player', 'Interface', 'Search',
-    'Лента', 'Плеер', 'Интерфейс', 'Поиск')) {
+    'Feed', 'Player', 'Interface', 'Navigation',
+    'Лента', 'Плеер', 'Интерфейс', 'Навигация')) {
   [void]$focusTabNames.Add($name)
 }
 $processCondition = New-Object System.Windows.Automation.PropertyCondition(
@@ -462,7 +562,7 @@ while ($clock.ElapsedMilliseconds -lt $timeoutMs) {
           if (-not $button.TryGetCurrentPattern(
               [System.Windows.Automation.InvokePattern]::Pattern,
               [ref]$invokePattern)) {
-            throw 'FocusYoutube toolbar button has no InvokePattern'
+            throw 'FocusYoutube address-field button has no InvokePattern'
           }
           $buttonSeenAt = $clock.ElapsedMilliseconds
           $buttonName = $name
@@ -501,7 +601,7 @@ while ($clock.ElapsedMilliseconds -lt $timeoutMs) {
     }
 
     if ($focusTabNamesSeen.Count -eq 4 -and $masterToggleEnabled -and
-        $enabledFeatureNames.Count -eq 20) {
+        $enabledFeatureNames.Count -eq 25) {
       $readyAt = $clock.ElapsedMilliseconds
       [pscustomobject]@{
         ok = $true
@@ -579,11 +679,11 @@ exit 1
         'FocusYoutube bubble did not expose all four native sections');
     assert.equal(measurement.masterToggleEnabled, true,
         'FocusYoutube master toggle remained disabled');
-    assert.equal(measurement.enabledFeatureToggleCount, nativeBehaviorIds.length,
-        'FocusYoutube bubble did not enable all 20 native feature toggles');
+    assert.equal(measurement.enabledFeatureToggleCount, nativeUiControlCount,
+        'FocusYoutube bubble did not enable all 25 native feature toggles');
     assert.ok(measurement.deltaFromInvokeMs <= 2500,
         `FocusYoutube bubble needed ${measurement.deltaFromInvokeMs}ms ` +
-        'after immediate toolbar invocation');
+        'after immediate address-field invocation');
     return measurement;
   } finally {
     await killExactProcessTree(child);
@@ -689,7 +789,7 @@ const alarmsGetAll = page => evaluate(page, `new Promise((resolve, reject) =>
   }))`);
 
 const profileDir = fs.mkdtempSync(
-    path.join(os.tmpdir(), 'focusyoutube-v3-runtime-qa-'));
+    path.join(os.tmpdir(), 'focusyoutube-v4-runtime-qa-'));
 const nativeSeed = Object.fromEntries(
     nativeBehaviorIds.map((id, index) => [id, index % 2 === 0]));
 const seed = {
@@ -721,7 +821,7 @@ try {
   firstRun = await startBrowser(profileDir);
   await waitFor(async () => {
     const current = await storageGetAll(firstRun.page);
-    return current.focus_youtube_schema_version === 3 &&
+    return current.focus_youtube_schema_version === 4 &&
         behaviorIds.every(id => typeof current[id] === 'boolean');
   }, 'initial FocusYoutube schema');
   // Let both the component-load and onInstalled/onStartup initialization
@@ -733,7 +833,7 @@ try {
     const current = await storageGetAll(firstRun.page);
     return current.focus_youtube_schema_version === 2 &&
         current.hashed_password === seed.hashed_password ? current : null;
-  }, 'persisted pre-v3 seed');
+  }, 'persisted pre-v4 seed');
   assert.equal(seeded.global_enable, false);
   assert.equal(seeded.schedule, true);
   assert.equal(seeded.nextTimedValue, false);
@@ -741,7 +841,7 @@ try {
   await delay(500);
   const stableSeed = await storageGetAll(firstRun.page);
   assert.equal(stableSeed.focus_youtube_schema_version, 2,
-      'pre-v3 seed was migrated before the intentional browser restart');
+      'pre-v4 seed was migrated before the intentional browser restart');
   assert.equal(stableSeed.hashed_password, seed.hashed_password);
   await closeBrowser(firstRun);
   firstRun = null;
@@ -749,7 +849,7 @@ try {
   secondRun = await startBrowser(profileDir);
   const migrated = await waitFor(async () => {
     const current = await storageGetAll(secondRun.page);
-    if (current.focus_youtube_schema_version !== 3) return null;
+    if (current.focus_youtube_schema_version !== 4) return null;
     if (Object.keys(nativeSeed).some(id => current[id] !== nativeSeed[id])) {
       return null;
     }
@@ -760,7 +860,7 @@ try {
       return null;
     }
     return current;
-  }, 'schema v3 migration');
+  }, 'schema v4 migration');
 
   assert.equal(migrated.global_enable, false,
       'canonical global_enable must survive migration');
@@ -789,7 +889,8 @@ try {
   const alarms = await alarmsGetAll(secondRun.page);
 
   // The native button owns its own availability. Close the storage probe and
-  // prove that the apex URL exposes the toolbar control immediately, without
+  // prove that the apex URL exposes the address-field control immediately,
+  // without
   // waiting for YouTube's redirect, content scripts, migration or a timer.
   await closeBrowser(secondRun);
   secondRun = null;
@@ -820,13 +921,13 @@ try {
     nativeBubbleReadiness: {
       runtimeProbe: 'Windows UI Automation on the exact spawned browser PID',
       apexHostButtonVisibleImmediately: true,
-      toolbarButtonInvokedAsSoonAsVisible: true,
+      addressFieldButtonInvokedAsSoonAsVisible: true,
       allNativeFeatureTogglesEnabledPromptly: true,
       ...immediateBubbleReadiness,
       source: toolbarPath,
       scheme: 'https only',
-      exactHosts: ['youtube.com', 'www.youtube.com', 'm.youtube.com'],
-      rejectsLookalikesByExactEquality: true,
+      wildcardHosts: ['youtube.com', '*.youtube.com'],
+      rejectsLookalikesViaDomainIs: true,
     },
   };
   if (reportPath) {

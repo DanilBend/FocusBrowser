@@ -37,6 +37,12 @@
 
 void RegisterBrowserPrefs(PrefRegistrySimple* registry) {
   registry->RegisterBooleanPref(prefs::kAllowFileSelectionDialogs, true);
+  registry->RegisterStringPref(prefs::kFocusUpdaterAvailableVersion,
+                               std::string());
+  registry->RegisterStringPref(prefs::kFocusUpdaterSuppressedSession,
+                               std::string());
+  registry->RegisterStringPref(prefs::kFocusUpdaterSkippedVersion,
+                               std::string());
 
 #if !BUILDFLAG(IS_ANDROID)
   registry->RegisterIntegerPref(prefs::kRelaunchNotification, 0);

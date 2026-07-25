@@ -12,8 +12,8 @@ param(
 
     [string]$RepoRoot,
     [string]$InstallerPath,
-    [string]$ExpectedVersion = '1.0.1.0',
-    [string]$ExpectedDisplayVersion = '1.0.1',
+    [string]$ExpectedVersion = '1.0.2.0',
+    [string]$ExpectedDisplayVersion = '1.0.2',
     [ValidateRange(15, 180)]
     [int]$StartupTimeoutSeconds = 60,
     [string]$EvidenceDirectory,
@@ -583,7 +583,14 @@ function Invoke-InstallSmoke {
 
 $script:RepoRootPath = (Resolve-Path -LiteralPath $RepoRoot).Path
 $script:BuildDir = Join-Path $script:RepoRootPath 'build'
-$script:OutDir = Join-Path $script:BuildDir 'src\out\Default'
+$activeSourceRoot = if (
+    -not [string]::IsNullOrWhiteSpace($env:FOCUS_ACTIVE_SOURCE_ROOT)
+) {
+    [IO.Path]::GetFullPath($env:FOCUS_ACTIVE_SOURCE_ROOT)
+} else {
+    Join-Path $script:BuildDir 'src'
+}
+$script:OutDir = Join-Path $activeSourceRoot 'out\Default'
 if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
     $InstallerPath = Join-Path $script:BuildDir `
         "FocusBrowser_${ExpectedDisplayVersion}_x64-installer.exe"

@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ACTIVE = ROOT / "build" / "src"
+ACTIVE = Path(
+    os.environ.get("FOCUS_ACTIVE_SOURCE_ROOT", ROOT / "build" / "src")
+).resolve()
 OVERRIDES = ROOT / "source_overrides"
 
 SUCCESS_CODES = {

@@ -8,22 +8,25 @@
 #include <utility>
 
 #include "base/functional/bind.h"
-#include "base/json/json_reader.h"
 #include "base/logging.h"
 #include "base/memory/ref_counted_memory.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
 #include "base/values.h"
 #include "chrome/browser/profiles/profile.h"
-#include "components/focus_block/rs/src/lib.rs.h"
 #include "components/focus_services/pref_names.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/scoped_user_pref_update.h"
 #include "content/public/browser/browser_thread.h"
+#include "gin/array_buffer.h"
+#include "gin/public/isolate_holder.h"
+#include "gin/v8_initializer.h"
 #include "net/base/registry_controlled_domains/registry_controlled_domain.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/mojom/fetch_api.mojom.h"
+#include "third_party/ghostery_adblocker/resources/grit/ghostery_adblocker_resources.h"
 #include "third_party/ublock/resources/grit/ublock_resources.h"
+#include "tools/v8_context_snapshot/buildflags.h"
 #include "ui/base/resource/resource_bundle.h"
 #include "url/origin.h"
 
@@ -31,15 +34,32 @@ namespace focus_block {
 namespace {
 
 constexpr size_t kMaxCosmeticNames = 4096;
+constexpr size_t kMaxCosmeticCssBytes = 1024 * 1024;
+
+bool EnsureGhosteryV8Initialized() {
+  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  if (gin::IsolateHolder::Initialized()) {
+    return true;
+  }
+#if defined(V8_USE_EXTERNAL_STARTUP_DATA)
+#if BUILDFLAG(USE_V8_CONTEXT_SNAPSHOT)
+  gin::V8Initializer::LoadV8Snapshot(
+      gin::V8SnapshotFileType::kWithAdditionalContext);
+#else
+  gin::V8Initializer::LoadV8Snapshot();
+#endif
+#endif
+  gin::IsolateHolder::Initialize(
+      gin::IsolateHolder::kNonStrictMode,
+      gin::ArrayBufferAllocator::SharedInstance(), nullptr, "--jitless",
+      /*disallow_v8_feature_flag_overrides=*/true);
+  return gin::IsolateHolder::Initialized();
+}
 
 bool IsOutermostMainDocumentRequest(
     const network::ResourceRequest& request) {
   return request.is_outermost_main_frame &&
          request.destination == network::mojom::RequestDestination::kDocument;
-}
-
-std::string RustStringToStdString(const rust::String& value) {
-  return std::string(value.data(), value.size());
 }
 
 std::string RequestTypeForRequest(const network::ResourceRequest& request) {
@@ -98,15 +118,6 @@ std::string RequestTypeForRequest(const network::ResourceRequest& request) {
 }
 
 }  // namespace
-
-class FocusBlockService::EngineHolder {
- public:
-  explicit EngineHolder(rust::Box<focus_block::Engine> engine)
-      : engine(std::move(engine)) {}
-  ~EngineHolder() = default;
-
-  rust::Box<focus_block::Engine> engine;
-};
 
 FocusBlockService::FocusBlockService(Profile* profile)
     : profile_(profile), prefs_(profile->GetPrefs()) {
@@ -198,7 +209,7 @@ void FocusBlockService::SetEnabledForUrl(const GURL& url,
 }
 
 bool FocusBlockService::engine_ready() const {
-  return engine_ != nullptr;
+  return engine_ready_;
 }
 
 uint64_t FocusBlockService::GetBlockedCountForUrl(const GURL& url) const {
@@ -206,14 +217,16 @@ uint64_t FocusBlockService::GetBlockedCountForUrl(const GURL& url) const {
   return it == blocked_count_by_site_.end() ? 0 : it->second;
 }
 
-bool FocusBlockService::ShouldBlock(
+void FocusBlockService::ShouldBlock(
     const network::ResourceRequest& request,
     const GURL& top_level_url,
-    const GURL& source_url) {
+    const GURL& source_url,
+    ShouldBlockCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-  if (!engine_ || IsOutermostMainDocumentRequest(request) ||
+  if (!engine_ready_ || IsOutermostMainDocumentRequest(request) ||
       !IsEligibleUrl(request.url) || !enabled()) {
-    return false;
+    std::move(callback).Run(false);
+    return;
   }
   // Some worker/service-worker requests have no observable top-frame origin.
   // Keep global protection enabled in that case, but never reinterpret the ad
@@ -221,104 +234,116 @@ bool FocusBlockService::ShouldBlock(
   // a cross-site allowlist).
   if (IsEligibleUrl(top_level_url) &&
       !IsEnabledForUrl(top_level_url)) {
-    return false;
+    std::move(callback).Run(false);
+    return;
   }
 
   const GURL effective_source_url =
       IsEligibleUrl(source_url) ? source_url : top_level_url;
-
-  const bool third_party =
-      !IsEligibleUrl(effective_source_url) ||
-      !net::registry_controlled_domains::SameDomainOrHost(
-          request.url, effective_source_url,
-          net::registry_controlled_domains::INCLUDE_PRIVATE_REGISTRIES);
-  const std::string request_type = RequestTypeForRequest(request);
-  focus_block::BlockerResult result = engine_->engine->matches(
-      request.url.spec(), request.url.GetHost(), effective_source_url.GetHost(),
-      request_type,
-      third_party, request.method, /*previously_matched_rule=*/false,
-      /*force_check_exceptions=*/false);
-  if (!result.valid_input || !result.matched) {
-    return false;
-  }
-
-  ++blocked_count_session_;
-  const std::string top_level_site_key = SiteKeyForUrl(top_level_url);
-  if (!top_level_site_key.empty()) {
-    ++blocked_count_by_site_[top_level_site_key];
-  }
-  NotifyStatsChanged();
-  return true;
+  GhosteryMatchRequest match_request;
+  match_request.url = request.url.spec();
+  match_request.source_url = effective_source_url.spec();
+  match_request.type = RequestTypeForRequest(request);
+  engine_.AsyncCall(&FocusBlockGhosteryEngine::Match)
+      .WithArgs(std::move(match_request))
+      .Then(base::BindOnce(
+          [](base::WeakPtr<FocusBlockService> service,
+             GURL callback_top_level_url,
+             ShouldBlockCallback callback, GhosteryMatchResult result) {
+            if (!service) {
+              std::move(callback).Run(false);
+              return;
+            }
+            service->OnMatchCompleted(callback_top_level_url,
+                                      std::move(callback), std::move(result));
+          },
+          weak_ptr_factory_.GetWeakPtr(), top_level_url,
+          std::move(callback)));
 }
 
-std::optional<FocusBlockService::CosmeticResources>
-FocusBlockService::GetCosmeticResourcesForUrl(
-    const GURL& frame_url,
-    const GURL& top_level_url) const {
+void FocusBlockService::OnMatchCompleted(const GURL& top_level_url,
+                                         ShouldBlockCallback callback,
+                                         GhosteryMatchResult result) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-  if (!engine_ || !IsEligibleUrl(frame_url) || !enabled() ||
+  const bool protection_still_enabled =
+      prefs_ && enabled() && engine_ready_ &&
+      (!IsEligibleUrl(top_level_url) || IsEnabledForUrl(top_level_url));
+  const bool should_block = protection_still_enabled && result.valid_input &&
+                            result.matched;
+  if (!result.valid_input && !result.error.empty()) {
+    DVLOG(1) << "FocusBlock Ghostery match failed: " << result.error;
+  }
+  if (should_block) {
+    ++blocked_count_session_;
+    const std::string top_level_site_key = SiteKeyForUrl(top_level_url);
+    if (!top_level_site_key.empty()) {
+      ++blocked_count_by_site_[top_level_site_key];
+    }
+    NotifyStatsChanged();
+  }
+  std::move(callback).Run(should_block);
+}
+
+void FocusBlockService::GetCosmeticResourcesForUrl(
+    const GURL& frame_url,
+    const GURL& top_level_url,
+    const std::vector<std::string>& classes,
+    const std::vector<std::string>& ids,
+    CosmeticResourcesCallback callback) {
+  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  if (!engine_ready_ || !IsEligibleUrl(frame_url) || !enabled() ||
       (IsEligibleUrl(top_level_url) &&
        !IsEnabledForUrl(top_level_url))) {
-    return std::nullopt;
+    std::move(callback).Run(std::nullopt);
+    return;
   }
 
-  focus_block::StringResult result =
-      engine_->engine->url_cosmetic_resources(frame_url.spec());
-  if (!result.success) {
-    return std::nullopt;
-  }
-  std::optional<base::DictValue> dict = base::JSONReader::ReadDict(
-      RustStringToStdString(result.value), base::JSON_PARSE_RFC);
-  if (!dict) {
-    return std::nullopt;
-  }
-
-  CosmeticResources resources;
-  if (const base::ListValue* selectors = dict->FindList("hide_selectors")) {
-    for (const base::Value& selector : *selectors) {
-      if (selector.is_string()) {
-        resources.hide_selectors.push_back(selector.GetString());
-      }
-    }
-  }
-  if (const base::ListValue* exceptions = dict->FindList("exceptions")) {
-    for (const base::Value& exception : *exceptions) {
-      if (exception.is_string()) {
-        resources.exceptions.push_back(exception.GetString());
-      }
-    }
-  }
-  resources.generichide = dict->FindBool("generichide").value_or(false);
-  return resources;
-}
-
-std::vector<std::string> FocusBlockService::GetGenericCosmeticSelectors(
-    const CosmeticResources& resources,
-    const std::vector<std::string>& classes,
-    const std::vector<std::string>& ids) const {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-  if (!engine_ || resources.generichide) {
-    return {};
-  }
-
-  std::vector<std::string> bounded_classes(
+  GhosteryCosmeticRequest cosmetic_request;
+  cosmetic_request.url = frame_url.spec();
+  cosmetic_request.classes.assign(
       classes.begin(),
       classes.begin() + std::min(classes.size(), kMaxCosmeticNames));
-  std::vector<std::string> bounded_ids(
+  cosmetic_request.ids.assign(
       ids.begin(), ids.begin() + std::min(ids.size(), kMaxCosmeticNames));
-  focus_block::StringVectorResult result =
-      engine_->engine->hidden_class_id_selectors(
-          bounded_classes, bounded_ids, resources.exceptions);
-  if (!result.success) {
-    return {};
-  }
+  engine_.AsyncCall(&FocusBlockGhosteryEngine::GetCosmetics)
+      .WithArgs(std::move(cosmetic_request))
+      .Then(base::BindOnce(
+          [](base::WeakPtr<FocusBlockService> service,
+             GURL callback_frame_url, GURL callback_top_level_url,
+             CosmeticResourcesCallback callback,
+             GhosteryCosmeticResult result) {
+            if (!service) {
+              std::move(callback).Run(std::nullopt);
+              return;
+            }
+            service->OnCosmeticsCompleted(
+                callback_frame_url, callback_top_level_url,
+                std::move(callback), std::move(result));
+          },
+          weak_ptr_factory_.GetWeakPtr(), frame_url, top_level_url,
+          std::move(callback)));
+}
 
-  std::vector<std::string> selectors;
-  selectors.reserve(result.value.size());
-  for (const rust::String& selector : result.value) {
-    selectors.push_back(RustStringToStdString(selector));
+void FocusBlockService::OnCosmeticsCompleted(
+    const GURL& frame_url,
+    const GURL& top_level_url,
+    CosmeticResourcesCallback callback,
+    GhosteryCosmeticResult result) {
+  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  if (!prefs_ || !engine_ready_ || !IsEligibleUrl(frame_url) || !enabled() ||
+      (IsEligibleUrl(top_level_url) &&
+       !IsEnabledForUrl(top_level_url)) ||
+      !result.valid_input || !result.active ||
+      result.styles.size() > kMaxCosmeticCssBytes) {
+    if (!result.valid_input && !result.error.empty()) {
+      DVLOG(1) << "FocusBlock Ghostery cosmetics failed: " << result.error;
+    }
+    std::move(callback).Run(std::nullopt);
+    return;
   }
-  return selectors;
+  CosmeticResources resources;
+  resources.css = std::move(result.styles);
+  std::move(callback).Run(std::move(resources));
 }
 
 void FocusBlockService::AddObserver(Observer* observer) {
@@ -342,47 +367,27 @@ void FocusBlockService::Shutdown() {
     observer.OnFocusBlockServiceShuttingDown();
   }
   observers_.Clear();
-  engine_.reset();
+  engine_ready_ = false;
+  engine_.Reset();
   prefs_ = nullptr;
   profile_ = nullptr;
 }
 
-// static
-std::unique_ptr<FocusBlockService::EngineHolder>
-FocusBlockService::BuildEngine(
-    std::vector<std::vector<uint8_t>> filter_lists) {
-  auto filter_set = focus_block::new_filter_set(/*debug=*/false);
-  size_t accepted_lists = 0;
-  for (const std::vector<uint8_t>& list : filter_lists) {
-    if (list.empty()) {
-      continue;
-    }
-    focus_block::AddFilterListResult result =
-        filter_set->add_filter_list(list);
-    if (result.success) {
-      ++accepted_lists;
-    } else {
-      LOG(ERROR) << "FocusBlock failed to parse bundled list: "
-                 << RustStringToStdString(result.error_message);
-    }
-  }
-  if (accepted_lists == 0) {
-    LOG(ERROR) << "FocusBlock could not load any bundled filter list";
-    return nullptr;
-  }
-  return std::make_unique<EngineHolder>(
-      focus_block::engine_from_filter_set(std::move(filter_set)));
-}
-
 void FocusBlockService::StartEngineBuild() {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  // The normal multi-process browser executable does not otherwise create a
+  // V8 isolate. Initialize Gin exactly once on the serialized UI sequence,
+  // before the dedicated engine sequence constructs its private isolate.
+  if (!EnsureGhosteryV8Initialized()) {
+    LOG(ERROR) << "FocusBlock could not initialize Gin for Ghostery";
+    return;
+  }
   constexpr std::array<int, 3> kResourceIds = {
       IDR_UBLOCK_ASSETS_THIRDPARTIES_EASYLIST_EASYLIST_TXT,
       IDR_UBLOCK_ASSETS_THIRDPARTIES_EASYLIST_EASYPRIVACY_TXT,
       IDR_UBLOCK_ASSETS_UBLOCK_FILTERS_MIN_TXT,
   };
-  std::vector<std::vector<uint8_t>> filter_lists;
-  filter_lists.reserve(kResourceIds.size());
+  std::string filter_text;
   ui::ResourceBundle& bundle = ui::ResourceBundle::GetSharedInstance();
   for (int resource_id : kResourceIds) {
     scoped_refptr<base::RefCountedMemory> bytes =
@@ -391,22 +396,36 @@ void FocusBlockService::StartEngineBuild() {
       LOG(ERROR) << "FocusBlock bundled resource is missing: " << resource_id;
       continue;
     }
-    filter_lists.emplace_back(bytes->begin(), bytes->end());
+    filter_text.append(reinterpret_cast<const char*>(bytes->data()),
+                       bytes->size());
+    filter_text.push_back('\n');
   }
+  scoped_refptr<base::RefCountedMemory> engine_bundle =
+      bundle.LoadDataResourceBytes(IDR_FOCUS_GHOSTERY_ADBLOCKER_BUNDLE_JS);
+  if (filter_text.empty() || !engine_bundle || engine_bundle->size() == 0) {
+    LOG(ERROR) << "FocusBlock could not load the bundled Ghostery engine";
+    return;
+  }
+  std::string bundle_source(
+      reinterpret_cast<const char*>(engine_bundle->data()),
+      engine_bundle->size());
 
-  base::ThreadPool::PostTaskAndReplyWithResult(
-      FROM_HERE,
-      {base::TaskPriority::USER_VISIBLE,
-       base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
-      base::BindOnce(&FocusBlockService::BuildEngine,
-                     std::move(filter_lists)),
-      base::BindOnce(&FocusBlockService::OnEngineBuilt,
-                     weak_ptr_factory_.GetWeakPtr()));
+  engine_.emplace(
+      base::ThreadPool::CreateSingleThreadTaskRunner(
+          {base::TaskPriority::USER_BLOCKING,
+           base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN}),
+      std::move(bundle_source), std::move(filter_text));
+  engine_.AsyncCall(&FocusBlockGhosteryEngine::IsReady)
+      .Then(base::BindOnce(&FocusBlockService::OnEngineReady,
+                           weak_ptr_factory_.GetWeakPtr()));
 }
 
-void FocusBlockService::OnEngineBuilt(std::unique_ptr<EngineHolder> engine) {
+void FocusBlockService::OnEngineReady(bool ready) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-  engine_ = std::move(engine);
+  engine_ready_ = ready;
+  if (!ready) {
+    LOG(ERROR) << "FocusBlock failed to initialize Ghostery 2.18.1";
+  }
   NotifyStateChanged();
 }
 

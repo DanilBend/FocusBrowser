@@ -1,0 +1,13 @@
+--- a/chrome/app/resources/generated_resources_ru.xtb
++++ b/chrome/app/resources/generated_resources_ru.xtb
+@@ -1,5 +1,10 @@
+ <?xml version='1.0' encoding='utf-8'?>
+ <translationbundle lang="ru">
++<translation id="3405734788816996571">Доступно обновление Focus Browser</translation>
++<translation id="2504050796829896756">Доступна версия Focus Browser <ph name="VERSION" />. Закладки, пароли и другие данные профиля сохранятся.</translation>
++<translation id="6745592621698551453">Обновить сейчас</translation>
++<translation id="8813277370772331957">Напомнить позже</translation>
++<translation id="4005270918754737597">Пропустить версию</translation>
+ <translation id="1001033507375626788">У вас есть доступ к этой сети</translation>
+ <translation id="1001360573085135660">Нажмите, чтобы включить или отключить разрешение.</translation>
+ <translation id="1002085272681738789">Вкладка вновь активна</translation>
