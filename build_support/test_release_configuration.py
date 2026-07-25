@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static checks for Focus Browser 1.0.2 release metadata.
+"""Static checks for Focus Browser 1.0.3 release metadata.
 
 This intentionally does not build, sign, install, or launch the browser.
 """
@@ -78,7 +78,7 @@ release_source_parts = (
     int(read("focus-chromium/revision.txt").splitlines()[0].split(".")[0]),
     int(read("revision.txt").splitlines()[0].split(".")[0]),
 )
-check(release_source_parts == (1, 0, 2, 0), "release inputs must resolve to Focus 1.0.2.0")
+check(release_source_parts == (1, 0, 3, 0), "release inputs must resolve to Focus 1.0.3.0")
 
 active_version_path = ACTIVE / "chrome/VERSION"
 if active_version_path.is_file():
@@ -90,8 +90,8 @@ if active_version_path.is_file():
     check(
         tuple(version_values.get(key) for key in (
             "FOCUS_MAJOR", "FOCUS_MINOR", "FOCUS_PATCH", "FOCUS_PLATFORM"
-        )) == ("1", "0", "2", "0"),
-        "prepared chrome/VERSION must define Focus 1.0.2.0",
+        )) == ("1", "0", "3", "0"),
+        "prepared chrome/VERSION must define Focus 1.0.3.0",
     )
 
 version_patch = read("patches/focus/windows/focus-versioning.patch")
@@ -138,7 +138,7 @@ for required_text in (
 
 verifier = read("build_support/verify_focus_release.ps1")
 for required_text in (
-    "[string]$ExpectedVersion = '1.0.2.0'",
+    "[string]$ExpectedVersion = '1.0.3.0'",
     "$versionInfo.FileVersion -eq $ExpectedVersion",
     "$versionInfo.ProductVersion -eq $ExpectedVersion",
     "(Join-Path $focusOutDir 'chrome.dll') 'chrome.dll' $true",
@@ -211,15 +211,15 @@ for label, text, signing_steps, final_jobs in (
         check(secret in text, f"{label}: signing prerequisite {secret} is missing")
     check(
         "prerelease: false" in text and "prerelease: true" not in text,
-        f"{label}: Focus 1.0.2 must be a stable release",
+        f"{label}: Focus 1.0.3 must be a stable release",
     )
     check(
         "name: Focus Browser ${{ needs.build-final.outputs.display_version }}" in text,
-        f"{label}: release name is not derived as Focus Browser 1.0.2",
+        f"{label}: release name is not derived as Focus Browser 1.0.3",
     )
     check(
         "tag_name: ${{ needs.build-final.outputs.release_tag }}" in text,
-        f"{label}: release tag is not derived as v1.0.2",
+        f"{label}: release tag is not derived as v1.0.3",
     )
     legacy_brand = "".join(("he", "li", "um"))
     check(
@@ -283,6 +283,19 @@ if active_winsparkle_path.is_file():
             f"prepared updater has an unsafe default: expected {safe_default}",
         )
 
+publish_appcast = read(".github/workflows/publish-appcast.yml")
+publish_appcast_lines = {line.strip() for line in publish_appcast.splitlines()}
+for release_default in (
+    "default: v1.0.3",
+    "default: 1.0.3.0",
+    "default: 1.0.3",
+    "default: FocusBrowser_1.0.3_x64-mini-installer.exe",
+):
+    check(
+        release_default in publish_appcast_lines,
+        f"production appcast workflow default is stale: expected {release_default}",
+    )
+
 onboarding_deps = read("focus-chromium/deps.ini")
 for required_text in (
     "version = 202607132006-focus1",
@@ -303,4 +316,4 @@ if FAILURES:
         print(f"  - {failure}")
     sys.exit(1)
 
-print("PASS: Focus Browser 1.0.2 release configuration is internally consistent")
+print("PASS: Focus Browser 1.0.3 release configuration is internally consistent")

@@ -10,7 +10,7 @@ param(
 
     [string]$BrowserPath,
     [string]$InstallerPath,
-    [string]$ExpectedVersion = '1.0.2.0',
+    [string]$ExpectedVersion = '1.0.3.0',
 
     [string]$UserDataPath =
         (Join-Path $env:LOCALAPPDATA 'FocusBrowser\Focus Browser\User Data'),

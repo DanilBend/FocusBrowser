@@ -13,6 +13,9 @@ assert.ok(browserPath && fs.existsSync(browserPath),
           'Usage: node verify_focus_popups.mjs <path-to-chrome.exe>');
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const activeSourceRoot = process.env.FOCUS_ACTIVE_SOURCE_ROOT
+    ? path.resolve(process.env.FOCUS_ACTIVE_SOURCE_ROOT)
+    : path.join(repoRoot, 'build', 'src');
 const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'focus-popup-test-'));
 const browser = spawn(browserPath, [
   '--headless=new',
@@ -343,8 +346,7 @@ try {
   });
 
   const focusYoutubeUrl = pathToFileURL(path.join(
-      repoRoot, 'build', 'src', 'third_party', 'focus_youtube',
-      'popup.html')).href;
+      activeSourceRoot, 'third_party', 'focus_youtube', 'popup.html')).href;
   await page.send('Page.navigate', { url: focusYoutubeUrl });
   await waitUntilReady(page.send);
 
@@ -436,8 +438,7 @@ try {
   assert.ok(youtubeResult.writeCount >= 5);
 
   const focusBlockUrl = pathToFileURL(path.join(
-      repoRoot, 'build', 'src', 'third_party', 'ublock',
-      'popup-fenix.html')).href;
+      activeSourceRoot, 'third_party', 'ublock', 'popup-fenix.html')).href;
   // Extension popups start auto-sizing from a deliberately small viewport.
   // Keep the browser-owned panel at its fixed 400-DIP product width even
   // under a fractional Windows scale factor.

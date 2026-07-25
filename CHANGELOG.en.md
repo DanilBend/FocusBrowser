@@ -2,6 +2,15 @@
 
 <p><a href="CHANGELOG.md">Русский</a> · <strong>English</strong></p>
 
+## 1.0.3 — 2026-07-25
+
+- Fixed FocusYoutube visibility: its icon now appears automatically after
+  opening, navigating to, or restoring a supported page.
+- The icon remains visible after address-bar state updates; toggling
+  FocusYoutube off and back on in toolbar settings is no longer required.
+- Added regression coverage for stable icon visibility after navigation
+  commits.
+
 ## 1.0.2 — 2026-07-25
 
 - FocusBlock's native engine was updated while retaining its interface, global

@@ -133,6 +133,8 @@
 #include "components/signin/public/base/signin_buildflags.h"
 #include "components/strings/grit/components_strings.h"
 #include "components/vector_icons/vector_icons.h"
+#include "content/public/browser/navigation_controller.h"
+#include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/render_view_host.h"
 #include "content/public/browser/web_contents.h"
@@ -196,6 +198,36 @@ constexpr int kDynamicNewTabButtonIconSize = 16;
 
 bool IsFocusYoutubeUrl(const GURL& url) {
   return url.SchemeIs(url::kHttpsScheme) && url.DomainIs("youtube.com");
+}
+
+bool IsFocusYoutubeTab(WebContents* tab) {
+  if (!tab) {
+    return false;
+  }
+
+  if (IsFocusYoutubeUrl(tab->GetVisibleURL()) ||
+      IsFocusYoutubeUrl(tab->GetLastCommittedURL())) {
+    return true;
+  }
+
+  // Failed/interstitial navigations can commit an internal URL while the
+  // omnibox intentionally keeps showing the requested YouTube URL. Read the
+  // navigation entries as well so the contextual control always follows what
+  // the user sees, including restored tabs and retry/error pages.
+  content::NavigationController& controller = tab->GetController();
+  const content::NavigationEntry* const visible_entry =
+      controller.GetVisibleEntry();
+  if (visible_entry &&
+      (IsFocusYoutubeUrl(visible_entry->GetVirtualURL()) ||
+       IsFocusYoutubeUrl(visible_entry->GetURL()))) {
+    return true;
+  }
+
+  const content::NavigationEntry* const pending_entry =
+      controller.GetPendingEntry();
+  return pending_entry &&
+         (IsFocusYoutubeUrl(pending_entry->GetVirtualURL()) ||
+          IsFocusYoutubeUrl(pending_entry->GetURL()));
 }
 
 class DynamicNewTabToolbarButton : public ToolbarButton {
@@ -1364,14 +1396,21 @@ void ToolbarView::AnimationProgressed(const gfx::Animation* animation) {
 }
 
 void ToolbarView::Update(WebContents* tab) {
-  if (tab != web_contents()) {
-    Observe(tab);
+  // `tab` is nullable because Browser uses nullptr as an omnibox-update
+  // sentinel when it must not restore the tab's editing state. It does not
+  // mean that the browser has no active tab. Keep FocusYoutube attached to
+  // the actual active contents so security-state and restored-tab updates
+  // cannot detach the observer and hide the address-bar control.
+  WebContents* const active_tab =
+      browser_->tab_strip_model()->GetActiveWebContents();
+  if (active_tab != web_contents()) {
+    Observe(active_tab);
   }
   if (location_bar_) {
     location_bar_->Update(tab);
   }
 
-  UpdateFocusYoutubeButtonVisibility(tab);
+  UpdateFocusYoutubeButtonVisibility(active_tab);
 
   if (extensions_container_) {
     extensions_container_->UpdateAllIcons();
@@ -2370,20 +2409,9 @@ void ToolbarView::OnShowFocusYoutubeButtonChanged() {
 }
 
 void ToolbarView::UpdateFocusYoutubeButtonVisibility(WebContents* tab) {
-  bool focus_youtube_context_available = false;
-  if (tab) {
-    // Keep the address-field control stable throughout YouTube redirects. A
-    // pending non-YouTube URL does not hide it until that navigation commits;
-    // a pending YouTube URL makes it available immediately.
-    const GURL& visible_url = tab->GetVisibleURL();
-    const GURL& committed_url = tab->GetLastCommittedURL();
-    focus_youtube_context_available = IsFocusYoutubeUrl(visible_url) ||
-                                      IsFocusYoutubeUrl(committed_url);
-  }
   if (location_bar_view_) {
     location_bar_view_->SetFocusYoutubeButtonVisible(
-        focus_youtube_context_available &&
-        show_focus_youtube_button_.GetValue());
+        IsFocusYoutubeTab(tab) && show_focus_youtube_button_.GetValue());
   }
 }
 
@@ -2402,6 +2430,18 @@ void ToolbarView::DidStartNavigation(
     location_bar_view_->SetFocusYoutubeButtonVisible(
         show_focus_youtube_button_.GetValue());
   }
+}
+
+void ToolbarView::DidFinishNavigation(
+    content::NavigationHandle* navigation_handle) {
+  if (!navigation_handle->IsInPrimaryMainFrame()) {
+    return;
+  }
+
+  // Reconcile both committed and aborted primary-frame navigations. The
+  // latter matters because DidStartNavigation may have shown the control for
+  // a pending YouTube URL that never commits.
+  UpdateFocusYoutubeButtonVisibility(navigation_handle->GetWebContents());
 }
 
 void ToolbarView::OnShowMenuButtonChanged() {
