@@ -1034,16 +1034,20 @@ assert.ok(youtubeUrlPredicate, 'FocusYoutube URL predicate was not found');
 assert.match(youtubeUrlPredicate, /url\.SchemeIs\(url::kHttpsScheme\)/);
 assert.match(youtubeUrlPredicate, /url\.DomainIs\("youtube\.com"\)/);
 assert.doesNotMatch(youtubeUrlPredicate, /host\s*==|ends_with|StartsWith/);
+const youtubeTabPredicate = toolbarSource.match(
+    /bool IsFocusYoutubeTab\(WebContents\* tab\) \{([\s\S]*?)\n\}/)?.[1];
+assert.ok(youtubeTabPredicate,
+          'FocusYoutube tab visibility predicate was not found');
+assert.match(youtubeTabPredicate, /tab->GetVisibleURL\(\)/,
+             'GetVisibleURL is required for pending navigation');
+assert.match(youtubeTabPredicate, /tab->GetLastCommittedURL\(\)/);
+assert.match(youtubeTabPredicate, /visible_entry->GetVirtualURL\(\)/,
+             'restored/error tabs must follow the URL shown in the omnibox');
+assert.match(youtubeTabPredicate, /pending_entry->GetVirtualURL\(\)/);
 const visibilityFunction = toolbarSource.match(
     /void ToolbarView::UpdateFocusYoutubeButtonVisibility\(WebContents\* tab\) \{([\s\S]*?)\n\}/)?.[1];
 assert.ok(visibilityFunction, 'Не найден контекстный фильтр FocusYoutube');
-assert.match(visibilityFunction, /tab->GetVisibleURL\(\)/,
-             'GetVisibleURL нужен для pending navigation');
-assert.match(
-    visibilityFunction,
-    /const GURL& committed_url = tab->GetLastCommittedURL\(\)/);
-assert.match(visibilityFunction,
-             /IsFocusYoutubeUrl\(visible_url\) \|\|[\s\S]*IsFocusYoutubeUrl\(committed_url\)/);
+assert.match(visibilityFunction, /IsFocusYoutubeTab\(tab\)/);
 assert.match(visibilityFunction,
              /location_bar_view_->SetFocusYoutubeButtonVisible\(/);
 assert.match(visibilityFunction, /show_focus_youtube_button_\.GetValue\(\)/);

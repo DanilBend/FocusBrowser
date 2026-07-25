@@ -95,16 +95,65 @@ function verifyWildcardHostPredicate() {
   assert.match(predicate, /url\.SchemeIs\(url::kHttpsScheme\)/);
   assert.match(predicate, /url\.DomainIs\("youtube\.com"\)/);
   assert.doesNotMatch(predicate, /host\s*==|ends_with|StartsWith/);
+  const tabPredicate = source.match(
+      /bool IsFocusYoutubeTab\(WebContents\* tab\) \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(tabPredicate, 'FocusYoutube tab predicate was not found');
+  assert.match(tabPredicate, /tab->GetVisibleURL\(\)/);
+  assert.match(tabPredicate, /tab->GetLastCommittedURL\(\)/);
+  assert.match(tabPredicate,
+      /visible_entry->GetVirtualURL\(\)/,
+      'failed/restored navigations must follow the URL shown in the omnibox');
+  assert.match(tabPredicate,
+      /pending_entry->GetVirtualURL\(\)/,
+      'pending navigations must follow their user-visible virtual URL');
   const visibility = source.match(
       /void ToolbarView::UpdateFocusYoutubeButtonVisibility\(WebContents\* tab\) \{([\s\S]*?)\n\}/)?.[1];
   assert.ok(visibility, 'FocusYoutube visibility function was not found');
-  assert.match(visibility, /tab->GetVisibleURL\(\)/);
-  assert.match(visibility, /tab->GetLastCommittedURL\(\)/);
-  assert.match(visibility,
-      /IsFocusYoutubeUrl\(visible_url\) \|\|[\s\S]*IsFocusYoutubeUrl\(committed_url\)/);
+  assert.match(visibility, /IsFocusYoutubeTab\(tab\)/);
   assert.match(visibility,
       /location_bar_view_->SetFocusYoutubeButtonVisible\(/);
-  return toolbarPath;
+
+  const update = source.match(
+      /void ToolbarView::Update\(WebContents\* tab\) \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(update, 'ToolbarView::Update was not found');
+  assert.match(update,
+      /WebContents\*\s+const\s+active_tab\s*=\s*[\r\n\s]*browser_->tab_strip_model\(\)->GetActiveWebContents\(\);/,
+      'toolbar updates must resolve the actual active WebContents');
+  assert.match(update,
+      /if \(active_tab != web_contents\(\)\) \{\s*Observe\(active_tab\);\s*\}/,
+      'the WebContentsObserver must remain attached to the actual active tab');
+  assert.match(update, /location_bar_->Update\(tab\);/,
+      'the nullable sentinel must be preserved for LocationBarView::Update');
+  assert.match(update,
+      /UpdateFocusYoutubeButtonVisibility\(active_tab\);/,
+      'FocusYoutube visibility must use the actual active tab');
+  assert.doesNotMatch(update, /Observe\(tab\)/,
+      'a nullable toolbar-update sentinel must never detach the observer');
+  const uncommentedUpdate = update.replace(/\/\/.*$/gm, '');
+  assert.equal([...uncommentedUpdate.matchAll(/\btab\b/g)].length, 1,
+      'the nullable tab sentinel may only be passed to location_bar_->Update');
+
+  const didFinishNavigation = source.match(
+      /void ToolbarView::DidFinishNavigation\(\s*content::NavigationHandle\* navigation_handle\) \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(didFinishNavigation,
+      'ToolbarView::DidFinishNavigation was not found');
+  assert.match(didFinishNavigation,
+      /if \(!navigation_handle->IsInPrimaryMainFrame\(\)\) \{\s*return;\s*\}/,
+      'only primary-main-frame navigation completions may reconcile visibility');
+  assert.doesNotMatch(didFinishNavigation, /HasCommitted\(\)/,
+      'aborted or replaced primary-main-frame navigations must clear pending visibility');
+  assert.match(didFinishNavigation,
+      /UpdateFocusYoutubeButtonVisibility\(\s*navigation_handle->GetWebContents\(\)\);/,
+      'finished navigation must reconcile the actual navigation WebContents');
+  return {
+    toolbarPath,
+    lifecycle: {
+      activeTabResolvedOnEveryToolbarUpdate: true,
+      nullableSentinelReservedForLocationBar: true,
+      observerTracksActiveTab: true,
+      everyFinishedPrimaryMainFrameReconcilesVisibility: true,
+    },
+  };
 }
 
 function verifyNativeBubbleReadinessContract() {
@@ -218,7 +267,8 @@ function verifyLocationBarContract(toolbarPath) {
 }
 
 const manifestContract = verifyWildcardManifest();
-const toolbarPath = verifyWildcardHostPredicate();
+const toolbarContract = verifyWildcardHostPredicate();
+const toolbarPath = toolbarContract.toolbarPath;
 const bubbleReadinessContract = verifyNativeBubbleReadinessContract();
 const locationBarContract = verifyLocationBarContract(toolbarPath);
 if (staticOnly) {
@@ -232,6 +282,7 @@ if (staticOnly) {
     hiddenBehaviorCount: hiddenBehaviorIds.length,
     manifestContract,
     toolbarSource: toolbarPath,
+    toolbarContract,
     bubbleReadinessContract,
     locationBarContract,
     wildcardHosts: ['youtube.com', '*.youtube.com'],
@@ -250,6 +301,7 @@ async function waitFor(probe, description, timeoutMs = 30000) {
       const value = await probe();
       if (value) return value;
     } catch (error) {
+      if (error?.fatal) throw error;
       lastError = error;
     }
     await delay(50);
@@ -330,6 +382,443 @@ async function killExactProcessTree(child) {
     new Promise(resolve => child.once('exit', resolve)),
     delay(3000),
   ]);
+}
+
+function exactLifecycleProfileProcessIds(profileDir) {
+  const resolvedProfile = path.resolve(profileDir);
+  assert.equal(path.dirname(resolvedProfile), path.resolve(os.tmpdir()));
+  assert.ok(path.basename(resolvedProfile).startsWith(
+      'focusyoutube-restore-qa-'));
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+$profileSwitch = '--user-data-dir='
+$profilePath = [System.IO.Path]::GetFullPath($env:FOCUS_QA_PROFILE)
+$executable = [System.IO.Path]::GetFullPath($env:FOCUS_QA_EXECUTABLE)
+$ids = @(
+  Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
+    Where-Object {
+      $_.ExecutablePath -and $_.CommandLine -and
+      [string]::Equals(
+        [System.IO.Path]::GetFullPath($_.ExecutablePath),
+        $executable,
+        [System.StringComparison]::OrdinalIgnoreCase) -and
+      $_.CommandLine.IndexOf(
+        $profileSwitch,
+        [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+      $_.CommandLine.IndexOf(
+        $profilePath,
+        [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    } |
+    ForEach-Object { [int]$_.ProcessId }
+)
+@{processIds = $ids} | ConvertTo-Json -Compress
+`;
+  const result = spawnSync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', script], {
+        encoding: 'utf8',
+        timeout: 8000,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          FOCUS_QA_PROFILE: resolvedProfile,
+          FOCUS_QA_EXECUTABLE: chromePath,
+        },
+      });
+  assert.equal(result.status, 0, [
+    'Unable to audit exact disposable-profile processes.',
+    result.error?.message || '',
+    result.stdout || '',
+    result.stderr || '',
+  ].filter(Boolean).join('\n'));
+  return JSON.parse(result.stdout.trim()).processIds;
+}
+
+async function releaseExactLifecycleProfile(profileDir) {
+  let processIds = [];
+  const deadline = Date.now() + 5000;
+  do {
+    processIds = exactLifecycleProfileProcessIds(profileDir);
+    if (processIds.length === 0) return;
+    await delay(150);
+  } while (Date.now() < deadline);
+
+  // Every match uses both this test's unpredictable disposable profile and
+  // the exact executable under test, so these can only be orphan descendants
+  // of the lifecycle process spawned above.
+  for (const processId of processIds) {
+    spawnSync('taskkill', ['/PID', String(processId), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+  }
+  await delay(300);
+  assert.deepEqual(exactLifecycleProfileProcessIds(profileDir), [],
+      'an exact disposable-profile browser process survived cleanup');
+}
+
+async function launchYoutubeLifecycleBrowser(
+    profileDir, phase, extraArgs, windowsHide) {
+  const portFile = path.join(profileDir, 'DevToolsActivePort');
+  fs.rmSync(portFile, {force: true});
+  const child = spawn(chromePath, [
+    `--user-data-dir=${profileDir}`,
+    '--remote-debugging-port=0',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-background-networking',
+    '--disable-background-mode',
+    '--disable-component-update',
+    '--disable-sync',
+    '--disable-features=Translate',
+    '--disable-session-crashed-bubble',
+    '--window-size=1000,700',
+    ...extraArgs,
+  ], {
+    stdio: 'ignore',
+    windowsHide,
+  });
+
+  let page = null;
+  let browser = null;
+  try {
+    const port = await waitFor(() => {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        const error = new Error(
+            `${phase} browser exited early with code ${child.exitCode}`);
+        error.fatal = true;
+        error.exitCode = child.exitCode;
+        throw error;
+      }
+      if (!fs.existsSync(portFile)) return null;
+      return fs.readFileSync(portFile, 'utf8').trim().split(/\r?\n/)[0];
+    }, `${phase} DevToolsActivePort`);
+    const version = await waitFor(async () => {
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`);
+      return response.ok ? await response.json() : null;
+    }, `${phase} browser DevTools endpoint`);
+    let lastTargetUrls = [];
+    const target = await waitFor(async () => {
+      const response = await fetch(`http://127.0.0.1:${port}/json`);
+      const targets = await response.json();
+      lastTargetUrls = targets
+          .filter(candidate => candidate.type === 'page')
+          .map(candidate => candidate.url);
+      return targets.find(candidate =>
+        candidate.type === 'page' &&
+        /^https:\/\/www\.youtube\.com(?:[/:?#]|$)/.test(candidate.url));
+    }, `${phase} committed www.youtube.com target`).catch(error => {
+      error.message += `; page targets: ${JSON.stringify(lastTargetUrls)}`;
+      throw error;
+    });
+    page = new CdpSession(target.webSocketDebuggerUrl);
+    browser = new CdpSession(version.webSocketDebuggerUrl);
+    await page.connect();
+    await browser.connect();
+    await page.send('Runtime.enable');
+    await page.send('Page.enable');
+    await waitFor(
+        () => evaluate(page, "document.readyState === 'complete'"),
+        `${phase} committed document`, 15000);
+    const history = await page.send('Page.getNavigationHistory');
+    const currentEntry = history.entries?.[history.currentIndex];
+    const committedUrl =
+        currentEntry?.userTypedURL || currentEntry?.url || target.url;
+    assert.match(committedUrl,
+        /^https:\/\/www\.youtube\.com(?:[/:?#]|$)/,
+        `${phase} did not commit the expected YouTube navigation`);
+    return {child, page, browser, port, committedUrl, profileDir};
+  } catch (error) {
+    page?.close();
+    browser?.close();
+    await killExactProcessTree(child);
+    await releaseExactLifecycleProfile(profileDir);
+    throw error;
+  }
+}
+
+async function verifyRestoredCommittedButtonStability() {
+  const profileDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'focusyoutube-restore-qa-'));
+  const youtubeUrl =
+      'https://www.youtube.com/watch?v=focusyoutube-lifecycle-qa';
+  let warmupRun = null;
+  let seedRun = null;
+  let restoredRun = null;
+  let seedCommittedUrl = null;
+
+  try {
+    // Chromium intentionally ignores --restore-last-session for a brand-new
+    // profile. Warm this disposable profile in a separate process lifetime so
+    // the actual seed run below is always written by an established profile.
+    warmupRun = await launchYoutubeLifecycleBrowser(
+        profileDir, 'profile warmup', [youtubeUrl], true);
+    await delay(750);
+    await closeBrowser(warmupRun);
+    warmupRun = null;
+    await delay(750);
+
+    // Create a normal committed YouTube session entry first. Using the real
+    // HTTPS origin makes Chromium persist this tab as an ordinary restorable
+    // navigation instead of discarding a synthetic network-error session.
+    seedRun = await launchYoutubeLifecycleBrowser(
+        profileDir, 'session seed', [youtubeUrl], true);
+    seedCommittedUrl = seedRun.committedUrl;
+    await delay(750);
+    await closeBrowser(seedRun);
+    seedRun = null;
+    await delay(750);
+
+    // This is a separate process lifetime and therefore exercises the cold
+    // restored-tab path which previously called ToolbarView::Update(nullptr)
+    // and detached the FocusYoutube WebContentsObserver.
+    let lastProfileInUseError = null;
+    for (let attempt = 1; attempt <= 3 && !restoredRun; ++attempt) {
+      try {
+        restoredRun = await launchYoutubeLifecycleBrowser(
+            profileDir, 'cold session restore',
+            ['--restore-last-session'], false);
+      } catch (error) {
+        if (error?.exitCode !== 21 || attempt === 3) throw error;
+        lastProfileInUseError = error;
+        await delay(attempt * 750);
+      }
+    }
+    assert.ok(restoredRun, lastProfileInUseError?.message ||
+        'cold session restore did not launch');
+
+    const stabilityScript = String.raw`
+Add-Type -AssemblyName UIAutomationClient
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+namespace FocusYoutubeQa {
+  public static class NativeMethods {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool MoveWindow(
+      IntPtr hWnd, int x, int y, int width, int height, bool repaint);
+  }
+}
+'@
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$browserProcessId = [int]$env:FOCUS_QA_BROWSER_PID
+$timeoutMs = 15000
+$clock = [System.Diagnostics.Stopwatch]::StartNew()
+$processCondition = New-Object System.Windows.Automation.PropertyCondition(
+  [System.Windows.Automation.AutomationElement]::ProcessIdProperty,
+  $browserProcessId)
+$buttonCondition = New-Object System.Windows.Automation.PropertyCondition(
+  [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+  [System.Windows.Automation.ControlType]::Button)
+$editCondition = New-Object System.Windows.Automation.PropertyCondition(
+  [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+  [System.Windows.Automation.ControlType]::Edit)
+$windowSeenAt = $null
+$youtubeUrlSeenAt = $null
+$resizedAt = $null
+$stableStartedAt = $null
+$stableProbeCount = 0
+$disappearanceCount = 0
+$matchedOmniboxValue = $null
+$buttonSeenAt = $null
+$postResizeButtonSeen = $false
+$buttonName = $null
+$buttonNames = [System.Collections.Generic.HashSet[string]]::new()
+
+function Get-FocusWindows {
+  return [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
+    [System.Windows.Automation.TreeScope]::Children, $processCondition)
+}
+
+while ($clock.ElapsedMilliseconds -lt $timeoutMs) {
+  $windows = Get-FocusWindows
+  if ($windows.Count -gt 0 -and $null -eq $windowSeenAt) {
+    $windowSeenAt = $clock.ElapsedMilliseconds
+  }
+
+  $youtubeUrlVisible = $false
+  $focusButton = $null
+  foreach ($window in $windows) {
+    try {
+      $edits = $window.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants, $editCondition)
+      foreach ($edit in $edits) {
+        try {
+          $valuePattern = $null
+          if ($edit.TryGetCurrentPattern(
+              [System.Windows.Automation.ValuePattern]::Pattern,
+              [ref]$valuePattern)) {
+            $value = $valuePattern.Current.Value
+            if ($value -match
+                '(?i)(^|[/:.])(?:www\.)?youtube\.com([/:?#]|$)') {
+              $youtubeUrlVisible = $true
+              $matchedOmniboxValue = $value
+            }
+          }
+        } catch {}
+      }
+
+      $buttons = $window.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
+      foreach ($button in $buttons) {
+        try {
+          $name = $button.Current.Name
+          if (-not [string]::IsNullOrWhiteSpace($name)) {
+            [void]$buttonNames.Add($name)
+          }
+          if ($name -like '*FocusYoutube*' -and
+              $button.Current.IsEnabled -and
+              -not $button.Current.IsOffscreen) {
+            $focusButton = $button
+            $buttonName = $name
+            break
+          }
+        } catch {}
+      }
+    } catch {}
+    if ($null -ne $focusButton -and $youtubeUrlVisible) { break }
+  }
+
+  if ($youtubeUrlVisible -and $null -eq $youtubeUrlSeenAt) {
+    $youtubeUrlSeenAt = $clock.ElapsedMilliseconds
+  }
+
+  if ($youtubeUrlVisible -and $null -ne $focusButton) {
+    if ($null -eq $buttonSeenAt) {
+      $buttonSeenAt = $clock.ElapsedMilliseconds
+    }
+    if ($null -eq $resizedAt) {
+      $windowHandle = 0
+      foreach ($window in $windows) {
+        try {
+          if ($window.Current.NativeWindowHandle -ne 0) {
+            $windowHandle = $window.Current.NativeWindowHandle
+            break
+          }
+        } catch {}
+      }
+      if ($windowHandle -ne 0 -and
+          [FocusYoutubeQa.NativeMethods]::MoveWindow(
+            [IntPtr]$windowHandle, 40, 40, 760, 640, $true)) {
+        $resizedAt = $clock.ElapsedMilliseconds
+        $stableStartedAt = $null
+        $stableProbeCount = 0
+        Start-Sleep -Milliseconds 150
+        continue
+      }
+    } elseif ($null -eq $stableStartedAt) {
+      $postResizeButtonSeen = $true
+      $stableStartedAt = $clock.ElapsedMilliseconds
+      $stableProbeCount = 1
+    } else {
+      $stableProbeCount++
+      if (($clock.ElapsedMilliseconds - $stableStartedAt) -ge 2000 -and
+          $stableProbeCount -ge 3) {
+        [pscustomobject]@{
+          ok = $true
+          processId = $browserProcessId
+          accessibleName = $buttonName
+          windowSeenMs = $windowSeenAt
+          youtubeUrlSeenMs = $youtubeUrlSeenAt
+          resizedMs = $resizedAt
+          stableDurationMs =
+              [int64]($clock.ElapsedMilliseconds - $stableStartedAt)
+          stableProbeCount = $stableProbeCount
+          disappearanceCount = $disappearanceCount
+          buttonSeenMs = $buttonSeenAt
+          omniboxValue = $matchedOmniboxValue
+        } | ConvertTo-Json -Compress
+        exit 0
+      }
+    }
+  } elseif ($postResizeButtonSeen) {
+    $disappearanceCount++
+    $stableStartedAt = $null
+    $stableProbeCount = 0
+  }
+  Start-Sleep -Milliseconds 100
+}
+
+[pscustomobject]@{
+  ok = $false
+  processId = $browserProcessId
+  windowSeenMs = $windowSeenAt
+  youtubeUrlSeenMs = $youtubeUrlSeenAt
+  resizedMs = $resizedAt
+  stableProbeCount = $stableProbeCount
+  disappearanceCount = $disappearanceCount
+  buttonSeenMs = $buttonSeenAt
+  omniboxValue = $matchedOmniboxValue
+  buttonNames = @($buttonNames)
+} | ConvertTo-Json -Compress
+exit 1
+`;
+
+    const result = spawnSync(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-Command', stabilityScript], {
+          encoding: 'utf8',
+          timeout: 20000,
+          windowsHide: true,
+          env: {
+            ...process.env,
+            FOCUS_QA_BROWSER_PID: String(restoredRun.child.pid),
+          },
+        });
+    assert.equal(result.status, 0, [
+      'FocusYoutube cold-restore stability UIA probe failed.',
+      result.error?.message || '',
+      result.stdout || '',
+      result.stderr || '',
+    ].filter(Boolean).join('\n'));
+    const line = result.stdout.trim().split(/\r?\n/).at(-1);
+    const measurement = JSON.parse(line);
+    assert.equal(measurement.ok, true);
+    assert.match(measurement.accessibleName, /FocusYoutube/);
+    assert.match(measurement.omniboxValue,
+        /(?:www\.)?youtube\.com/i,
+        'the restored YouTube URL was not visible in the omnibox');
+    assert.ok(
+        measurement.buttonSeenMs - measurement.youtubeUrlSeenMs <= 5000,
+        'the FocusYoutube button did not appear promptly after the restored URL');
+    assert.ok(measurement.resizedMs !== null,
+        'the restored window was not resized during the stability probe');
+    assert.ok(measurement.stableDurationMs >= 2000,
+        'the restored FocusYoutube button was not stable for two seconds');
+    assert.ok(measurement.stableProbeCount >= 3,
+        'the restored FocusYoutube button did not pass three stable probes');
+    assert.equal(measurement.disappearanceCount, 0,
+        'the restored FocusYoutube button disappeared after becoming stable');
+    return {
+      seedCommittedUrl,
+      restoredCommittedUrl: restoredRun.committedUrl,
+      ...measurement,
+    };
+  } finally {
+    try {
+      await closeBrowser(restoredRun);
+    } finally {
+      try {
+        await closeBrowser(seedRun);
+      } finally {
+        try {
+          await closeBrowser(warmupRun);
+        } finally {
+          const resolvedProfile = path.resolve(profileDir);
+          if (path.dirname(resolvedProfile) === path.resolve(os.tmpdir()) &&
+              path.basename(resolvedProfile).startsWith(
+                  'focusyoutube-restore-qa-')) {
+            fs.rmSync(resolvedProfile, {
+              recursive: true,
+              force: true,
+              maxRetries: 5,
+              retryDelay: 200,
+            });
+          }
+        }
+      }
+    }
+  }
 }
 
 async function verifyImmediateNativeBubbleReadiness() {
@@ -764,6 +1253,9 @@ async function closeBrowser(instance) {
     delay(3000),
   ]);
   await killExactProcessTree(instance.child);
+  if (instance.profileDir) {
+    await releaseExactLifecycleProfile(instance.profileDir);
+  }
 }
 
 const storageGetAll = page => evaluate(page, `new Promise((resolve, reject) =>
@@ -896,6 +1388,8 @@ try {
   secondRun = null;
   const immediateBubbleReadiness =
       await verifyImmediateNativeBubbleReadiness();
+  const restoredCommittedButtonStability =
+      await verifyRestoredCommittedButtonStability();
 
   const report = {
     ok: true,
@@ -928,6 +1422,14 @@ try {
       scheme: 'https only',
       wildcardHosts: ['youtube.com', '*.youtube.com'],
       rejectsLookalikesViaDomainIs: true,
+    },
+    restoredCommittedButtonStability: {
+      runtimeProbe:
+          'cold restored disposable profile plus process-scoped Windows UI Automation',
+      committedPrimaryMainFrame: true,
+      stableAfterWindowResize: true,
+      ...restoredCommittedButtonStability,
+      lifecycleContract: toolbarContract.lifecycle,
     },
   };
   if (reportPath) {

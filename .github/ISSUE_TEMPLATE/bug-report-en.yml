@@ -14,7 +14,7 @@ body:
     attributes:
       label: Focus Browser version
       description: Copy it from focus://settings/help.
-      placeholder: "1.0.2.0"
+      placeholder: "1.0.3.0"
     validations:
       required: true
   - type: dropdown

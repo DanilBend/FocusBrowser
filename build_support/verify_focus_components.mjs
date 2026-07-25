@@ -789,10 +789,10 @@ assert.match(toolbarView,
              /bool IsFocusYoutubeUrl\(const GURL& url\) \{[\s\S]*?url\.SchemeIs\(url::kHttpsScheme\)[\s\S]*?url\.DomainIs\("youtube\.com"\)/);
 assert.doesNotMatch(toolbarView,
                     /bool IsFocusYoutubeUrl[\s\S]{0,240}(?:host\s*==|ends_with|StartsWith)/);
-assert.match(toolbarView, /GetVisibleURL\(\)/);
-assert.match(toolbarView, /GetLastCommittedURL\(\)/);
 assert.match(toolbarView,
-             /IsFocusYoutubeUrl\(visible_url\) \|\|[\s\S]*?IsFocusYoutubeUrl\(committed_url\)/);
+             /bool IsFocusYoutubeTab\(WebContents\* tab\) \{[\s\S]*?GetVisibleURL\(\)[\s\S]*?GetLastCommittedURL\(\)[\s\S]*?GetVisibleEntry\(\)[\s\S]*?GetVirtualURL\(\)[\s\S]*?GetPendingEntry\(\)[\s\S]*?GetVirtualURL\(\)/);
+assert.match(toolbarView,
+             /UpdateFocusYoutubeButtonVisibility\(WebContents\* tab\) \{[\s\S]*?IsFocusYoutubeTab\(tab\)/);
 assert.match(toolbarView,
              /location_bar_view_->SetFocusYoutubeButtonVisible\(/);
 
