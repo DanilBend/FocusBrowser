@@ -47,62 +47,6 @@ Focus Browser сохраняет привычный движок Chromium, ум�
   следующем запуске с вариантами обновить сейчас, напомнить позже или пропустить
   конкретную версию.
 
-## Сравнение с другими браузерами
-
-Focus Browser не пытается заменить каждый специализированный инструмент. Его
-главное отличие — защита от рекламы, управление отвлекающими элементами YouTube
-и спокойная рабочая среда собраны в одном браузере и доступны без набора
-сторонних расширений.
-
-| Возможность | **Focus Browser 1.0.3** | Helium | Zen Browser | Firefox | Brave | Chrome | Edge |
-|---|---|---|---|---|---|---|---|
-| Полная блокировка рекламы и трекеров без расширения | **✅ FocusBlock, включён по умолчанию** | ✅ Встроена и включена по умолчанию | ◐ Защита от трекеров, не полный блокировщик рекламы | ◐ Enhanced Tracking Protection, не полный блокировщик рекламы | ✅ Shields включён по умолчанию | ◐ Блокирует только навязчивую рекламу | ◐ Tracking Prevention, не полный блокировщик рекламы |
-| Управление отвлекающими элементами YouTube на компьютере | **✅ 25 локальных переключателей в панели адресной строки** | — Отдельная панель не заявлена | — Отдельная панель не заявлена | — Отдельная панель не заявлена | ◐ Есть несколько YouTube-фильтров; часть настроек доступна только на мобильных устройствах | — Отдельная панель не заявлена | — Отдельная панель не заявлена |
-| Инструменты спокойного интерфейса | **✅ Чистая новая вкладка, плавный ввод текста, медитация** | Минималистичные макеты и Frameless Mode | Compact Mode, вертикальные вкладки и Workspaces | Reader View, боковая панель и Focus Timer | Speedreader и вертикальные вкладки | Reading Mode и вертикальные вкладки | Immersive Reader и вертикальные вкладки |
-| Экосистема расширений | **Chrome Web Store** | Chromium extensions | Firefox Add-ons | Firefox Add-ons | Chrome Web Store | Chrome Web Store | Edge Add-ons и Chrome Web Store |
-| Облачная синхронизация данных браузера | **— Локальный импорт закладок и истории из Chrome** | — Пока отсутствует | ◐ Mozilla Account; раскладка окон Zen синхронизируется только на одном устройстве | ✅ Firefox Sync | ✅ Brave Sync | ✅ Google Sync | ✅ Microsoft Sync |
-| Исходный код браузерного проекта | **✅ Открыт** | ✅ Открыт | ✅ Открыт | ✅ Открыт | ✅ Открыт | ◐ Открыт Chromium, но не весь Chrome | ◐ Открыт Chromium, но не весь Edge |
-| Основная доступность | **Windows 10/11, x64** | Desktop, beta | Desktop, beta | Desktop и mobile | Desktop и mobile | Desktop и mobile | Desktop и mobile |
-
-**Главное преимущество Focus Browser:** FocusBlock и 25 настроек FocusYoutube
-работают как единая часть браузера. Среди перечисленных продуктов только Brave
-также документирует специальные YouTube-фильтры, но набор и доступность зависят
-от платформы; Focus Browser предоставляет единую локальную панель на Windows.
-
-Обозначения: ✅ — сопоставимая возможность встроена; ◐ — частичная возможность
-или другой охват; — — сопоставимая встроенная возможность не найдена в
-официальной документации. Сравнение составлено по официальным публичным
-материалам на 26 июля 2026 года. Скорость и потребление памяти намеренно не
-ранжируются без единого воспроизводимого теста.
-
-<details>
-<summary>Официальные источники сравнения</summary>
-
-- **Helium:** [возможности и FAQ](https://helium.computer/).
-- **Zen Browser:** [защита](https://docs.zen-browser.app/security),
-  [Compact Mode](https://docs.zen-browser.app/user-manual/compact-mode),
-  [расширения](https://docs.zen-browser.app/user-manual/extensions) и
-  [синхронизация окон](https://docs.zen-browser.app/user-manual/window-sync).
-- **Firefox:** [защита от отслеживания](https://support.mozilla.org/en-US/kb/enhanced-tracking-protection-firefox-desktop),
-  [боковая панель и вертикальные вкладки](https://support.mozilla.org/en-US/kb/use-sidebar-access-tools-and-vertical-tabs),
-  [Focus Timer](https://www.firefox.com/en-US/features/focus/) и
-  [Firefox Sync](https://support.mozilla.org/en-US/kb/sync).
-- **Brave:** [основные возможности](https://brave.com/features/) и
-  [YouTube-фильтры](https://brave.com/youtube-ad-blocker/).
-- **Chrome:** [фильтрация навязчивой рекламы](https://support.google.com/chrome/answer/7632919),
-  [Reading Mode](https://support.google.com/chrome/answer/14218344),
-  [управление вкладками](https://support.google.com/chrome/answer/2391819),
-  [синхронизация](https://support.google.com/chrome/answer/165139) и
-  [различия Chrome и Chromium](https://chromium.googlesource.com/chromium/src/+/main/docs/chromium_browser_vs_google_chrome.md).
-- **Edge:** [защита от отслеживания](https://support.microsoft.com/en-US/edge/learn-about-tracking-prevention-in-microsoft-edge),
-  [Immersive Reader](https://support.microsoft.com/en-US/edge/use-immersive-reader-in-microsoft-edge),
-  [вертикальные вкладки](https://www.microsoft.com/en-us/edge/features/vertical-tabs) и
-  [синхронизация](https://support.microsoft.com/en-US/edge/sign-in-to-sync-microsoft-edge-across-devices).
-
-</details>
-
-Названия сторонних продуктов принадлежат их правообладателям.
-
 ## Скачивание и установка
 
 Установщик и портативный архив доступны в разделе
