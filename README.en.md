@@ -44,6 +44,61 @@ is based on Chromium 150.0.7871.128 and targets 64-bit Windows 10 and Windows
 - **Non-disruptive updates** — a discovered update is offered on the next
   launch, with options to update now, remind later or skip that exact version.
 
+## Browser comparison
+
+Focus Browser does not try to replace every specialized tool. Its main
+difference is that ad protection, YouTube distraction controls, and a calm work
+environment are delivered together without requiring a stack of extensions.
+
+| Capability | **Focus Browser 1.0.3** | Helium | Zen Browser | Firefox | Brave | Chrome | Edge |
+|---|---|---|---|---|---|---|---|
+| Full ad and tracker blocking without an extension | **✅ FocusBlock, on by default** | ✅ Built in and on by default | ◐ Tracking protection, not a full ad blocker | ◐ Enhanced Tracking Protection, not a full ad blocker | ✅ Shields is on by default | ◐ Blocks intrusive ads only | ◐ Tracking Prevention, not a full ad blocker |
+| Desktop YouTube distraction controls | **✅ 25 local toggles in an address-bar panel** | — No dedicated panel documented | — No dedicated panel documented | — No dedicated panel documented | ◐ Several YouTube filters; some controls are mobile-only | — No dedicated panel documented | — No dedicated panel documented |
+| Calm-interface tools | **✅ Clean new tab, smooth text entry, meditation** | Minimal layouts and Frameless Mode | Compact Mode, vertical tabs, and Workspaces | Reader View, sidebar, and Focus Timer | Speedreader and vertical tabs | Reading Mode and vertical tabs | Immersive Reader and vertical tabs |
+| Extension ecosystem | **Chrome Web Store** | Chromium extensions | Firefox Add-ons | Firefox Add-ons | Chrome Web Store | Chrome Web Store | Edge Add-ons and Chrome Web Store |
+| Browser-data cloud sync | **— Local Chrome bookmark and history import** | — Not available yet | ◐ Mozilla Account; Zen window layout sync is currently same-device only | ✅ Firefox Sync | ✅ Brave Sync | ✅ Google Sync | ✅ Microsoft Sync |
+| Browser project source | **✅ Open** | ✅ Open | ✅ Open | ✅ Open | ✅ Open | ◐ Chromium is open, but Chrome as a whole is not | ◐ Chromium is open, but Edge as a whole is not |
+| Primary availability | **Windows 10/11, x64** | Desktop, beta | Desktop, beta | Desktop and mobile | Desktop and mobile | Desktop and mobile | Desktop and mobile |
+
+**Focus Browser's clearest advantage:** FocusBlock and 25 FocusYoutube controls
+behave as one part of the browser. Of the products listed, Brave also documents
+special YouTube filters, but their set and availability vary by platform;
+Focus Browser provides one local Windows panel.
+
+Legend: ✅ — a comparable capability is built in; ◐ — partial capability or a
+different scope; — — no comparable built-in capability was found in official
+product documentation. This comparison uses official public documentation
+checked on July 26, 2026. Speed and memory use are intentionally not ranked
+without one reproducible cross-browser benchmark.
+
+<details>
+<summary>Official comparison sources</summary>
+
+- **Helium:** [features and FAQ](https://helium.computer/).
+- **Zen Browser:** [protection](https://docs.zen-browser.app/security),
+  [Compact Mode](https://docs.zen-browser.app/user-manual/compact-mode),
+  [extensions](https://docs.zen-browser.app/user-manual/extensions), and
+  [window sync](https://docs.zen-browser.app/user-manual/window-sync).
+- **Firefox:** [tracking protection](https://support.mozilla.org/en-US/kb/enhanced-tracking-protection-firefox-desktop),
+  [sidebar and vertical tabs](https://support.mozilla.org/en-US/kb/use-sidebar-access-tools-and-vertical-tabs),
+  [Focus Timer](https://www.firefox.com/en-US/features/focus/), and
+  [Firefox Sync](https://support.mozilla.org/en-US/kb/sync).
+- **Brave:** [core features](https://brave.com/features/) and
+  [YouTube filters](https://brave.com/youtube-ad-blocker/).
+- **Chrome:** [intrusive-ad filtering](https://support.google.com/chrome/answer/7632919),
+  [Reading Mode](https://support.google.com/chrome/answer/14218344),
+  [tab management](https://support.google.com/chrome/answer/2391819),
+  [sync](https://support.google.com/chrome/answer/165139), and
+  [Chrome versus Chromium](https://chromium.googlesource.com/chromium/src/+/main/docs/chromium_browser_vs_google_chrome.md).
+- **Edge:** [tracking prevention](https://support.microsoft.com/en-US/edge/learn-about-tracking-prevention-in-microsoft-edge),
+  [Immersive Reader](https://support.microsoft.com/en-US/edge/use-immersive-reader-in-microsoft-edge),
+  [vertical tabs](https://www.microsoft.com/en-us/edge/features/vertical-tabs), and
+  [sync](https://support.microsoft.com/en-US/edge/sign-in-to-sync-microsoft-edge-across-devices).
+
+</details>
+
+Third-party product names belong to their respective owners.
+
 ## Download and installation
 
 Download the installer or portable archive from
