@@ -1,4 +1,387 @@
+diff --git a/chrome/browser/resources/new_tab_page/app.css b/chrome/browser/resources/new_tab_page/app.css
+index bf9f12b882be348aa4b91defc222c0010cb78a21..b4fcdcbd982dd5a655f33f4b66d52ee324ed773f 100644
+--- a/chrome/browser/resources/new_tab_page/app.css
++++ b/chrome/browser/resources/new_tab_page/app.css
+@@ -90,16 +90,16 @@
+ }
+ 
+ cr-most-visited {
+-  --add-shortcut-background-color: var(
+-    --color-new-tab-page-add-shortcut-background
+-  );
+-  --add-shortcut-foreground-color: var(
+-    --color-new-tab-page-add-shortcut-foreground
+-  );
++  --add-shortcut-background-color: rgba(255, 255, 255, 0.08);
++  --add-shortcut-foreground-color: rgba(255, 255, 255, 0.92);
+   --cr-menu-shadow: var(--ntp-menu-shadow);
+-  --most-visited-focus-shadow: var(--ntp-focus-shadow);
+-  --most-visited-text-color: var(--color-new-tab-page-most-visited-foreground);
+-  --most-visited-text-shadow: var(--ntp-theme-text-shadow);
++  --icon-button-color: rgba(255, 255, 255, 0.72);
++  --icon-button-color-active: white;
++  --most-visited-focus-shadow: 0 0 0 2px rgba(255, 255, 255, 0.78);
++  --most-visited-text-color: rgba(255, 255, 255, 0.86);
++  --most-visited-text-shadow: none;
++  --tile-background-color: rgba(255, 255, 255, 0.09);
++  --tile-hover-color: rgba(255, 255, 255, 0.08);
+ }
+ 
+ :host([show-background-image_]) {
+@@ -154,16 +154,61 @@ cr-most-visited {
+ 
+ #content {
+   align-items: center;
++  background:
++      radial-gradient(circle at 50% 42%, rgba(255, 255, 255, 0.025),
++                      rgba(255, 255, 255, 0) 42%),
++      linear-gradient(180deg, rgb(45, 47, 48), rgb(50, 52, 53));
++  box-sizing: border-box;
+   display: flex;
+   flex-direction: column;
+-  justify-content: center;
+-  height: calc(100vh - var(--ntp-one-google-bar-height));
+-  min-width: fit-content; /* Prevents OneGoogleBar cutoff at 500% zoom. */
+-  padding-top: var(--ntp-one-google-bar-height);
++  /* Focus NTP has no One Google Bar, so the page uses the full viewport. */
++  height: 100vh;
++  min-width: 0;
++  overflow: auto;
++  padding-top: 0;
+   position: relative;
+   z-index: 1;
+ }
+ 
++#content:has(#searchbox:not([is-dark])) {
++  background:
++      radial-gradient(circle at 50% 42%, rgba(0, 0, 0, 0.025),
++                      rgba(0, 0, 0, 0) 42%),
++      linear-gradient(180deg, rgb(238, 240, 240), rgb(246, 247, 247));
++}
++
++#content:has(#searchbox:not([is-dark])) cr-most-visited {
++  --add-shortcut-background-color: rgba(38, 41, 41, 0.09);
++  --add-shortcut-foreground-color: rgba(28, 30, 30, 0.88);
++  --icon-button-color: rgba(28, 30, 30, 0.68);
++  --icon-button-color-active: rgb(28, 30, 30);
++  --most-visited-focus-shadow: 0 0 0 2px rgba(38, 41, 41, 0.55);
++  --most-visited-text-color: rgba(28, 30, 30, 0.82);
++  --tile-background-color: rgba(38, 41, 41, 0.08);
++  --tile-hover-color: rgba(38, 41, 41, 0.11);
++}
++
++#focusHome {
++  --ntp-search-box-width: min(640px, calc(100vw - 48px));
++  align-items: center;
++  animation: focus-home-enter 420ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
++  box-sizing: border-box;
++  display: flex;
++  flex: 1 0 auto;
++  flex-direction: column;
++  justify-content: center;
++  min-height: 100vh;
++  padding: 32px 24px;
++  width: min(960px, 100%);
++}
++
++#focusSearch {
++  align-items: center;
++  display: flex;
++  flex-direction: column;
++  width: 100%;
++}
++
+ /*
+  * Below 900px, the threads rail will shift the main content aside.
+  * This happens in conjunction with the realbox width change as well,
+@@ -190,11 +235,121 @@ cr-most-visited {
+ }
+ 
+ #searchboxContainer {
+-  --cr-focus-outline-color: var(--color-searchbox-results-icon-focused-outline);
+-  display: inherit;
+-  margin-bottom: 16px;
++  --color-searchbox-background: rgba(60, 63, 64, 0.98);
++  --color-searchbox-foreground: rgba(255, 255, 255, 0.94);
++  --color-searchbox-lens-voice-icon-background: rgba(255, 255, 255, 0.82);
++  --color-searchbox-placeholder: rgba(255, 255, 255, 0.68);
++  --color-searchbox-results-background: rgb(60, 63, 64);
++  --color-searchbox-results-background-hovered: rgb(70, 73, 74);
++  --color-searchbox-results-background-selected: rgb(78, 81, 82);
++  --color-searchbox-results-foreground: rgba(255, 255, 255, 0.92);
++  --color-searchbox-results-foreground-selected: rgba(255, 255, 255, 0.96);
++  --color-searchbox-results-foreground-dimmed: rgba(255, 255, 255, 0.58);
++  --color-searchbox-results-dim-selected: rgba(255, 255, 255, 0.72);
++  --color-searchbox-results-focus-indicator: rgba(255, 255, 255, 0.68);
++  --color-searchbox-results-icon: rgba(255, 255, 255, 0.72);
++  --color-searchbox-results-icon-selected: rgba(255, 255, 255, 0.86);
++  --color-searchbox-results-icon-focused-outline: rgba(255, 255, 255, 0.82);
++  --color-searchbox-results-url: rgba(255, 255, 255, 0.68);
++  --color-searchbox-results-url-selected: rgba(255, 255, 255, 0.76);
++  --color-searchbox-selection-background: rgba(255, 255, 255, 0.22);
++  --color-searchbox-selection-foreground: rgba(255, 255, 255, 0.96);
++  --color-searchbox-shadow: rgba(0, 0, 0, 0.24);
++  --cr-focus-outline-color: rgba(255, 255, 255, 0.82);
++  --cr-searchbox-border: 1px solid rgba(255, 255, 255, 0.14);
++  --cr-searchbox-shadow: 0 14px 38px rgba(0, 0, 0, 0.28),
++      0 2px 8px rgba(0, 0, 0, 0.24);
++  --focus-searchbox-glow: rgba(255, 255, 255, 0.72);
++  display: block;
++  height: var(--cr-searchbox-height);
++  margin: 0;
+   position: relative;
++  width: var(--ntp-search-box-width);
+   z-index: 2;
++  transition: filter 180ms ease;
++}
++
++#searchboxContainer:has(#searchbox:not([is-dark])) {
++  --color-searchbox-background: rgba(255, 255, 255, 0.98);
++  --color-searchbox-foreground: rgba(28, 30, 30, 0.94);
++  --color-searchbox-lens-voice-icon-background: rgba(28, 30, 30, 0.76);
++  --color-searchbox-placeholder: rgba(28, 30, 30, 0.62);
++  --color-searchbox-results-background: rgb(255, 255, 255);
++  --color-searchbox-results-background-hovered: rgb(239, 241, 241);
++  --color-searchbox-results-background-selected: rgb(230, 232, 232);
++  --color-searchbox-results-foreground: rgba(28, 30, 30, 0.92);
++  --color-searchbox-results-foreground-selected: rgba(20, 22, 22, 0.96);
++  --color-searchbox-results-foreground-dimmed: rgba(28, 30, 30, 0.58);
++  --color-searchbox-results-dim-selected: rgba(28, 30, 30, 0.72);
++  --color-searchbox-results-focus-indicator: rgba(38, 41, 41, 0.68);
++  --color-searchbox-results-icon: rgba(28, 30, 30, 0.68);
++  --color-searchbox-results-icon-selected: rgba(20, 22, 22, 0.86);
++  --color-searchbox-results-icon-focused-outline: rgba(38, 41, 41, 0.78);
++  --color-searchbox-results-url: rgba(28, 30, 30, 0.66);
++  --color-searchbox-results-url-selected: rgba(20, 22, 22, 0.76);
++  --color-searchbox-selection-background: rgba(38, 41, 41, 0.22);
++  --color-searchbox-selection-foreground: rgb(20, 22, 22);
++  --color-searchbox-shadow: rgba(0, 0, 0, 0.18);
++  --cr-focus-outline-color: rgba(38, 41, 41, 0.78);
++  --cr-searchbox-border: 1px solid rgba(38, 41, 41, 0.14);
++  --cr-searchbox-shadow: 0 14px 38px rgba(0, 0, 0, 0.14),
++      0 2px 8px rgba(0, 0, 0, 0.10);
++  --focus-searchbox-glow: rgba(38, 41, 41, 0.58);
++}
++
++#searchboxContainer:focus-within {
++  filter: drop-shadow(0 0 0.5px var(--focus-searchbox-glow));
++}
++
++#searchboxContainer ntp-searchbox {
++  inset-block-start: 0;
++  inset-inline-start: 0;
++  position: absolute;
++  width: 100%;
++}
++
++#focusShortcuts {
++  box-sizing: border-box;
++  margin-top: 28px;
++  max-width: 760px;
++  padding: 0 12px;
++  width: 100%;
++}
++
++#focusShortcuts cr-most-visited {
++  width: 100%;
++}
++
++@keyframes focus-home-enter {
++  from {
++    transform: translateY(2px) scale(0.998);
++  }
++  to {
++    transform: translateY(0) scale(1);
++  }
++}
++
++@media (max-height: 760px) {
++  #focusHome {
++    justify-content: flex-start;
++    min-height: 0;
++    padding-top: 72px;
++  }
++
++  #focusShortcuts {
++    margin-top: 28px;
++  }
++}
++
++@media (max-width: 520px) {
++  #focusHome {
++    --ntp-search-box-width: calc(100vw - 32px);
++    padding-inline: 16px;
++  }
++
++  #focusShortcuts {
++    padding: 0;
++  }
+ }
+ 
+ #modules:not([hidden]) {
+@@ -230,14 +385,30 @@ ntp-middle-slot-promo:not([hidden]) ~ #modules {
+   margin-top: 16px;
+ }
+ 
+-#themeAttribution {
+-  align-self: flex-start;
++#customizeButtons {
++  --focus-customize-background: rgba(60, 63, 64, 0.98);
++  --focus-customize-border: rgba(255, 255, 255, 0.12);
++  --focus-customize-focus-ring: rgba(255, 255, 255, 0.68);
++  --focus-customize-hover: rgb(72, 75, 76);
++  --focus-customize-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
++  --focus-customize-text: rgba(255, 255, 255, 0.86);
+   bottom: 16px;
+-  color: var(--color-new-tab-page-secondary-foreground);
+-  margin-inline-start: 16px;
++  inset-inline-end: 16px;
+   position: fixed;
++  z-index: 3;
++}
++
++#content:has(#searchbox:not([is-dark])) #customizeButtons {
++  --focus-customize-background: rgba(255, 255, 255, 0.96);
++  --focus-customize-border: rgba(38, 41, 41, 0.14);
++  --focus-customize-focus-ring: rgba(38, 41, 41, 0.58);
++  --focus-customize-hover: rgb(232, 234, 234);
++  --focus-customize-shadow: 0 10px 28px rgba(0, 0, 0, 0.14);
++  --focus-customize-text: rgba(28, 30, 30, 0.86);
+ }
+ 
++/* Keep the Focus NTP clean: the shared component is reduced to one localized
++   pencil icon by clean-new-tab-page.patch. */
+ #backgroundImageAttribution {
+   border-radius: 8px;
+   bottom: 16px;
+@@ -294,23 +465,11 @@ ntp-middle-slot-promo:not([hidden]) ~ #modules {
+   font-size: 0.75rem;
+ }
+ 
+-#customizeButtons {
+-  bottom: 16px;
+-  position: fixed;
+-}
+-
+-:host-context([dir='ltr']) #customizeButtons {
+-  right: 16px;
+-}
+-
+-:host-context([dir='rtl']) #customizeButtons {
+-  left: 16px;
+-}
+-
+-#contentBottomSpacer {
+-  flex-shrink: 0;
+-  height: 32px;
+-  width: 1px;
++@media (max-width: 520px) {
++  #customizeButtons {
++    bottom: 12px;
++    inset-inline-end: 12px;
++  }
+ }
+ 
+ svg {
+@@ -403,6 +562,12 @@ ntp-lens-upload-dialog {
+ }
+ 
+ @container style(--cr-animations-disabled: 1) {
++  #focusHome {
++    animation: none;
++  }
++  #searchboxContainer {
++    transition: none;
++  }
+   #modules:not([hidden]) {
+     animation: none;
+   }
+diff --git a/chrome/browser/resources/new_tab_page/app.html b/chrome/browser/resources/new_tab_page/app.html
+index 78875d59c2acdd74419349a807de253dd69d6e53..abf6b61bfe30480df55051f8cc845c28d478f2b6 100644
+--- a/chrome/browser/resources/new_tab_page/app.html
++++ b/chrome/browser/resources/new_tab_page/app.html
+@@ -1,36 +1,48 @@
+ <div id="content">
+-  ${this.lazyRender_ ? html`
+-    ${this.shortcutsEnabled_ ? html`
+-      <cr-most-visited id="mostVisited" .theme="${this.theme_?.mostVisited || null}"
+-          single-row reflow-on-overflow
+-          ?expandable-tiles-enabled="${this.ntpNextFeaturesEnabled_}"
+-          max-tiles-in-collapsed-state="${this.maxTilesInCollapsedState_}"
+-          max-shortcuts-in-expanded-state="${this.maxShortcutsInExpandedState_}"
+-          max-most-visited-tiles-in-expanded-state="${this.maxMostVisitedTilesInExpandedState_}"
+-          max-enterprise-shortcuts="${this.maxEnterpriseShortcuts_}">
+-      </cr-most-visited>
+-    ` : ''}
+-    ${!this.isFooterVisible_ ? html`
+-      ${!this.isAndroid_ ? html`
+-        <ntp-customize-buttons id="customizeButtons"
+-            ?modules-shown-to-user="${this.modulesShownToUser}"
+-            ?show-background-image="${this.showBackgroundImage_}"
+-            ?show-customize="${this.showCustomize_}"
+-            ?show-customize-chrome-text="${this.showCustomizeChromeText_}"
+-            ?show-wallpaper-search="${this.showWallpaperSearch_}"
+-            ?show-wallpaper-search-button="${this.showWallpaperSearchButton_}"
+-            ?wallpaper-search-button-animation-enabled="${this.wallpaperSearchButtonAnimationEnabled_}"
+-            @customize-click="${this.onCustomizeClick_}"
+-            @wallpaper-search-click="${this.onWallpaperSearchClick_}" show-shadow>
+-        </ntp-customize-buttons>
+-      ` : ''}
+-    ` : ''}
+-    ${this.showThemeAttribution_() ? html`
+-      <div id="themeAttribution">
+-        <div>$i18n{themeCreatedBy}</div>
+-        <img src="${this.theme_!.backgroundImage!.attributionUrl!}">
++  <main id="focusHome" aria-label="$i18n{title}">
++    <section id="focusSearch" aria-label="$i18n{searchBoxHint}">
++      <div id="searchboxContainer"
++          @focusin="${this.onSearchboxContainerFocusin_}"
++          @focusout="${this.onSearchboxContainerFocusout_}">
++        <ntp-searchbox id="searchbox" ?is-dark="${this.isThemeDark_()}"
++            placeholder-text="$i18n{searchBoxPlaceholder}"
++            ?color-source-is-baseline="${this.colorSourceIsBaseline}"
++            @open-lens-search="${this.onOpenLensSearch_}"
++            @open-voice-search="${this.onOpenVoiceSearch_}"
++            .hasVoiceSearchError="${this.hasVoiceSearchError}"
++            .inVoiceSearchMode="${this.showVoiceSearchOverlay_}"
++            ?shown="${this.realboxShown_}">
++        </ntp-searchbox>
++        ${this.showLensUploadDialog_ ? html`
++          <ntp-lens-upload-dialog id="lensUploadDialog"
++              @close-lens-search="${this.onCloseLensSearch_}">
++          </ntp-lens-upload-dialog>
++        ` : ''}
+       </div>
++    </section>
++    ${this.lazyRender_ && this.shortcutsEnabled_ ? html`
++      <section id="focusShortcuts" aria-label="$i18n{addLinkTitle}">
++        <cr-most-visited id="mostVisited" .theme="${this.theme_?.mostVisited || null}"
++            single-row reflow-on-overflow
++            ?expandable-tiles-enabled="${this.ntpNextFeaturesEnabled_}"
++            max-tiles-in-collapsed-state="${this.maxTilesInCollapsedState_}"
++            max-shortcuts-in-expanded-state="${this.maxShortcutsInExpandedState_}"
++            max-most-visited-tiles-in-expanded-state="${this.maxMostVisitedTilesInExpandedState_}"
++            max-enterprise-shortcuts="${this.maxEnterpriseShortcuts_}">
++        </cr-most-visited>
++      </section>
+     ` : ''}
++  </main>
++  ${this.lazyRender_ && !this.isFooterVisible_ && !this.isAndroid_ ? html`
++    <ntp-customize-buttons id="customizeButtons"
++        ?show-background-image="${this.showBackgroundImage_}"
++        ?show-customize="${this.showCustomize_}"
++        @customize-click="${this.onCustomizeClick_}"
++        show-shadow>
++    </ntp-customize-buttons>
+   ` : ''}
+-  <div id="contentBottomSpacer"></div>
+ </div>
++${this.showVoiceSearchOverlay_ ? html`
++  <ntp-voice-search-overlay @close="${this.onVoiceSearchOverlayClose}">
++  </ntp-voice-search-overlay>
++` : ''}
 diff --git a/chrome/browser/resources/new_tab_page/app.ts b/chrome/browser/resources/new_tab_page/app.ts
+index d59e629a65d28c851a32175aa09c9cf8dfa5af3b..13b2088ed238cdb864f6febbe00305ed5675c4a5 100644
 --- a/chrome/browser/resources/new_tab_page/app.ts
 +++ b/chrome/browser/resources/new_tab_page/app.ts
 @@ -3,6 +3,7 @@
@@ -55,211 +438,143 @@ diff --git a/chrome/browser/resources/new_tab_page/app.ts b/chrome/browser/resou
      return false;
    }
  
-diff --git a/chrome/browser/resources/new_tab_page/app.html b/chrome/browser/resources/new_tab_page/app.html
---- a/chrome/browser/resources/new_tab_page/app.html
-+++ b/chrome/browser/resources/new_tab_page/app.html
-@@ -1,36 +1,26 @@
- <div id="content">
--  ${this.lazyRender_ ? html`
--    ${this.shortcutsEnabled_ ? html`
--      <cr-most-visited id="mostVisited" .theme="${this.theme_?.mostVisited || null}"
--          single-row reflow-on-overflow
--          ?expandable-tiles-enabled="${this.ntpNextFeaturesEnabled_}"
--          max-tiles-in-collapsed-state="${this.maxTilesInCollapsedState_}"
--          max-shortcuts-in-expanded-state="${this.maxShortcutsInExpandedState_}"
--          max-most-visited-tiles-in-expanded-state="${this.maxMostVisitedTilesInExpandedState_}"
--          max-enterprise-shortcuts="${this.maxEnterpriseShortcuts_}">
--      </cr-most-visited>
--    ` : ''}
--    ${!this.isFooterVisible_ ? html`
--      ${!this.isAndroid_ ? html`
--        <ntp-customize-buttons id="customizeButtons"
--            ?modules-shown-to-user="${this.modulesShownToUser}"
--            ?show-background-image="${this.showBackgroundImage_}"
--            ?show-customize="${this.showCustomize_}"
--            ?show-customize-chrome-text="${this.showCustomizeChromeText_}"
--            ?show-wallpaper-search="${this.showWallpaperSearch_}"
--            ?show-wallpaper-search-button="${this.showWallpaperSearchButton_}"
--            ?wallpaper-search-button-animation-enabled="${this.wallpaperSearchButtonAnimationEnabled_}"
--            @customize-click="${this.onCustomizeClick_}"
--            @wallpaper-search-click="${this.onWallpaperSearchClick_}" show-shadow>
--        </ntp-customize-buttons>
--      ` : ''}
--    ` : ''}
--    ${this.showThemeAttribution_() ? html`
--      <div id="themeAttribution">
--        <div>$i18n{themeCreatedBy}</div>
--        <img src="${this.theme_!.backgroundImage!.attributionUrl!}">
-+  <main id="focusHome" aria-label="$i18n{title}">
-+    <section id="focusSearch" aria-label="$i18n{searchBoxHint}">
-+      <div id="searchboxContainer"
-+          @focusin="${this.onSearchboxContainerFocusin_}"
-+          @focusout="${this.onSearchboxContainerFocusout_}">
-+        <ntp-searchbox id="searchbox" ?is-dark="${this.isThemeDark_()}"
-+            ?color-source-is-baseline="${this.colorSourceIsBaseline}"
-+            ?shown="${this.realboxShown_}">
-+        </ntp-searchbox>
-       </div>
-+    </section>
-+    ${this.lazyRender_ && this.shortcutsEnabled_ ? html`
-+      <section id="focusShortcuts" aria-label="$i18n{addLinkTitle}">
-+        <cr-most-visited id="mostVisited" .theme="${this.theme_?.mostVisited || null}"
-+            single-row reflow-on-overflow
-+            ?expandable-tiles-enabled="${this.ntpNextFeaturesEnabled_}"
-+            max-tiles-in-collapsed-state="${this.maxTilesInCollapsedState_}"
-+            max-shortcuts-in-expanded-state="${this.maxShortcutsInExpandedState_}"
-+            max-most-visited-tiles-in-expanded-state="${this.maxMostVisitedTilesInExpandedState_}"
-+            max-enterprise-shortcuts="${this.maxEnterpriseShortcuts_}">
-+        </cr-most-visited>
-+      </section>
-     ` : ''}
--  ` : ''}
--  <div id="contentBottomSpacer"></div>
-+  </main>
- </div>
-diff --git a/chrome/browser/resources/new_tab_page/app.css b/chrome/browser/resources/new_tab_page/app.css
---- a/chrome/browser/resources/new_tab_page/app.css
-+++ b/chrome/browser/resources/new_tab_page/app.css
-@@ -154,16 +154,39 @@ cr-most-visited {
+@@ -1165,7 +1144,7 @@ export class AppElement extends AppElementBase {
  
- #content {
-   align-items: center;
-+  box-sizing: border-box;
+   protected onWebstoreToastButtonClick_() {
+     window.location.assign(
+-        `https://chrome.google.com/webstore/category/collection/chrome_color_themes?hl=${
++        `https://chrome.9oo91e.qjz9zk/webstore/category/collection/chrome_color_themes?hl=${
+             window.navigator.language}`);
+   }
+ 
+diff --git a/chrome/browser/resources/new_tab_page/ntp_searchbox.css b/chrome/browser/resources/new_tab_page/ntp_searchbox.css
+index 575ae541d7566c54cf2d7d567bd19f32a95bf35a..8565e2c77252484ed3b8043993df68b897e94d16 100644
+--- a/chrome/browser/resources/new_tab_page/ntp_searchbox.css
++++ b/chrome/browser/resources/new_tab_page/ntp_searchbox.css
+@@ -96,6 +96,23 @@
+   overflow: hidden;
+ }
+ 
++:host([dropdown-is-visible]) .dropdownContainer {
++  animation: focus-ntp-suggestions-enter 190ms
++      cubic-bezier(0.2, 0.7, 0.2, 1) both;
++  transform-origin: top center;
++}
++
++@keyframes focus-ntp-suggestions-enter {
++  from {
++    opacity: 0;
++    transform: translateY(-2px) scale(0.998);
++  }
++  to {
++    opacity: 1;
++    transform: translateY(0) scale(1);
++  }
++}
++
+ :host([ntp-realbox-next-enabled]) .contextualEntrypointContainer {
+   overflow: visible;
+   left: unset;
+@@ -191,6 +208,12 @@ cr-searchbox-input::part(searchbox-input) {
+   background-image: url(//resources/cr_components/searchbox/icons/camera.svg);
+ }
+ 
++:host([is-dark]:not([use-webkit-search-icons_])) #voiceSearchButton,
++:host([is-dark]:not([use-webkit-search-icons_])) #lensSearchButton {
++  filter: invert(1);
++  opacity: 0.78;
++}
++
+ :host([use-webkit-search-icons_]) #voiceSearchButton {
+   -webkit-mask-image: url(//resources/cr_components/searchbox/icons/mic.svg);
+ }
+@@ -347,6 +370,18 @@ cr-searchbox-dropdown::part(dropdown-content) {
+   padding-bottom: 10px;
+ }
+ 
++@container style(--cr-animations-disabled: 1) {
++  :host([dropdown-is-visible]) .dropdownContainer {
++    animation: none;
++  }
++}
++
++@media (prefers-reduced-motion: reduce) {
++  :host([dropdown-is-visible]) .dropdownContainer {
++    animation: none;
++  }
++}
++
+ :host([ntp-realbox-next-enabled])
+     .contextualEntrypointContainerCompact {
+   box-shadow: none;
+diff --git a/ui/webui/resources/cr_components/most_visited/most_visited.css b/ui/webui/resources/cr_components/most_visited/most_visited.css
+index 131eacc6affb7d5c50fe660a22124cefd4a716b5..ee98030f682ea21862011cb29bb077a5f8874832 100644
+--- a/ui/webui/resources/cr_components/most_visited/most_visited.css
++++ b/ui/webui/resources/cr_components/most_visited/most_visited.css
+@@ -45,6 +45,7 @@
+   height: calc(var(--row-count) * var(--tile-size));
+   justify-content: center;
+   margin-bottom: 8px;
++  margin-inline: auto;
+   opacity: 0;
+   overflow: hidden;
+   padding: 2px;  /* Padding added so focus rings are not clipped. */
+diff --git a/ui/webui/resources/cr_components/searchbox/searchbox_dropdown.css b/ui/webui/resources/cr_components/searchbox/searchbox_dropdown.css
+index 9f47ed3e7d9dc34cda2b97b7c11c1424ccb0f43e..77c0d9b0d61b659f2b939fec55b5e99b9fb7586a 100644
+--- a/ui/webui/resources/cr_components/searchbox/searchbox_dropdown.css
++++ b/ui/webui/resources/cr_components/searchbox/searchbox_dropdown.css
+@@ -40,6 +40,38 @@ cr-searchbox-match {
+   color: var(--color-searchbox-results-foreground);
+ }
+ 
++:host-context(ntp-searchbox[dropdown-is-visible]) cr-searchbox-match {
++  animation: focus-ntp-suggestion-row-enter 210ms
++      cubic-bezier(0.2, 0.7, 0.2, 1) both;
++  transform-origin: center;
++}
++
++:host-context(ntp-searchbox[dropdown-is-visible])
++    .matches cr-searchbox-match:nth-child(2) {
++  animation-delay: 10ms;
++}
++
++:host-context(ntp-searchbox[dropdown-is-visible])
++    .matches cr-searchbox-match:nth-child(3) {
++  animation-delay: 20ms;
++}
++
++:host-context(ntp-searchbox[dropdown-is-visible])
++    .matches cr-searchbox-match:nth-child(n+4) {
++  animation-delay: 30ms;
++}
++
++@keyframes focus-ntp-suggestion-row-enter {
++  from {
++    opacity: 0;
++    transform: translateY(3px) scale(0.996);
++  }
++  to {
++    opacity: 1;
++    transform: translateY(0) scale(1);
++  }
++}
++
+ cr-searchbox-match:-webkit-any(:focus-within, [selected]) {
+   color: var(--color-searchbox-results-foreground-selected,
+       var(--color-searchbox-results-foreground));
+@@ -117,3 +149,15 @@ cr-searchbox-match:-webkit-any(:focus-within, [selected]) {
    display: flex;
-   flex-direction: column;
--  justify-content: center;
--  height: calc(100vh - var(--ntp-one-google-bar-height));
-+  /* Focus NTP has no One Google Bar. The top padding already reserves the
-+     visual breathing room, so a full viewport keeps the page scrollbar-free. */
-+  height: 100vh;
--  min-width: fit-content; /* Prevents OneGoogleBar cutoff at 500% zoom. */
-+  min-width: 0;
-+  overflow: auto;
-   padding-top: var(--ntp-one-google-bar-height);
-   position: relative;
-   z-index: 1;
+   gap: 4px;
  }
- 
-+#focusHome {
-+  --ntp-search-box-width: min(640px, calc(100vw - 48px));
-+  align-items: center;
-+  box-sizing: border-box;
-+  display: flex;
-+  flex: 1 0 auto;
-+  flex-direction: column;
-+  justify-content: center;
-+  min-height: calc(100vh - var(--ntp-one-google-bar-height));
-+  padding: 48px 24px;
-+  width: min(960px, 100%);
-+}
 +
-+#focusSearch {
-+  align-items: center;
-+  display: flex;
-+  flex-direction: column;
-+  width: 100%;
-+}
-+
- /*
-  * Below 900px, the threads rail will shift the main content aside.
-  * This happens in conjunction with the realbox width change as well,
-@@ -191,12 +212,56 @@ cr-most-visited {
- 
- #searchboxContainer {
-   --cr-focus-outline-color: var(--color-searchbox-results-icon-focused-outline);
--  display: inherit;
--  margin-bottom: 16px;
-+  display: block;
-+  height: var(--cr-searchbox-height);
-+  margin: 0;
-   position: relative;
-+  width: var(--ntp-search-box-width);
-   z-index: 2;
- }
- 
-+#searchboxContainer ntp-searchbox {
-+  inset-block-start: 0;
-+  inset-inline-start: 0;
-+  position: absolute;
-+  width: 100%;
-+}
-+
-+#focusShortcuts {
-+  box-sizing: border-box;
-+  margin-top: 36px;
-+  max-width: 760px;
-+  padding: 0 12px;
-+  width: 100%;
-+}
-+
-+#focusShortcuts cr-most-visited {
-+  width: 100%;
-+}
-+
-+@media (max-height: 760px) {
-+  #focusHome {
-+    justify-content: flex-start;
-+    min-height: 0;
-+    padding-top: 72px;
-+  }
-+
-+  #focusShortcuts {
-+    margin-top: 28px;
++@container style(--cr-animations-disabled: 1) {
++  :host-context(ntp-searchbox[dropdown-is-visible]) cr-searchbox-match {
++    animation: none;
 +  }
 +}
 +
-+@media (max-width: 520px) {
-+  #focusHome {
-+    --ntp-search-box-width: calc(100vw - 32px);
-+    padding-inline: 16px;
-+  }
-+
-+  #focusShortcuts {
-+    padding: 0;
++@media (prefers-reduced-motion: reduce) {
++  :host-context(ntp-searchbox[dropdown-is-visible]) cr-searchbox-match {
++    animation: none;
 +  }
 +}
-+
- #modules:not([hidden]) {
-   /* We use animation instead of transition to allow a fade-in out of
-      display: none. */
-@@ -230,14 +295,6 @@ ntp-middle-slot-promo:not([hidden]) ~ #modules {
-   margin-top: 16px;
- }
- 
--#themeAttribution {
--  align-self: flex-start;
--  bottom: 16px;
--  color: var(--color-new-tab-page-secondary-foreground);
--  margin-inline-start: 16px;
--  position: fixed;
--}
--
- #backgroundImageAttribution {
-   border-radius: 8px;
-   bottom: 16px;
-@@ -294,25 +351,6 @@ ntp-middle-slot-promo:not([hidden]) ~ #modules {
-   font-size: 0.75rem;
- }
- 
--#customizeButtons {
--  bottom: 16px;
--  position: fixed;
--}
--
--:host-context([dir='ltr']) #customizeButtons {
--  right: 16px;
--}
--
--:host-context([dir='rtl']) #customizeButtons {
--  left: 16px;
--}
--
--#contentBottomSpacer {
--  flex-shrink: 0;
--  height: 32px;
--  width: 1px;
--}
--
- svg {
-   position: fixed;
- }

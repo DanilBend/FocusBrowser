@@ -1,0 +1,90 @@
+--- a/chrome/browser/resources/side_panel/customize_chrome/appearance.ts
++++ b/chrome/browser/resources/side_panel/customize_chrome/appearance.ts
+@@ -5,12 +5,8 @@
+ import './theme_snapshot.js';
+ import './hover_button.js';
+ import '/strings.m.js'; // Required by <managed-dialog>.
+-import 'chrome://resources/cr_components/customize_color_scheme_mode/customize_color_scheme_mode.js';
+-import 'chrome://resources/cr_components/theme_color_picker/theme_color_picker.js';
+ import 'chrome://resources/cr_components/managed_dialog/managed_dialog.js';
+ import 'chrome://resources/cr_elements/cr_button/cr_button.js';
+-import 'chrome://resources/cr_elements/cr_toggle/cr_toggle.js';
+ 
+ import {getInstance as getAnnouncerInstance} from 'chrome://resources/cr_elements/cr_a11y_announcer/cr_a11y_announcer.js';
+-import type {CrToggleElement} from 'chrome://resources/cr_elements/cr_toggle/cr_toggle.js';
+ import {I18nMixinLit} from 'chrome://resources/cr_elements/i18n_mixin_lit.js';
+@@ -27,11 +23,8 @@ export interface AppearanceElement {
+ export interface AppearanceElement {
+   $: {
+-    chromeColors: HTMLElement,
+     editThemeButton: HTMLButtonElement,
+     themeSnapshot: HTMLElement,
+     setClassicChromeButton: HTMLButtonElement,
+     thirdPartyThemeLinkButton: HTMLButtonElement,
+-    followThemeToggle: HTMLElement,
+-    followThemeToggleControl: CrToggleElement,
+   };
+ }
+--- a/chrome/browser/resources/side_panel/customize_chrome/appearance.html.ts
++++ b/chrome/browser/resources/side_panel/customize_chrome/appearance.html.ts
+@@ -13,17 +13,6 @@ export function getHtml(this: Appearance
+     @edit-theme-click="${this.onEditThemeClick_}"
+     hidden>
+ </customize-chrome-theme-snapshot>
+-<customize-color-scheme-mode></customize-color-scheme-mode>
+-<cr-theme-color-picker id="chromeColors" ?hidden="${!this.showColorPicker_}">
+-</cr-theme-color-picker>
+-<div id="followThemeToggle" class="sp-card-content"
+-    ?hidden="${!this.showDeviceThemeToggle_}">
+-  <div id="followThemeToggleTitle">$i18n{followThemeToggle}</div>
+-  <cr-toggle id="followThemeToggleControl" title="$i18n{followThemeToggle}"
+-      ?checked="${!!this.theme_ && this.theme_.followDeviceTheme}"
+-      @change="${this.onFollowThemeToggleChange_}">
+-  </cr-toggle>
+-</div>
+ <customize-chrome-hover-button id="thirdPartyThemeLinkButton"
+     class="link-out-button theme-button"
+     ?hidden="${!this.thirdPartyThemeId_}"
+--- a/chrome/browser/themes/theme_service.cc
++++ b/chrome/browser/themes/theme_service.cc
+@@ -277,7 +277,7 @@ void ThemeService::RegisterProfilePrefs(
+       user_prefs::PrefRegistrySyncable::SYNCABLE_PREF);
+   registry->RegisterIntegerPref(
+       prefs::kBrowserColorScheme,
+-      std::to_underlying(ThemeService::BrowserColorScheme::kSystem));
++      std::to_underlying(ThemeService::BrowserColorScheme::kDark));
+   registry->RegisterIntegerPref(
+       prefs::kDeprecatedUserColorDoNotUse, SK_ColorTRANSPARENT,
+       user_prefs::PrefRegistrySyncable::SYNCABLE_PREF);
+@@ -312,6 +312,12 @@ ThemeService::~ThemeService() = default;
+ void ThemeService::Init() {
+   theme_helper_->DCheckCalledOnValidSequence();
+ 
++  // Focus Browser has one intentional browser chrome appearance: dark.
++  // Keep wallpapers and accent imagery independent from the color scheme.
++  profile_->GetPrefs()->SetInteger(
++      prefs::kBrowserColorScheme,
++      std::to_underlying(ThemeService::BrowserColorScheme::kDark));
++
+   InitFromPrefs();
+ 
+   // ThemeObserver should be constructed before calling
+@@ -643,6 +649,8 @@ SkColor ThemeService::GetPolicyThemeColo
+ 
+ void ThemeService::SetBrowserColorScheme(
+     ThemeService::BrowserColorScheme color_scheme) {
++  // Ignore attempts from sync or legacy UI surfaces to restore light/system.
++  color_scheme = ThemeService::BrowserColorScheme::kDark;
+   {
+     base::AutoReset<bool> resetter(&should_suppress_theme_updates_, true);
+     if (UsingSystemTheme() &&
+@@ -657,8 +665,7 @@ void ThemeService::SetBrowserColorScheme
+ }
+ 
+ ThemeService::BrowserColorScheme ThemeService::GetBrowserColorScheme() const {
+-  return static_cast<BrowserColorScheme>(
+-      profile_->GetPrefs()->GetInteger(prefs::kBrowserColorScheme));
++  return BrowserColorScheme::kDark;
+ }
+ 
+ bool ThemeService::BrowserUsesDarkColors() const {

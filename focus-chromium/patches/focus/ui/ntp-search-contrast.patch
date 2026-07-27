@@ -1,0 +1,65 @@
+diff --git a/chrome/browser/resources/new_tab_page/app.css b/chrome/browser/resources/new_tab_page/app.css
+index e5eaaeafdb5fa6370fc2b6b787876571c08be1b6..a3d26186ebdd8e5dd6f2d00ed66154509f49976c 100644
+--- a/chrome/browser/resources/new_tab_page/app.css
++++ b/chrome/browser/resources/new_tab_page/app.css
+@@ -225,13 +225,13 @@ cr-most-visited {
+ }
+ 
+ #searchboxContainer {
+-  --color-searchbox-background: rgba(60, 63, 64, 0.98);
++  --color-searchbox-background: rgba(72, 74, 74, 0.98);
+   --color-searchbox-foreground: rgba(255, 255, 255, 0.94);
+   --color-searchbox-lens-voice-icon-background: rgba(255, 255, 255, 0.82);
+   --color-searchbox-placeholder: rgba(255, 255, 255, 0.68);
+-  --color-searchbox-results-background: rgb(60, 63, 64);
+-  --color-searchbox-results-background-hovered: rgb(66, 69, 70);
+-  --color-searchbox-results-background-selected: rgb(70, 73, 74);
++  --color-searchbox-results-background: rgb(72, 74, 74);
++  --color-searchbox-results-background-hovered: rgb(79, 81, 81);
++  --color-searchbox-results-background-selected: rgb(86, 88, 88);
+   --color-searchbox-results-foreground: rgba(255, 255, 255, 0.92);
+   --color-searchbox-results-foreground-selected: rgba(255, 255, 255, 0.96);
+   --color-searchbox-results-foreground-dimmed: rgba(255, 255, 255, 0.58);
+@@ -246,9 +246,9 @@ cr-most-visited {
+   --color-searchbox-selection-foreground: rgba(255, 255, 255, 0.96);
+   --color-searchbox-shadow: rgba(0, 0, 0, 0.24);
+   --cr-focus-outline-color: rgba(255, 255, 255, 0.42);
+-  --cr-searchbox-border: 1px solid rgba(255, 255, 255, 0.10);
+-  --cr-searchbox-shadow: 0 14px 38px rgba(0, 0, 0, 0.24),
+-      0 2px 8px rgba(0, 0, 0, 0.18);
++  --cr-searchbox-border: 1px solid rgba(255, 255, 255, 0.12);
++  --cr-searchbox-shadow: 0 10px 28px rgba(0, 0, 0, 0.20),
++      0 2px 6px rgba(0, 0, 0, 0.12);
+   --focus-searchbox-glow: rgba(255, 255, 255, 0.38);
+   display: block;
+   height: var(--cr-searchbox-height);
+@@ -260,13 +260,13 @@ cr-most-visited {
+ }
+ 
+ #searchboxContainer:has(#searchbox:not([is-dark])) {
+-  --color-searchbox-background: rgba(255, 255, 255, 0.98);
++  --color-searchbox-background: rgba(255, 255, 255, 0.99);
+   --color-searchbox-foreground: rgba(28, 30, 30, 0.94);
+   --color-searchbox-lens-voice-icon-background: rgba(28, 30, 30, 0.76);
+   --color-searchbox-placeholder: rgba(28, 30, 30, 0.62);
+   --color-searchbox-results-background: rgb(255, 255, 255);
+-  --color-searchbox-results-background-hovered: rgb(249, 249, 249);
+-  --color-searchbox-results-background-selected: rgb(245, 245, 245);
++  --color-searchbox-results-background-hovered: rgb(247, 248, 248);
++  --color-searchbox-results-background-selected: rgb(242, 244, 244);
+   --color-searchbox-results-foreground: rgba(28, 30, 30, 0.92);
+   --color-searchbox-results-foreground-selected: rgba(20, 22, 22, 0.96);
+   --color-searchbox-results-foreground-dimmed: rgba(28, 30, 30, 0.58);
+@@ -281,9 +281,9 @@ cr-most-visited {
+   --color-searchbox-selection-foreground: rgb(20, 22, 22);
+   --color-searchbox-shadow: rgba(0, 0, 0, 0.18);
+   --cr-focus-outline-color: rgba(38, 41, 41, 0.42);
+-  --cr-searchbox-border: 1px solid rgba(38, 41, 41, 0.10);
+-  --cr-searchbox-shadow: 0 14px 38px rgba(0, 0, 0, 0.12),
+-      0 2px 8px rgba(0, 0, 0, 0.08);
++  --cr-searchbox-border: 1px solid rgba(28, 30, 30, 0.12);
++  --cr-searchbox-shadow: 0 10px 28px rgba(0, 0, 0, 0.10),
++      0 2px 6px rgba(0, 0, 0, 0.06);
+   --focus-searchbox-glow: rgba(38, 41, 41, 0.38);
+ }
+ 

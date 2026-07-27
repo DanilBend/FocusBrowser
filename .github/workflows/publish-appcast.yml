@@ -6,19 +6,19 @@ on:
       release_tag:
         description: Published release tag
         required: true
-        default: v1.0.3
+        default: v1.0.4
       version:
         description: Four-part Focus Browser version
         required: true
-        default: 1.0.3.0
+        default: 1.0.4.0
       short_version:
         description: User-facing Focus Browser version
         required: true
-        default: 1.0.3
+        default: 1.0.4
       asset_name:
         description: Final x64 mini-installer asset
         required: true
-        default: FocusBrowser_1.0.3_x64-mini-installer.exe
+        default: FocusBrowser_1.0.4_x64-mini-installer.exe
 
 permissions:
   contents: read

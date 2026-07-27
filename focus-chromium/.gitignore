@@ -12,6 +12,9 @@ __pycache__/
 # Ignore optional build / cache directory
 /build
 
-# Ignore generated resources
-/resources/generated
+# Keep the canonical browser icon frames versioned so a clean checkout can
+# build without relying on an unrecorded local generator run.
+/resources/generated/*
+!/resources/generated/product_icon/
+!/resources/generated/product_icon/*.png
 /devutils/i18n-data

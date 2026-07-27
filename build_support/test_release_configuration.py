@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static checks for Focus Browser 1.0.3 release metadata.
+"""Static checks for Focus Browser 1.0.4 release metadata.
 
 This intentionally does not build, sign, install, or launch the browser.
 """
@@ -78,7 +78,7 @@ release_source_parts = (
     int(read("focus-chromium/revision.txt").splitlines()[0].split(".")[0]),
     int(read("revision.txt").splitlines()[0].split(".")[0]),
 )
-check(release_source_parts == (1, 0, 3, 0), "release inputs must resolve to Focus 1.0.3.0")
+check(release_source_parts == (1, 0, 4, 0), "release inputs must resolve to Focus 1.0.4.0")
 
 active_version_path = ACTIVE / "chrome/VERSION"
 if active_version_path.is_file():
@@ -90,8 +90,8 @@ if active_version_path.is_file():
     check(
         tuple(version_values.get(key) for key in (
             "FOCUS_MAJOR", "FOCUS_MINOR", "FOCUS_PATCH", "FOCUS_PLATFORM"
-        )) == ("1", "0", "3", "0"),
-        "prepared chrome/VERSION must define Focus 1.0.3.0",
+        )) == ("1", "0", "4", "0"),
+        "prepared chrome/VERSION must define Focus 1.0.4.0",
     )
 
 version_patch = read("patches/focus/windows/focus-versioning.patch")
@@ -130,6 +130,8 @@ for required_text in (
     "PasswordsModelDelegateFromWebContents(web_contents)",
     "ManagePasswordsUIController::FromWebContents(web_contents)",
     "if (passwords_action_item)",
+    "PasswordBubbleViewBase::~PasswordBubbleViewBase()",
+    "Missing optional UI state is not fatal",
 ):
     check(
         required_text in password_action_patch,
@@ -138,13 +140,15 @@ for required_text in (
 
 verifier = read("build_support/verify_focus_release.ps1")
 for required_text in (
-    "[string]$ExpectedVersion = '1.0.3.0'",
+    "[string]$ExpectedVersion = '1.0.4.0'",
     "$versionInfo.FileVersion -eq $ExpectedVersion",
     "$versionInfo.ProductVersion -eq $ExpectedVersion",
     "(Join-Path $focusOutDir 'chrome.dll') 'chrome.dll' $true",
     "(Join-Path $focusOutDir 'setup.exe') 'setup.exe' $true",
     "'mini_installer.exe' $true",
     "$script:InstallerPath 'NSIS installer' $true",
+    "qa\\verify_locale_branding.py",
+    "Compiled locale packs contain no unintended upstream product branding",
 ):
     check(required_text in verifier, f"release verifier is missing: {required_text}")
 
@@ -211,15 +215,15 @@ for label, text, signing_steps, final_jobs in (
         check(secret in text, f"{label}: signing prerequisite {secret} is missing")
     check(
         "prerelease: false" in text and "prerelease: true" not in text,
-        f"{label}: Focus 1.0.3 must be a stable release",
+        f"{label}: Focus 1.0.4 must be a stable release",
     )
     check(
         "name: Focus Browser ${{ needs.build-final.outputs.display_version }}" in text,
-        f"{label}: release name is not derived as Focus Browser 1.0.3",
+        f"{label}: release name is not derived as Focus Browser 1.0.4",
     )
     check(
         "tag_name: ${{ needs.build-final.outputs.release_tag }}" in text,
-        f"{label}: release tag is not derived as v1.0.3",
+        f"{label}: release tag is not derived as v1.0.4",
     )
     legacy_brand = "".join(("he", "li", "um"))
     check(
@@ -286,10 +290,10 @@ if active_winsparkle_path.is_file():
 publish_appcast = read(".github/workflows/publish-appcast.yml")
 publish_appcast_lines = {line.strip() for line in publish_appcast.splitlines()}
 for release_default in (
-    "default: v1.0.3",
-    "default: 1.0.3.0",
-    "default: 1.0.3",
-    "default: FocusBrowser_1.0.3_x64-mini-installer.exe",
+    "default: v1.0.4",
+    "default: 1.0.4.0",
+    "default: 1.0.4",
+    "default: FocusBrowser_1.0.4_x64-mini-installer.exe",
 ):
     check(
         release_default in publish_appcast_lines,
@@ -316,4 +320,4 @@ if FAILURES:
         print(f"  - {failure}")
     sys.exit(1)
 
-print("PASS: Focus Browser 1.0.3 release configuration is internally consistent")
+print("PASS: Focus Browser 1.0.4 release configuration is internally consistent")

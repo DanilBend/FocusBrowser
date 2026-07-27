@@ -8,10 +8,28 @@ Run browser tests with a unique disposable `--user-data-dir`. Never point a QA
 script at a real browser profile and never terminate unrelated `chrome.exe`
 processes by name.
 
+Real bookmark-import regression QA is fail-closed. It refuses to launch unless
+the active test source tree contains the explicit QA-only source-profile hook:
+
+```powershell
+$env:FOCUS_ACTIVE_SOURCE_ROOT = (Resolve-Path build/src).Path
+node qa/verify_settings_import_real_runtime.mjs build/src/out/Default/chrome.exe "$env:TEMP\focus-import-runtime-report.json"
+```
+
+Do not bypass that refusal or run the test against a normal browser profile.
+
 Native FocusBlock network smoke test (local fixture, no extension page):
 
 ```powershell
 node qa/verify_focusblock_runtime.mjs build/src/out/Default/chrome.exe "$env:TEMP\focusblock-runtime-report.json"
+```
+
+Focus new-tab entry-transition proof against an already-running disposable
+browser. Start that browser yourself with `--remote-debugging-port=<port>`;
+the script creates and closes only its own temporary tab:
+
+```powershell
+node qa/verify_focus_new_tab_transition.mjs 9341
 ```
 
 Automatic password-save bubble crash regression (generated QA credentials,

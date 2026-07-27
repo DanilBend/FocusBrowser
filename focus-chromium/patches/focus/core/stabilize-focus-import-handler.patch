@@ -1,0 +1,114 @@
+--- a/chrome/browser/ui/webui/settings/brave_import_data_handler.cc
++++ b/chrome/browser/ui/webui/settings/brave_import_data_handler.cc
+@@ -71,9 +71,31 @@ void BraveImportDataHandler::StartImport(
+     const user_data_importer::SourceProfile& source_profile,
+     uint16_t imported_items) {
+   if (!imported_items) {
++    if (IsJavascriptAllowed()) {
++      FireWebUIListener("import-data-status-changed",
++                        base::Value(kImportStatusFailed));
++    }
++    return;
++  }
++  content::WebUI* ui = web_ui();
++  content::WebContents* web_contents = ui ? ui->GetWebContents() : nullptr;
++  if (!web_contents) {
++    LOG(ERROR) << "Cannot start import without a live profile and WebContents.";
++    if (IsJavascriptAllowed()) {
++      FireWebUIListener("import-data-status-changed",
++                        base::Value(kImportStatusFailed));
++    }
++    return;
++  }
++  Profile* profile = Profile::FromWebUI(ui);
++  if (!profile) {
++    LOG(ERROR) << "Cannot start import without a live profile.";
++    if (IsJavascriptAllowed()) {
++      FireWebUIListener("import-data-status-changed",
++                        base::Value(kImportStatusFailed));
++    }
+     return;
+   }
+-  Profile* profile = Profile::FromWebUI(web_ui());
+ #if BUILDFLAG(IS_MAC)
+   CheckDiskAccess(imported_items, source_profile.source_path,
+                   source_profile.importer_type,
+@@ -89,11 +111,35 @@ void BraveImportDataHandler::StartImportImpl(
+     const user_data_importer::SourceProfile& source_profile,
+     uint16_t imported_items,
+     Profile* profile) {
+-  // If another import is already ongoing, let it finish silently.
+-  if (import_observers_.count(source_profile.source_path)) {
+-    import_observers_.erase(source_profile.source_path);
++  content::WebUI* ui = web_ui();
++  content::WebContents* web_contents = ui ? ui->GetWebContents() : nullptr;
++  if (!web_contents) {
++    LOG(ERROR) << "Import target disappeared before import could start.";
++    if (IsJavascriptAllowed()) {
++      FireWebUIListener("import-data-status-changed",
++                        base::Value(kImportStatusFailed));
++    }
++    return;
++  }
++  Profile* current_profile = Profile::FromWebUI(ui);
++  if (!imported_items || !profile || profile != current_profile) {
++    LOG(ERROR) << "Import target profile disappeared before import could start.";
++    if (IsJavascriptAllowed()) {
++      FireWebUIListener("import-data-status-changed",
++                        base::Value(kImportStatusFailed));
++    }
++    return;
++  }
++
++  // Keep a single terminal result for the active WebUI request. Starting a
++  // second import while the first host is still reporting progress would mix
++  // their success state and can report a stale result.
++  if (!import_observers_.empty()) {
++    LOG(WARNING) << "Ignored a concurrent import request.";
++    return;
+   }
+ 
++  import_did_succeed_ = false;
+   FireWebUIListener("import-data-status-changed", base::Value("inProgress"));
+ 
+   // Using weak pointers because it destroys itself when finshed.
+@@ -104,9 +150,8 @@ void BraveImportDataHandler::StartImportImpl(
+           base::BindRepeating(&BraveImportDataHandler::NotifyImportProgress,
+                               weak_factory_.GetWeakPtr()));
+ 
+-  importer_host->set_parent_window(
+-      web_ui()->GetWebContents()->GetTopLevelNativeWindow());
+-  importer_host->set_parent_view(web_ui()->GetWebContents()->GetNativeView());
++  importer_host->set_parent_window(web_contents->GetTopLevelNativeWindow());
++  importer_host->set_parent_view(web_contents->GetNativeView());
+ 
+   importer_host->StartImportSettings(source_profile, profile, imported_items,
+                                      new ProfileWriter(profile));
+@@ -141,6 +186,7 @@ void BraveImportDataHandler::OnImportEnded(
+ }
+ 
+ void BraveImportDataHandler::OnJavascriptDisallowed() {
++  weak_factory_.InvalidateWeakPtrs();
+   ImportDataHandler::OnJavascriptDisallowed();
+ 
+   // When the WebUI is unloading, we ignore all further updates from the host as
+@@ -209,10 +255,17 @@ void BraveImportDataHandler::DidStopLoading() {
+ 
+   guide_dialog_is_requested_ = false;
+ 
+-  auto* web_contents = web_ui()->GetWebContents();
++  content::WebUI* ui = web_ui();
++  content::WebContents* web_contents = ui ? ui->GetWebContents() : nullptr;
++  Browser* browser = web_contents ? chrome::FindBrowserWithTab(web_contents)
++                                  : nullptr;
++  if (!web_contents || !browser) {
++    LOG(ERROR) << "Cannot show disk-access guidance without a live tab.";
++    return;
++  }
+   TabModalConfirmDialog::Create(
+       std::make_unique<FullDiskAccessConfirmDialogDelegate>(
+-          web_contents, chrome::FindBrowserWithTab(web_contents)),
++          web_contents, browser),
+       web_contents);
+ }
+ #endif

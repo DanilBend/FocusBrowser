@@ -1,47 +1,233 @@
---- a/chrome/browser/resources/new_tab_page/app.html
-+++ b/chrome/browser/resources/new_tab_page/app.html
-@@ -26,4 +26,12 @@
-       </section>
-     ` : ''}
-   </main>
-+  ${this.lazyRender_ && !this.isFooterVisible_ && !this.isAndroid_ ? html`
-+    <ntp-customize-buttons id="customizeButtons"
-+        ?show-background-image="${this.showBackgroundImage_}"
-+        ?show-customize="${this.showCustomize_}"
-+        @customize-click="${this.onCustomizeClick_}"
-+        show-shadow>
-+    </ntp-customize-buttons>
-+  ` : ''}
- </div>
---- a/chrome/browser/resources/new_tab_page/app.css
-+++ b/chrome/browser/resources/new_tab_page/app.css
-@@ -239,6 +239,15 @@ ntp-middle-slot-promo:not([hidden]) ~ #modules {
-   margin-top: 16px;
+diff --git a/chrome/browser/resources/new_tab_shared/customize_buttons/customize_buttons.css b/chrome/browser/resources/new_tab_shared/customize_buttons/customize_buttons.css
+index 43e41e87c8c30afe3e81726f6863c881a905cdc9..a1497fe51b02b39d79586ba2a533c6193e3930b7 100644
+--- a/chrome/browser/resources/new_tab_shared/customize_buttons/customize_buttons.css
++++ b/chrome/browser/resources/new_tab_shared/customize_buttons/customize_buttons.css
+@@ -27,9 +27,11 @@
+ 
+ #customizeButton {
+   --cr-hover-background-color:
+-      var(--color-new-tab-page-button-background-hovered);
+-  --cr-button-text-color: var(--color-new-tab-page-button-foreground);
+-  --cr-button-background-color: var(--color-new-tab-page-button-background);
++      var(--focus-customize-hover, rgb(72, 75, 76));
++  --cr-button-text-color:
++      var(--focus-customize-text, rgba(255, 255, 255, 0.86));
++  --cr-button-background-color:
++      var(--focus-customize-background, rgba(60, 63, 64, 0.98));
  }
  
-+#customizeButtons {
-+  bottom: 16px;
-+  inset-inline-end: 16px;
-+  position: fixed;
-+  z-index: 3;
-+}
-+
-+/* Keep the Focus NTP clean: the shared component is reduced to one localized
-+   pencil icon by clean-new-tab-page.patch. */
- #backgroundImageAttribution {
-   border-radius: 8px;
-   bottom: 16px;
-@@ -294,6 +303,13 @@ ntp-middle-slot-promo:not([hidden]) ~ #modules {
-   font-size: 0.75rem;
+ :host([show-background-image]) #customizeButton,
+@@ -46,11 +48,14 @@
  }
  
-+@media (max-width: 520px) {
-+  #customizeButtons {
-+    bottom: 12px;
-+    inset-inline-end: 12px;
-+  }
-+}
-+
- svg {
-   position: fixed;
+ .customize-button {
+-  --cr-button-height: 32px;
+-  border: none;
++  --cr-button-height: 40px;
++  border: 1px solid
++      var(--focus-customize-border, rgba(255, 255, 255, 0.12));
+   border-radius: calc(.5 * var(--cr-button-height));
++  box-shadow:
++      var(--focus-customize-shadow, 0 10px 28px rgba(0, 0, 0, 0.28));
+   font-weight: 400;
+-  min-width: 32px;
++  min-width: 40px;
+   padding-inline-end: 0;
+   padding-inline-start: 8px;
  }
+@@ -68,17 +73,19 @@
+ }
+ 
+ :host-context(.focus-outline-visible) .customize-button:focus {
+-  box-shadow: var(--ntp-focus-shadow);
++  box-shadow: 0 0 0 2px
++          var(--focus-customize-focus-ring, rgba(255, 255, 255, 0.68)),
++      var(--focus-customize-shadow, 0 10px 28px rgba(0, 0, 0, 0.28));
+ }
+ 
+ .customize-icon {
+   --cr-icon-button-margin-start: 0;
+   --cr-icon-color: var(--cr-button-text-color);
+   --cr-icon-ripple-margin: 0;
+-  --cr-icon-ripple-size: 16px;
++  --cr-icon-ripple-size: 18px;
+   --cr-icon-size: 100%;
+-  --iron-icon-width: 16px;
+-  --iron-icon-height: 16px;
++  --iron-icon-width: 18px;
++  --iron-icon-height: 18px;
+ }
+ 
+ .customize-text {
+diff --git a/chrome/browser/resources/side_panel/customize_chrome/categories.css b/chrome/browser/resources/side_panel/customize_chrome/categories.css
+index 982b94df744af6c997aa0d33eaa49c0b2e3741ee..5c68b02f6cb1963d87e782133bc4dfa8e36fe1fa 100644
+--- a/chrome/browser/resources/side_panel/customize_chrome/categories.css
++++ b/chrome/browser/resources/side_panel/customize_chrome/categories.css
+@@ -45,7 +45,8 @@ cr-grid {
+ }
+ 
+ #cornerNewTabPageTile {
+-  background-color: rgb( 211, 227, 253);
++  background-color: var(
++      --color-side-panel-customize-chrome-corner-ntp-background);
+   border: solid 1px
+       var(--color-side-panel-customize-chrome-corner-ntp-border);
+ }
+@@ -177,11 +178,11 @@ svg {
+ }
+ 
+ #foreground {
+-  fill: var(--google-blue-700);
++  fill: var(--color-side-panel-customize-chrome-corner-ntp-foreground);
+ }
+ 
+ #background {
+-  fill: var(--google-blue-500);
++  fill: var(--color-side-panel-customize-chrome-corner-ntp-accent);
+ }
+ 
+ #chromeWebStore {
+diff --git a/chrome/browser/resources/side_panel/customize_chrome/customize_chrome.html b/chrome/browser/resources/side_panel/customize_chrome/customize_chrome.html
+index 50d1faff607b68d1dc47a700990b695647924813..e8b69151a61801d94cf9d275cdc0f1c76b0f7063 100644
+--- a/chrome/browser/resources/side_panel/customize_chrome/customize_chrome.html
++++ b/chrome/browser/resources/side_panel/customize_chrome/customize_chrome.html
+@@ -15,6 +15,125 @@
+       }
+ 
+       body {
++        color-scheme: light dark;
++        --focus-panel-accent:
++            light-dark(rgb(52, 55, 55), rgb(226, 229, 229));
++        --focus-panel-border:
++            light-dark(rgb(205, 208, 208), rgb(83, 87, 87));
++        --focus-panel-card:
++            light-dark(rgb(255, 255, 255), rgb(45, 48, 48));
++        --focus-panel-on-accent:
++            light-dark(rgb(255, 255, 255), rgb(35, 38, 38));
++        --focus-panel-secondary-text:
++            light-dark(rgb(89, 93, 93), rgb(184, 188, 188));
++        --focus-panel-surface:
++            light-dark(rgb(238, 240, 240), rgb(31, 33, 33));
++        --focus-panel-text:
++            light-dark(rgb(29, 31, 31), rgb(244, 245, 245));
++        --focus-panel-tonal:
++            light-dark(rgb(232, 234, 234), rgb(59, 62, 62));
++        --focus-panel-tile-accent:
++            light-dark(rgb(112, 116, 116), rgb(166, 170, 170));
++        --focus-panel-tile-background:
++            light-dark(rgb(226, 229, 229), rgb(52, 55, 55));
++        --focus-panel-tile-foreground:
++            light-dark(rgb(49, 52, 52), rgb(226, 229, 229));
++
++        --google-blue-500: var(--focus-panel-tile-accent);
++        --google-blue-700: var(--focus-panel-tile-foreground);
++
++        --color-button-background-prominent: var(--focus-panel-accent);
++        --color-button-background-tonal: var(--focus-panel-tonal);
++        --color-button-border: var(--focus-panel-border);
++        --color-button-foreground: var(--focus-panel-accent);
++        --color-button-foreground-prominent: var(--focus-panel-on-accent);
++        --color-button-foreground-tonal: var(--focus-panel-text);
++        --color-checkbox-check: var(--focus-panel-on-accent);
++        --color-checkbox-foreground-checked: var(--focus-panel-accent);
++        --color-checkbox-foreground-unchecked: var(--focus-panel-secondary-text);
++        --color-chip-background-selected: var(--focus-panel-accent);
++        --color-chip-border: var(--focus-panel-border);
++        --color-chip-foreground: var(--focus-panel-text);
++        --color-chip-foreground-selected: var(--focus-panel-on-accent);
++        --color-chip-icon: var(--focus-panel-secondary-text);
++        --color-chip-icon-selected: var(--focus-panel-on-accent);
++        --color-link-foreground-default: var(--focus-panel-accent);
++        --color-menu-button-background: var(--focus-panel-tonal);
++        --color-primary-foreground: var(--focus-panel-text);
++        --color-radio-button-foreground-checked: var(--focus-panel-accent);
++        --color-radio-button-foreground-unchecked:
++            var(--focus-panel-secondary-text);
++        --color-secondary-foreground: var(--focus-panel-secondary-text);
++        --color-segmented-button-border: var(--focus-panel-border);
++        --color-segmented-button-checked: var(--focus-panel-accent);
++        --color-segmented-button-foreground-checked:
++            var(--focus-panel-on-accent);
++        --color-segmented-button-foreground-unchecked:
++            var(--focus-panel-secondary-text);
++        --color-segmented-button-hover:
++            light-dark(rgba(0, 0, 0, 0.08), rgba(255, 255, 255, 0.08));
++        --color-segmented-button-ripple:
++            light-dark(rgba(0, 0, 0, 0.12), rgba(255, 255, 255, 0.12));
++        --color-side-panel-card-background: var(--focus-panel-card);
++        --color-side-panel-card-primary-foreground: var(--focus-panel-text);
++        --color-side-panel-card-secondary-foreground:
++            var(--focus-panel-secondary-text);
++        --color-side-panel-content-background: var(--focus-panel-surface);
++        --color-side-panel-customize-chrome-theme-background:
++            var(--focus-panel-tonal);
++        --color-side-panel-customize-chrome-corner-ntp-background:
++            var(--focus-panel-tile-background);
++        --color-side-panel-customize-chrome-corner-ntp-accent:
++            var(--focus-panel-tile-accent);
++        --color-side-panel-customize-chrome-corner-ntp-foreground:
++            var(--focus-panel-tile-foreground);
++        --color-side-panel-customize-chrome-theme-checkmark-background:
++            var(--focus-panel-accent);
++        --color-side-panel-customize-chrome-theme-checkmark-foreground:
++            var(--focus-panel-on-accent);
++        --color-side-panel-dialog-background: var(--focus-panel-card);
++        --color-side-panel-dialog-divider: var(--focus-panel-border);
++        --color-side-panel-dialog-primary-foreground: var(--focus-panel-text);
++        --color-side-panel-dialog-secondary-foreground:
++            var(--focus-panel-secondary-text);
++        --color-side-panel-divider: var(--focus-panel-border);
++        --color-side-panel-scrollbar-thumb: var(--focus-panel-border);
++        --color-side-panel-wallpaper-search-inspiration-descriptors:
++            var(--focus-panel-secondary-text);
++        --color-sys-state-focus-ring: var(--focus-panel-accent);
++        --color-sys-state-hover:
++            light-dark(rgba(0, 0, 0, 0.08), rgba(255, 255, 255, 0.08));
++        --color-sys-state-hover-on-subtle:
++            light-dark(rgba(0, 0, 0, 0.08), rgba(255, 255, 255, 0.08));
++        --color-sys-state-pressed:
++            light-dark(rgba(0, 0, 0, 0.12), rgba(255, 255, 255, 0.12));
++        --color-sys-state-ripple-neutral-on-subtle:
++            light-dark(rgba(0, 0, 0, 0.12), rgba(255, 255, 255, 0.12));
++        --color-theme-color-picker-checkmark-background:
++            var(--focus-panel-accent);
++        --color-theme-color-picker-checkmark-foreground:
++            var(--focus-panel-on-accent);
++        --color-theme-color-picker-option-background: var(--focus-panel-tonal);
++        --color-toggle-button-thumb-off: var(--focus-panel-secondary-text);
++        --color-toggle-button-thumb-on: var(--focus-panel-on-accent);
++        --color-toggle-button-thumb-on-hover: var(--focus-panel-on-accent);
++        --color-toggle-button-track-off: var(--focus-panel-tonal);
++        --color-toggle-button-track-on: var(--focus-panel-accent);
++
++        --cr-active-background-color:
++            light-dark(rgba(0, 0, 0, 0.12), rgba(255, 255, 255, 0.12));
++        --cr-active-neutral-on-subtle-background-color:
++            light-dark(rgba(0, 0, 0, 0.12), rgba(255, 255, 255, 0.12));
++        --cr-checked-color: var(--focus-panel-accent);
++        --cr-focus-outline-color: var(--focus-panel-accent);
++        --cr-hover-background-color:
++            light-dark(rgba(0, 0, 0, 0.08), rgba(255, 255, 255, 0.08));
++        --cr-hover-on-subtle-background-color:
++            light-dark(rgba(0, 0, 0, 0.08), rgba(255, 255, 255, 0.08));
++        --cr-link-color: var(--focus-panel-accent);
++        --cr-menu-background-focus-color: var(--focus-panel-tonal);
++        --cr-primary-text-color: var(--focus-panel-text);
++        --cr-secondary-text-color: var(--focus-panel-secondary-text);
+         background: var(--color-side-panel-content-background);
+         overflow: auto;
+       }
+diff --git a/chrome/browser/resources/side_panel/customize_chrome/shortcuts.css b/chrome/browser/resources/side_panel/customize_chrome/shortcuts.css
+index 0b7745e5719cc29fdf5b3c1d477e31f92307fc4b..c824a88bdae02cbf497019768d6a73d7cdd5e0ff 100644
+--- a/chrome/browser/resources/side_panel/customize_chrome/shortcuts.css
++++ b/chrome/browser/resources/side_panel/customize_chrome/shortcuts.css
+@@ -69,6 +69,9 @@ customize-chrome-button-label {
+ }
+ 
+ cr-radio-button {
++  --cr-radio-button-checked-color: var(--focus-panel-accent);
++  --cr-radio-button-checked-ripple-color:
++      var(--cr-active-neutral-on-subtle-background-color);
+   gap: 0;
+ }
+ 

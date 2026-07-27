@@ -17,6 +17,8 @@ VIEWBOX_SIZE = 256.0
 BLACK = (0, 0, 0, 255)
 WHITE = (255, 255, 255, 255)
 TRANSPARENT = (0, 0, 0, 0)
+APP_TILE = (48, 48, 48, 255)
+APP_TILE_BORDER = (96, 96, 96, 255)
 
 CENTER = 128.0
 OUTER_RADIUS = 88.0
@@ -215,6 +217,62 @@ def _fit_mark_layer(
     mark = layer.crop(bbox)
     mark.thumbnail((target_width, target_height), Image.Resampling.LANCZOS)
     return mark
+
+
+def render_focus_app_icon(
+    size: int,
+    *,
+    rounded: bool = True,
+) -> Image.Image:
+    """Render a high-contrast app icon for Windows taskbar/desktop slots.
+
+    The approved target geometry stays unchanged.  A dedicated graphite tile
+    and a larger optical footprint prevent Windows from making the mark look
+    undersized when it fits transparent artwork into a small icon slot.
+    """
+    supersampling = _supersampling(size)
+    canvas_size = size * supersampling
+    image = Image.new("RGBA", (canvas_size, canvas_size), TRANSPARENT)
+    draw = ImageDraw.Draw(image)
+
+    inset = max(0, round(canvas_size * 0.025))
+    bounds = (
+        inset,
+        inset,
+        canvas_size - 1 - inset,
+        canvas_size - 1 - inset,
+    )
+    border_width = max(1, round(supersampling * 0.85))
+    if rounded:
+        draw.rounded_rectangle(
+            bounds,
+            radius=round(canvas_size * 0.215),
+            fill=APP_TILE,
+            outline=APP_TILE_BORDER,
+            width=border_width,
+        )
+    else:
+        draw.rectangle(
+            bounds,
+            fill=APP_TILE,
+            outline=APP_TILE_BORDER,
+            width=border_width,
+        )
+
+    target_extent = round(canvas_size * 0.90)
+    mark = _fit_mark_layer(
+        canvas_size,
+        target_extent,
+        target_extent,
+        color=WHITE,
+        outline_color=WHITE,
+        outline_radius=max(1, round(canvas_size * 0.010)),
+    )
+    image.alpha_composite(
+        mark,
+        ((canvas_size - mark.width) // 2, (canvas_size - mark.height) // 2),
+    )
+    return _downsample(image, size)
 
 
 def render_focusblock_shield(

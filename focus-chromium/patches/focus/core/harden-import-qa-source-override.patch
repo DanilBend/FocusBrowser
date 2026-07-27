@@ -1,0 +1,88 @@
+diff --git a/chrome/browser/importer/chrome_importer_list.cc b/chrome/browser/importer/chrome_importer_list.cc
+--- a/chrome/browser/importer/chrome_importer_list.cc
++++ b/chrome/browser/importer/chrome_importer_list.cc
+@@ -27,6 +27,8 @@ namespace {
+ #if BUILDFLAG(IS_WIN)
+ constexpr char kFocusImportQaChromeUserDataDir[] =
+     "FOCUS_IMPORT_QA_CHROME_USER_DATA_DIR";
++constexpr char kFocusImportQaBuildMarker[] =
++    "FOCUS_IMPORT_QA_HOOK_V2";
+ 
+ enum class FocusImportQaOverrideState {
+   kUnset,
+@@ -54,7 +56,8 @@ FocusImportQaOverride ResolveFocusImportQaChromeOverride() {
+ 
+   const auto reject = [](const char* reason) {
+     LOG(ERROR) << kFocusImportQaChromeUserDataDir
+-               << " was rejected: " << reason;
++               << " was rejected: " << reason << " ["
++               << kFocusImportQaBuildMarker << "]";
+     return FocusImportQaOverride{FocusImportQaOverrideState::kInvalid,
+                                  base::FilePath()};
+   };
+@@ -119,7 +122,8 @@ void AddChromeToProfiles(
+     base::ListValue chrome_profiles,
+     const base::FilePath& user_data_folder,
+     const std::string& brand,
+-    user_data_importer::ImporterType type) {
++    user_data_importer::ImporterType type,
++    bool require_focus_qa_containment = false) {
+   for (const auto& value : chrome_profiles) {
+     const auto* dict = value.GetIfDict();
+     if (!dict) {
+@@ -130,18 +134,40 @@ void AddChromeToProfiles(
+     auto* name = dict->FindString("name");
+     DCHECK(profile);
+     DCHECK(name);
+-    base::FilePath path = user_data_folder;
+-    if (!ChromeImporterCanImport(path.Append(base::FilePath::StringType(
+-                                     profile->begin(), profile->end())),
+-                                 type, &items)) {
++    if (!profile || !name) {
++      continue;
++    }
++    base::FilePath profile_path = user_data_folder.Append(
++        base::FilePath::StringType(profile->begin(), profile->end()));
++#if BUILDFLAG(IS_WIN)
++    if (require_focus_qa_containment) {
++      const base::FilePath relative_profile =
++          base::FilePath::FromUTF8Unsafe(*profile);
++      const std::vector<base::FilePath::StringType> components =
++          relative_profile.GetComponents();
++      base::FilePath normalized_profile;
++      if (relative_profile.empty() || relative_profile.IsAbsolute() ||
++          relative_profile.ReferencesParent() || components.size() != 1u ||
++          components[0] == FILE_PATH_LITERAL(".") ||
++          components[0] == FILE_PATH_LITERAL("..") ||
++          !base::NormalizeFilePath(profile_path, &normalized_profile) ||
++          !FocusImportQaPathsEqual(normalized_profile.DirName(),
++                                   user_data_folder)) {
++        LOG(ERROR) << kFocusImportQaBuildMarker
++                   << " rejected an unsafe disposable profile id";
++        continue;
++      }
++      profile_path = normalized_profile;
++    }
++#endif  // BUILDFLAG(IS_WIN)
++    if (!ChromeImporterCanImport(profile_path, type, &items)) {
+       continue;
+     }
+     user_data_importer::SourceProfile chrome;
+     chrome.importer_name = base::UTF8ToUTF16(brand);
+     chrome.importer_type = type;
+     chrome.services_supported = items;
+-    chrome.source_path = user_data_folder.Append(
+-        base::FilePath::StringType(profile->begin(), profile->end()));
++    chrome.source_path = profile_path;
+     chrome.profile = base::UTF8ToUTF16(*name);
+     profiles->push_back(chrome);
+   }
+@@ -165,7 +191,7 @@ void DetectChromeProfiles(
+               base::FilePath::StringType(
+                   FILE_PATH_LITERAL("Local State")))),
+           qa_override.source_path, kGoogleChromeBrowser,
+-          user_data_importer::TYPE_CHROME);
++          user_data_importer::TYPE_CHROME, true);
+     }
+     return;
+   }

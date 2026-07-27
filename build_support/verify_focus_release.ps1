@@ -10,7 +10,10 @@ param(
 
     [string]$BrowserPath,
     [string]$InstallerPath,
-    [string]$ExpectedVersion = '1.0.3.0',
+    [string]$ExpectedVersion = '1.0.4.0',
+
+    [ValidateSet('all', 'user', 'system')]
+    [string]$RegistryScope = 'all',
 
     [string]$UserDataPath =
         (Join-Path $env:LOCALAPPDATA 'FocusBrowser\Focus Browser\User Data'),
@@ -271,6 +274,24 @@ function Test-ArtifactRelease {
     } else {
         Write-Warn 'node.exe was not found; run verify_focus_components.mjs manually'
     }
+
+    $localeVerifier = Join-Path $focusQaRoot 'qa\verify_locale_branding.py'
+    $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
+    $bundledPython = Join-Path $focusSourceRoot 'python3.bat'
+    $pythonPath = if ($null -ne $pythonCommand) {
+        $pythonCommand.Source
+    } elseif (Test-Path -LiteralPath $bundledPython -PathType Leaf) {
+        $bundledPython
+    } else {
+        $null
+    }
+    if ($null -ne $pythonPath -and (Test-Path -LiteralPath $localeVerifier)) {
+        & $pythonPath $localeVerifier $focusOutDir
+        Assert-Focus ($LASTEXITCODE -eq 0) `
+            'Compiled locale packs contain no unintended upstream product branding'
+    } else {
+        Write-Fail 'Python or qa\verify_locale_branding.py is missing; locale branding was not verified'
+    }
 }
 
 function Get-CriticalProfileSnapshot([string]$Root) {
@@ -462,6 +483,15 @@ function Test-RegistryRegistration {
             ExpectedChromePath = $systemChromePath
         }
     )
+    if ($RegistryScope -eq 'user') {
+        $registryRoots = @($registryRoots | Where-Object {
+            $_.Hive -eq 'HKEY_CURRENT_USER'
+        })
+    } elseif ($RegistryScope -eq 'system') {
+        $registryRoots = @($registryRoots | Where-Object {
+            $_.Hive -eq 'HKEY_LOCAL_MACHINE'
+        })
+    }
 
     $registered = @()
     foreach ($root in $registryRoots) {
@@ -567,12 +597,26 @@ function Test-RegistryRegistration {
         }
     }
 
+    $uninstallRoots = switch ($RegistryScope) {
+        'user' {
+            @('Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall')
+        }
+        'system' {
+            @(
+                'Registry::HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+                'Registry::HKEY_LOCAL_MACHINE\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+            )
+        }
+        default {
+            @(
+                'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+                'Registry::HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+                'Registry::HKEY_LOCAL_MACHINE\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+            )
+        }
+    }
     $uninstallEntries = @()
-    foreach ($uninstallRoot in @(
-        'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall',
-        'Registry::HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall',
-        'Registry::HKEY_LOCAL_MACHINE\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
-    )) {
+    foreach ($uninstallRoot in $uninstallRoots) {
         if (-not (Test-Path -LiteralPath $uninstallRoot)) { continue }
         $uninstallEntries += Get-ChildItem -LiteralPath $uninstallRoot -ErrorAction SilentlyContinue |
             ForEach-Object { Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue } |

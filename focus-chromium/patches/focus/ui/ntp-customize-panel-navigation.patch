@@ -1,0 +1,82 @@
+diff --git a/chrome/browser/ui/views/side_panel/customize_chrome/side_panel_controller_views.cc b/chrome/browser/ui/views/side_panel/customize_chrome/side_panel_controller_views.cc
+index 63a739e7f84322909a341ab81cd688d3a2cc0352..01c157cbaf5896eb64ea13d68b5d996fe24b35f4 100644
+--- a/chrome/browser/ui/views/side_panel/customize_chrome/side_panel_controller_views.cc
++++ b/chrome/browser/ui/views/side_panel/customize_chrome/side_panel_controller_views.cc
+@@ -134,11 +134,23 @@ void SidePanelControllerViews::DidFinishNavigation(
+   }
+ 
+   const GURL& url = entry->GetURL();
++  const bool theme_editable = ShouldEnableEditTheme(url);
++  if (close_on_navigation_ && !theme_editable &&
++      IsCustomizeChromeEntryShowing()) {
++    // The customize page is scoped to the new tab page. Leaving it open while
++    // navigating away can leave an empty side-panel surface that permanently
++    // narrows the destination page. Treat the navigation like backgrounding
++    // the entry so it closes without being recorded as an explicit user close.
++    GetSidePanelUI()->Close(SidePanelEntryHideReason::kBackgrounded,
++                            /*suppress_animations=*/false);
++    close_on_navigation_ = false;
++  }
++
+   if (CanShowOnURL(url)) {
+     CreateAndRegisterEntry();
+     if (customize_chrome_ui_) {
+       customize_chrome_ui_->AttachedTabStateUpdated(url);
+-      customize_chrome_ui_->UpdateThemeEditable(ShouldEnableEditTheme(url));
++      customize_chrome_ui_->UpdateThemeEditable(theme_editable);
+     }
+   } else {
+     DeregisterEntry();
+@@ -194,6 +206,11 @@ void SidePanelControllerViews::OpenSidePanel(
+ 
+   DCHECK(IsCustomizeChromeEntryAvailable());
+ 
++  // The NTP customization entry point belongs to the current new tab page.
++  // Other entry points, such as the app menu, remain available across normal
++  // navigations and must not be closed by DidFinishNavigation().
++  close_on_navigation_ = trigger == SidePanelOpenTrigger::kNewTabPage;
++
+   // SidePanelUI::Show calls into CreateCustomizeChromeWebView which sets up
+   // the customize_chrome_ui_.
+   side_panel_ui->Show(kSidePanelEntryId, trigger);
+diff --git a/chrome/browser/ui/views/side_panel/customize_chrome/side_panel_controller_views.h b/chrome/browser/ui/views/side_panel/customize_chrome/side_panel_controller_views.h
+index b3ed90ba6dcd9de9e595f6eca5c77656a9666db3..54b2557606bc50d32ccaa9d6be82ddf736a275c4 100644
+--- a/chrome/browser/ui/views/side_panel/customize_chrome/side_panel_controller_views.h
++++ b/chrome/browser/ui/views/side_panel/customize_chrome/side_panel_controller_views.h
+@@ -97,6 +97,7 @@ class SidePanelControllerViews : public SidePanelController,
+   // Caches a request to scroll to a section in case the request happens before
+   // the front-end is ready to receive the request.
+   std::optional<CustomizeChromeSection> section_;
++  bool close_on_navigation_ = false;
+   StateChangedCallBack entry_state_changed_callback_;
+ 
+   // Subscription for the discard of the tab.
+diff --git a/chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome_browsertest.cc b/chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome_browsertest.cc
+index a3754d58f4ab74b1df825282a4f8a4cd6f909612..7084fdd24c620754a815529373c025da7b4e0f4b 100644
+--- a/chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome_browsertest.cc
++++ b/chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome_browsertest.cc
+@@ -87,6 +87,24 @@ IN_PROC_BROWSER_TEST_F(CustomizeChromeSidePanelBrowserTest,
+       customize_chrome_side_panel_controller->IsCustomizeChromeEntryShowing());
+ }
+ 
++IN_PROC_BROWSER_TEST_F(CustomizeChromeSidePanelBrowserTest,
++                       CloseNtpCustomizePanelOnNavigation) {
++  browser()->GetFeatures().side_panel_ui()->DisableAnimationsForTesting();
++  auto* customize_chrome_side_panel_controller =
++      GetSidePanelController(browser());
++  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(),
++                                           chrome::ChromeUINewTabURLAsGURL()));
++  customize_chrome_side_panel_controller->OpenSidePanel(
++      SidePanelOpenTrigger::kNewTabPage, CustomizeChromeSection::kAppearance);
++  ASSERT_TRUE(
++      customize_chrome_side_panel_controller->IsCustomizeChromeEntryShowing());
++
++  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(),
++                                           GURL(chrome::kChromeUISettingsURL)));
++  EXPECT_FALSE(
++      customize_chrome_side_panel_controller->IsCustomizeChromeEntryShowing());
++}
++
+ IN_PROC_BROWSER_TEST_F(CustomizeChromeSidePanelBrowserTest,
+                        ContextualCustomizeChromeSidePanel) {
+   browser()->GetFeatures().side_panel_ui()->DisableAnimationsForTesting();

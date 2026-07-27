@@ -132,11 +132,15 @@ async function stopOwnedBrowser(child, browserSession) {
   if (!child || child.exitCode !== null) {
     return;
   }
-  if (browserSession) {
-    await Promise.race([
-      browserSession.send('Browser.close').catch(() => null),
-      delay(2000),
-    ]);
+  if (browserSession?.socket?.readyState === WebSocket.OPEN) {
+    try {
+      await Promise.race([
+        browserSession.send('Browser.close'),
+        delay(2000),
+      ]);
+    } catch {
+      // Fall through to exact-owned-PID cleanup below.
+    }
   }
   if (await waitForChildExit(child, 8000)) {
     return;

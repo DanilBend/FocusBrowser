@@ -1,0 +1,184 @@
+diff --git a/chrome/browser/resources/new_tab_page/app.css b/chrome/browser/resources/new_tab_page/app.css
+index b4fcdcbd982dd5a655f33f4b66d52ee324ed773f..e5eaaeafdb5fa6370fc2b6b787876571c08be1b6 100644
+--- a/chrome/browser/resources/new_tab_page/app.css
++++ b/chrome/browser/resources/new_tab_page/app.css
+@@ -154,10 +154,8 @@ cr-most-visited {
+ 
+ #content {
+   align-items: center;
+-  background:
+-      radial-gradient(circle at 50% 42%, rgba(255, 255, 255, 0.025),
+-                      rgba(255, 255, 255, 0) 42%),
+-      linear-gradient(180deg, rgb(45, 47, 48), rgb(50, 52, 53));
++  background: var(--focus-ntp-page-background,
++      var(--color-new-tab-page-background));
+   box-sizing: border-box;
+   display: flex;
+   flex-direction: column;
+@@ -170,13 +168,6 @@ cr-most-visited {
+   z-index: 1;
+ }
+ 
+-#content:has(#searchbox:not([is-dark])) {
+-  background:
+-      radial-gradient(circle at 50% 42%, rgba(0, 0, 0, 0.025),
+-                      rgba(0, 0, 0, 0) 42%),
+-      linear-gradient(180deg, rgb(238, 240, 240), rgb(246, 247, 247));
+-}
+-
+ #content:has(#searchbox:not([is-dark])) cr-most-visited {
+   --add-shortcut-background-color: rgba(38, 41, 41, 0.09);
+   --add-shortcut-foreground-color: rgba(28, 30, 30, 0.88);
+@@ -191,7 +182,6 @@ cr-most-visited {
+ #focusHome {
+   --ntp-search-box-width: min(640px, calc(100vw - 48px));
+   align-items: center;
+-  animation: focus-home-enter 420ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+   box-sizing: border-box;
+   display: flex;
+   flex: 1 0 auto;
+@@ -240,13 +230,13 @@ cr-most-visited {
+   --color-searchbox-lens-voice-icon-background: rgba(255, 255, 255, 0.82);
+   --color-searchbox-placeholder: rgba(255, 255, 255, 0.68);
+   --color-searchbox-results-background: rgb(60, 63, 64);
+-  --color-searchbox-results-background-hovered: rgb(70, 73, 74);
+-  --color-searchbox-results-background-selected: rgb(78, 81, 82);
++  --color-searchbox-results-background-hovered: rgb(66, 69, 70);
++  --color-searchbox-results-background-selected: rgb(70, 73, 74);
+   --color-searchbox-results-foreground: rgba(255, 255, 255, 0.92);
+   --color-searchbox-results-foreground-selected: rgba(255, 255, 255, 0.96);
+   --color-searchbox-results-foreground-dimmed: rgba(255, 255, 255, 0.58);
+   --color-searchbox-results-dim-selected: rgba(255, 255, 255, 0.72);
+-  --color-searchbox-results-focus-indicator: rgba(255, 255, 255, 0.68);
++  --color-searchbox-results-focus-indicator: rgba(255, 255, 255, 0.38);
+   --color-searchbox-results-icon: rgba(255, 255, 255, 0.72);
+   --color-searchbox-results-icon-selected: rgba(255, 255, 255, 0.86);
+   --color-searchbox-results-icon-focused-outline: rgba(255, 255, 255, 0.82);
+@@ -255,11 +245,11 @@ cr-most-visited {
+   --color-searchbox-selection-background: rgba(255, 255, 255, 0.22);
+   --color-searchbox-selection-foreground: rgba(255, 255, 255, 0.96);
+   --color-searchbox-shadow: rgba(0, 0, 0, 0.24);
+-  --cr-focus-outline-color: rgba(255, 255, 255, 0.82);
+-  --cr-searchbox-border: 1px solid rgba(255, 255, 255, 0.14);
+-  --cr-searchbox-shadow: 0 14px 38px rgba(0, 0, 0, 0.28),
+-      0 2px 8px rgba(0, 0, 0, 0.24);
+-  --focus-searchbox-glow: rgba(255, 255, 255, 0.72);
++  --cr-focus-outline-color: rgba(255, 255, 255, 0.42);
++  --cr-searchbox-border: 1px solid rgba(255, 255, 255, 0.10);
++  --cr-searchbox-shadow: 0 14px 38px rgba(0, 0, 0, 0.24),
++      0 2px 8px rgba(0, 0, 0, 0.18);
++  --focus-searchbox-glow: rgba(255, 255, 255, 0.38);
+   display: block;
+   height: var(--cr-searchbox-height);
+   margin: 0;
+@@ -275,13 +265,13 @@ cr-most-visited {
+   --color-searchbox-lens-voice-icon-background: rgba(28, 30, 30, 0.76);
+   --color-searchbox-placeholder: rgba(28, 30, 30, 0.62);
+   --color-searchbox-results-background: rgb(255, 255, 255);
+-  --color-searchbox-results-background-hovered: rgb(239, 241, 241);
+-  --color-searchbox-results-background-selected: rgb(230, 232, 232);
++  --color-searchbox-results-background-hovered: rgb(249, 249, 249);
++  --color-searchbox-results-background-selected: rgb(245, 245, 245);
+   --color-searchbox-results-foreground: rgba(28, 30, 30, 0.92);
+   --color-searchbox-results-foreground-selected: rgba(20, 22, 22, 0.96);
+   --color-searchbox-results-foreground-dimmed: rgba(28, 30, 30, 0.58);
+   --color-searchbox-results-dim-selected: rgba(28, 30, 30, 0.72);
+-  --color-searchbox-results-focus-indicator: rgba(38, 41, 41, 0.68);
++  --color-searchbox-results-focus-indicator: rgba(38, 41, 41, 0.38);
+   --color-searchbox-results-icon: rgba(28, 30, 30, 0.68);
+   --color-searchbox-results-icon-selected: rgba(20, 22, 22, 0.86);
+   --color-searchbox-results-icon-focused-outline: rgba(38, 41, 41, 0.78);
+@@ -290,11 +280,11 @@ cr-most-visited {
+   --color-searchbox-selection-background: rgba(38, 41, 41, 0.22);
+   --color-searchbox-selection-foreground: rgb(20, 22, 22);
+   --color-searchbox-shadow: rgba(0, 0, 0, 0.18);
+-  --cr-focus-outline-color: rgba(38, 41, 41, 0.78);
+-  --cr-searchbox-border: 1px solid rgba(38, 41, 41, 0.14);
+-  --cr-searchbox-shadow: 0 14px 38px rgba(0, 0, 0, 0.14),
+-      0 2px 8px rgba(0, 0, 0, 0.10);
+-  --focus-searchbox-glow: rgba(38, 41, 41, 0.58);
++  --cr-focus-outline-color: rgba(38, 41, 41, 0.42);
++  --cr-searchbox-border: 1px solid rgba(38, 41, 41, 0.10);
++  --cr-searchbox-shadow: 0 14px 38px rgba(0, 0, 0, 0.12),
++      0 2px 8px rgba(0, 0, 0, 0.08);
++  --focus-searchbox-glow: rgba(38, 41, 41, 0.38);
+ }
+ 
+ #searchboxContainer:focus-within {
+@@ -320,15 +310,6 @@ cr-most-visited {
+   width: 100%;
+ }
+ 
+-@keyframes focus-home-enter {
+-  from {
+-    transform: translateY(2px) scale(0.998);
+-  }
+-  to {
+-    transform: translateY(0) scale(1);
+-  }
+-}
+-
+ @media (max-height: 760px) {
+   #focusHome {
+     justify-content: flex-start;
+@@ -562,9 +543,6 @@ ntp-lens-upload-dialog {
+ }
+ 
+ @container style(--cr-animations-disabled: 1) {
+-  #focusHome {
+-    animation: none;
+-  }
+   #searchboxContainer {
+     transition: none;
+   }
+diff --git a/chrome/browser/resources/new_tab_page/new_tab_page.html b/chrome/browser/resources/new_tab_page/new_tab_page.html
+index 6e261416165ac048378defac06a9d31425ac6c69..c24287f6b55074602053c46a2035e3cbd80206c4 100644
+--- a/chrome/browser/resources/new_tab_page/new_tab_page.html
++++ b/chrome/browser/resources/new_tab_page/new_tab_page.html
+@@ -4,11 +4,21 @@
+     <meta charset="utf-8">
+     <title>$i18n{title}</title>
+     <style>
++      html {
++        --focus-ntp-page-background: $i18n{backgroundColor};
++        background: $i18n{backgroundColor};
++        color-scheme: light dark;
++      }
++
+       body {
+         background: $i18n{backgroundColor};
+         margin: 0;
+       }
+ 
++      ntp-app {
++        background: $i18n{backgroundColor};
++      }
++
+       #backgroundImage {
+         border: none;
+         height: 100%;
+diff --git a/chrome/browser/ui/webui/new_tab_page/new_tab_page_ui.cc b/chrome/browser/ui/webui/new_tab_page/new_tab_page_ui.cc
+index 6a942f3bdc233a525aefd8fad150147a1c1d4df8..5fd231db1a120bcd27eb33b67c7a9dcbfad38529 100644
+--- a/chrome/browser/ui/webui/new_tab_page/new_tab_page_ui.cc
++++ b/chrome/browser/ui/webui/new_tab_page/new_tab_page_ui.cc
+@@ -855,8 +855,10 @@ NewTabPageUI::NewTabPageUI(content::WebUI* web_ui)
+       navigation_start_time_(base::Time::Now()),
+       module_id_details_(
+           ntp::MakeModuleIdDetails(NewTabPageUI::IsManagedProfile(profile_),
+-                                   profile_))
+-{
++                                   profile_)) {
++  web_ui->GetWebContents()->SetPageBaseBackgroundColor(
++      web_ui->GetWebContents()->GetColorProvider().GetColor(
++          kColorNewTabPageBackground));
+ 
+   instance_count_++;
+   base::UmaHistogramCounts100("NewTabPage.Count", instance_count_);
+@@ -1406,6 +1408,7 @@ void NewTabPageUI::OnColorProviderChanged() {
+   }
+   const ui::ColorProvider& color_provider = web_contents()->GetColorProvider();
+   auto background_color = color_provider.GetColor(kColorNewTabPageBackground);
++  web_contents()->SetPageBaseBackgroundColor(background_color);
+   update.Set("backgroundColor", skia::SkColorToHexString(background_color));
+   content::WebUIDataSource::Update(Profile::FromWebUI(web_ui()),
+                                    chrome::kChromeUINewTabPageHost,

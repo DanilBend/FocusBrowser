@@ -262,6 +262,14 @@ focus/ui/fix-customize-side-panel.patch
 focus/ui/side-panel.patch
 focus/ui/remove-dead-toolbar-actions.patch
 focus/ui/restore-password-action.patch
+focus/core/stabilize-import-data-handler.patch
+focus/core/stabilize-focus-import-handler.patch
+focus/core/rename-focus-import-product-layer.patch
+focus/core/rename-focus-import-internals.patch
+focus/core/stabilize-chrome-importer.patch
+focus/core/add-import-qa-source-override.patch
+focus/core/harden-import-qa-source-override.patch
+focus/core/isolate-import-qa-profile-discovery.patch
 focus/ui/remove-dead-profile-actions.patch
 focus/ui/clean-up-installed-extension-bubble.patch
 focus/ui/add-specific-error-for-disabled-extension-downloads.patch
@@ -270,9 +278,14 @@ focus/ui/bookmark-button-bg-fix.patch
 focus/ui/restyle-ntp-tiles.patch
 focus/ui/side-panel-webui-general.patch
 focus/ui/side-panel-webui-customize.patch
+focus/ui/ntp-add-shortcut-toggle.patch
+focus/ui/ntp-customize-panel-navigation.patch
+focus/ui/ntp-stable-first-paint.patch
+focus/ui/ntp-search-contrast.patch
 focus/ui/focus-logo-icons.patch
 focus/ui/square-ntp-monograms.patch
 focus/ui/default-theme.patch
+focus/ui/dark-theme-only.patch
 focus/ui/toast.patch
 focus/ui/square-interstitial-buttons.patch
 focus/ui/center-window-on-launch.patch
@@ -331,3 +344,4 @@ focus/core/focusblock-native-service.patch
 focus/ui/textfield-caret-motion.patch
 focus/ui/omnibox-typing-motion.patch
 focus/ui/omnibox-typing-motion-ranges.patch
+focus/ui/neutral-omnibox-actions.patch

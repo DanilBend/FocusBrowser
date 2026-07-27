@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from focus_icon_geometry import (
     BLACK,
     WHITE,
+    render_focus_app_icon,
     render_focus_document,
     render_focus_mark,
     render_focus_tile,
@@ -20,7 +21,7 @@ from focus_icon_geometry import (
 )
 
 
-ICO_SIZES = {16, 24, 32, 48, 64, 128, 256}
+ICO_SIZES = {16, 20, 24, 32, 40, 48, 64, 128, 256}
 
 
 def sha256(path: Path) -> str:
@@ -238,6 +239,38 @@ def assert_transparent_canvas(image: Image.Image, label: str) -> None:
         raise AssertionError(f"{label}: logo canvas corners are not transparent")
 
 
+def assert_app_icon_tile(image: Image.Image, label: str) -> None:
+    """Require a large dark tile and a clearly readable white target."""
+    rgba = image.convert("RGBA")
+    pixels = list(rgba.get_flattened_data())
+    total = rgba.width * rgba.height
+    visible = sum(1 for _, _, _, alpha in pixels if alpha > 127)
+    dark = sum(
+        1 for red, green, blue, alpha in pixels
+        if alpha > 200 and max(red, green, blue) < 64
+    )
+    bright_points = [
+        (index % rgba.width, index // rgba.width)
+        for index, (red, green, blue, alpha) in enumerate(pixels)
+        if alpha > 200 and min(red, green, blue) > 200
+    ]
+    if visible < round(total * 0.78):
+        raise AssertionError(f"{label}: app tile does not fill its icon slot")
+    if dark < round(total * 0.18):
+        raise AssertionError(f"{label}: dark app tile is missing or too small")
+    if len(bright_points) < max(6, round(total * 0.035)):
+        raise AssertionError(f"{label}: white target is not readable")
+    left = min(point[0] for point in bright_points)
+    right = max(point[0] for point in bright_points)
+    top = min(point[1] for point in bright_points)
+    bottom = max(point[1] for point in bright_points)
+    if (
+        right - left + 1 < round(rgba.width * 0.68)
+        or bottom - top + 1 < round(rgba.height * 0.68)
+    ):
+        raise AssertionError(f"{label}: target optical footprint is too small")
+
+
 def assert_visible_on_light_and_dark(image: Image.Image, label: str) -> None:
     """Require meaningful black/white detail on both extreme theme colors."""
     rgba = image.convert("RGBA")
@@ -287,7 +320,7 @@ def expected_active_png(relative: str, size: int) -> Image.Image:
     ):
         return render_focus_tile(size, rounded=False)
     if relative.endswith("components/focus_onboarding/public/favicon.png"):
-        return render_focus_tile(size)
+        return render_focus_app_icon(size)
     if relative.startswith("third_party/ublock/img/"):
         return render_focusblock_shield(size, inverted="-off.png" in relative)
     if relative.startswith("third_party/focus_youtube/images/"):
@@ -334,10 +367,10 @@ def audit_branding(repo: Path) -> dict[str, str]:
     resources = repo / "focus-chromium" / "resources"
     hashes: dict[str, str] = {}
     exact_renders = {
-        "branding/app_icon/raw.png": render_focus_tile(1024),
+        "branding/app_icon/raw.png": render_focus_app_icon(1024),
         "branding/app_icon/file.png": render_focus_document(512),
-        "branding/focus_browser_app_icon.png": render_focus_tile(512),
-        "branding/product_logo_preview.png": render_focus_tile(256),
+        "branding/focus_browser_app_icon.png": render_focus_app_icon(512),
+        "branding/product_logo_preview.png": render_focus_app_icon(256),
         "branding/product_logo_22_mono.png": render_focus_mark(
             22, color=BLACK
         ),
@@ -357,7 +390,10 @@ def audit_branding(repo: Path) -> dict[str, str]:
             relative in exact_renders
             and relative != "branding/product_logo_22_mono.png"
         ):
-            assert_transparent_canvas(image, relative)
+            if relative == "branding/app_icon/file.png":
+                assert_transparent_canvas(image, relative)
+            else:
+                assert_app_icon_tile(image, relative)
             assert_visible_on_light_and_dark(image, relative)
         if relative in exact_renders:
             assert_exact_image(image, exact_renders[relative], relative)
@@ -384,7 +420,7 @@ def audit_branding(repo: Path) -> dict[str, str]:
             assert_monochrome(
                 frame, f"branding/focus_browser_app_icon.ico@{size}"
             )
-            assert_transparent_canvas(
+            assert_app_icon_tile(
                 frame, f"branding/focus_browser_app_icon.ico@{size}"
             )
             assert_visible_on_light_and_dark(
@@ -392,7 +428,7 @@ def audit_branding(repo: Path) -> dict[str, str]:
             )
             assert_exact_image(
                 frame,
-                render_focus_tile(size),
+                render_focus_app_icon(size),
                 f"branding/focus_browser_app_icon.ico@{size}",
             )
     hashes["branding/focus_browser_app_icon.ico"] = sha256(app_ico)
@@ -420,6 +456,8 @@ def label_font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
 def render_contact_sheet(active: Path, output: Path) -> None:
     cards = (
         ("Browser 256", "chrome/app/theme/chromium/win/chromium.ico", 256),
+        ("NTP tab 16", "chrome/app/theme/default_100_percent/common/favicon_ntp.png", None),
+        ("NTP tab 32", "chrome/app/theme/default_200_percent/common/favicon_ntp.png", None),
         ("App list 128", "chrome/app/theme/chromium/win/app_list.ico", 128),
         ("Document 128", "chrome/app/theme/chromium/win/chromium_doc.ico", 128),
         ("Setup 128", "chrome/installer/setup/setup.ico", 128),
@@ -522,10 +560,13 @@ def main() -> None:
             if image.size != expected_size:
                 raise AssertionError(
                     f"{relative}: expected {expected_size}, got {image.size}"
-                )
+            )
             actual = image.convert("RGBA")
             assert_monochrome(actual, relative)
-            assert_transparent_canvas(actual, relative)
+            if relative == "components/focus_onboarding/public/favicon.png":
+                assert_app_icon_tile(actual, relative)
+            else:
+                assert_transparent_canvas(actual, relative)
             assert_visible_on_light_and_dark(actual, relative)
             assert_exact_image(
                 actual,
@@ -553,14 +594,18 @@ def main() -> None:
             for size in sizes:
                 frame = image.ico.getimage((size, size)).convert("RGBA")
                 assert_monochrome(frame, f"{relative}@{size}")
-                assert_transparent_canvas(
-                    frame, f"{relative}@{size}"
+                is_document = relative.endswith(
+                    ("chromium_doc.ico", "chromium_pdf.ico")
                 )
+                if is_document:
+                    assert_transparent_canvas(frame, f"{relative}@{size}")
+                else:
+                    assert_app_icon_tile(frame, f"{relative}@{size}")
                 assert_visible_on_light_and_dark(frame, f"{relative}@{size}")
                 renderer = (
                     render_focus_document
-                    if relative.endswith(("chromium_doc.ico", "chromium_pdf.ico"))
-                    else render_focus_tile
+                    if is_document
+                    else render_focus_app_icon
                 )
                 assert_exact_image(
                     frame,
@@ -682,6 +727,24 @@ def main() -> None:
                 f"{path}: expected {(size, size)}, got {image.size}"
             )
         assert_monochrome(image, str(path))
+        assert_app_icon_tile(image, str(path))
+        assert_visible_on_light_and_dark(image, str(path))
+        assert_exact_image(image, render_focus_app_icon(size), str(path))
+
+    canonical_ntp_favicons = (
+        repo / "focus-chromium" / "resources" / "favicons"
+    )
+    for size in (16, 32):
+        path = canonical_ntp_favicons / f"favicon_ntp_{size}.png"
+        if not path.is_file():
+            raise AssertionError(f"missing canonical NTP favicon: {path}")
+        with Image.open(path) as source:
+            image = source.convert("RGBA")
+        if image.size != (size, size):
+            raise AssertionError(
+                f"{path}: expected {(size, size)}, got {image.size}"
+            )
+        assert_monochrome(image, str(path))
         assert_transparent_canvas(image, str(path))
         assert_visible_on_light_and_dark(image, str(path))
         assert_exact_image(image, render_focus_tile(size), str(path))
@@ -701,10 +764,13 @@ def main() -> None:
             for size in sizes:
                 frame = image.ico.getimage((size, size)).convert("RGBA")
                 assert_monochrome(frame, f"{path}@{size}")
-                assert_transparent_canvas(frame, f"{path}@{size}")
+                if name == "app.ico":
+                    assert_app_icon_tile(frame, f"{path}@{size}")
+                else:
+                    assert_transparent_canvas(frame, f"{path}@{size}")
                 assert_visible_on_light_and_dark(frame, f"{path}@{size}")
                 renderer = (
-                    render_focus_tile if name == "app.ico"
+                    render_focus_app_icon if name == "app.ico"
                     else render_focus_document
                 )
                 assert_exact_image(frame, renderer(size), f"{path}@{size}")

@@ -254,6 +254,13 @@ Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 public static class FocusOmniboxNativeMethods {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+  }
   [DllImport("user32.dll")]
   public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")]
@@ -262,6 +269,10 @@ public static class FocusOmniboxNativeMethods {
   public static extern bool SetWindowPos(
       IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy,
       uint flags);
+  [DllImport("user32.dll", SetLastError = true)]
+  public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll", SetLastError = true)]
+  public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint flags);
   [DllImport("shcore.dll")]
   public static extern int SetProcessDpiAwareness(int value);
 }
@@ -273,6 +284,66 @@ try {
 } catch {
     # Windows may reject a second DPI-awareness request; the host's existing
     # awareness remains valid in that case.
+}
+
+function Copy-OmniboxRectangle(
+    [Drawing.Rectangle]$Rectangle,
+    [IntPtr]$WindowHandle
+) {
+    try {
+        return Copy-ScreenRectangle $Rectangle
+    } catch [ComponentModel.Win32Exception] {
+        # CopyFromScreen is unavailable on some restricted/virtual desktops.
+        # Print the exact owned browser window into an off-screen bitmap and
+        # crop the same UIA-derived address-bar rectangle instead.
+        $nativeRect = [FocusOmniboxNativeMethods+RECT]::new()
+        if (-not [FocusOmniboxNativeMethods]::GetWindowRect(
+                $WindowHandle, [ref]$nativeRect)) {
+            throw
+        }
+        $width = $nativeRect.Right - $nativeRect.Left
+        $height = $nativeRect.Bottom - $nativeRect.Top
+        if ($width -le 0 -or $height -le 0) {
+            throw 'PrintWindow fallback received invalid browser bounds'
+        }
+
+        $windowBitmap = [Drawing.Bitmap]::new(
+            $width, $height, [Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $graphics = [Drawing.Graphics]::FromImage($windowBitmap)
+        $hdc = [IntPtr]::Zero
+        try {
+            $hdc = $graphics.GetHdc()
+            $printed = [FocusOmniboxNativeMethods]::PrintWindow(
+                $WindowHandle, $hdc, 2)
+            if (-not $printed) {
+                throw [ComponentModel.Win32Exception]::new(
+                    [Runtime.InteropServices.Marshal]::GetLastWin32Error(),
+                    'PrintWindow fallback failed')
+            }
+        } finally {
+            if ($hdc -ne [IntPtr]::Zero) {
+                $graphics.ReleaseHdc($hdc)
+            }
+            $graphics.Dispose()
+        }
+
+        try {
+            $crop = [Drawing.Rectangle]::new(
+                $Rectangle.Left - $nativeRect.Left,
+                $Rectangle.Top - $nativeRect.Top,
+                $Rectangle.Width,
+                $Rectangle.Height)
+            if ($crop.Left -lt 0 -or $crop.Top -lt 0 -or
+                $crop.Right -gt $windowBitmap.Width -or
+                $crop.Bottom -gt $windowBitmap.Height) {
+                throw 'PrintWindow fallback crop is outside browser bounds'
+            }
+            return $windowBitmap.Clone(
+                $crop, [Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        } finally {
+            $windowBitmap.Dispose()
+        }
+    }
 }
 
 function Set-OmniboxValueWithFallback(
@@ -415,7 +486,7 @@ try {
     Assert-Qa ($captureRect.Width -gt 300 -and $captureRect.Height -gt 20) `
         'Address bar capture rectangle is valid'
 
-    $baselineBitmap = Copy-ScreenRectangle $captureRect
+    $baselineBitmap = Copy-OmniboxRectangle $captureRect $windowHandle
     $baselinePath = Join-Path $EvidenceDirectory 'omnibox-before-insert.png'
     $baselineBitmap.Save($baselinePath, [Drawing.Imaging.ImageFormat]::Png)
 
@@ -441,7 +512,7 @@ try {
         # Capture first at the requested deadline. UI Automation property reads
         # can take a frame and would weaken first-frame glyph verification.
         $captureElapsedMs = $watch.ElapsedMilliseconds
-        $bitmap = Copy-ScreenRectangle $captureRect
+        $bitmap = Copy-OmniboxRectangle $captureRect $windowHandle
         $bitmaps.Add($bitmap)
         $index = $bitmaps.Count - 1
         $framePath = Join-Path $EvidenceDirectory `

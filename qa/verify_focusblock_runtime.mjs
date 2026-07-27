@@ -140,11 +140,15 @@ async function stopOwnedBrowser(child, browserSession) {
   if (!child || child.exitCode !== null) {
     return;
   }
-  if (browserSession) {
-    await Promise.race([
-      browserSession.send('Browser.close').catch(() => null),
-      delay(2000),
-    ]);
+  if (browserSession?.socket?.readyState === WebSocket.OPEN) {
+    try {
+      await Promise.race([
+        browserSession.send('Browser.close'),
+        delay(2000),
+      ]);
+    } catch {
+      // Fall through to exact-owned-PID cleanup below.
+    }
   }
   if (await waitForChildExit(child, 8000)) {
     return;
@@ -189,6 +193,7 @@ function fixtureHtml() {
     },
   };
 </script>
+<script src="${adOrigin}/cold-ad.js?phase=cold-start"></script>
 </body>
 </html>`;
 }
@@ -246,7 +251,8 @@ const server = createServer((request, response) => {
     response.end();
     return;
   }
-  if (url.pathname === '/direct-ad.js' ||
+  if (url.pathname === '/cold-ad.js' ||
+      url.pathname === '/direct-ad.js' ||
       url.pathname === '/redirect-ad.js') {
     javascript(`window.__focusBlockFixture.executed.push(` +
                `${JSON.stringify(url.pathname)});`);
@@ -288,7 +294,7 @@ const launchArguments = [
   '--remote-allow-origins=*',
   '--host-resolver-rules=MAP ad.doubleclick.net 127.0.0.1',
   `--user-data-dir=${profileDir}`,
-  'about:blank',
+  `${fixtureOrigin}/`,
 ];
 const browser = spawn(chromePath, launchArguments, {
   cwd: path.dirname(chromePath),
@@ -468,6 +474,8 @@ try {
                'Redirect endpoint was not reached once');
   assert.equal(routeDelta('/redirect-ad.js'), 0,
                'Blocked redirect target reached the server');
+  assert.equal(hits.byRoute['/cold-ad.js'] || 0, 0,
+               'Cold-start advertising request reached the network');
 
   const blockedObserved = [directDoubleclick, redirectDoubleclick]
       .filter(probe => Boolean(blockedFailure(probe))).length;
@@ -479,6 +487,9 @@ try {
     fixtureOrigin,
     engineReadiness: readiness,
     checks: {
+      coldStart: {
+        targetHits: hits.byRoute['/cold-ad.js'] || 0,
+      },
       allowedDirect: {
         outcome: allowedDirect.result.outcome,
         serverHits: routeDelta('/allowed.js'),

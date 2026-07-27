@@ -418,7 +418,7 @@ class FocusBlockProxyingURLLoaderFactory final
 
     const GURL top_level_url =
         TopLevelUrlForRequest(factory_top_level_url_, request);
-    if (!service_->enabled() || !service_->engine_ready() ||
+    if (!service_->enabled() ||
         (top_level_url.SchemeIsHTTPOrHTTPS() &&
          !service_->IsEnabledForUrl(top_level_url))) {
       target_factory_->CreateLoaderAndStart(

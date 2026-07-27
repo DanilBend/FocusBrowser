@@ -1,0 +1,19 @@
+--- a/chrome/browser/ui/color/omnibox_color_mixer.cc
++++ b/chrome/browser/ui/color/omnibox_color_mixer.cc
+@@ -514,6 +514,16 @@ void AddOmniboxColorMixer(ui::ColorProvi
+ 
+   // Override omnibox colors per CR2023 spec.
+   ApplyOmniboxCR2023Colors(mixer, key);
++
++  // Keep omnibox actions and their keyboard focus treatment neutral. The
++  // primary system color is intentionally reserved for content links; using it
++  // for action chips makes controls such as "Switch to this tab" look detached
++  // from Focus Browser's graphite toolbar.
++  mixer[kColorOmniboxResultsFocusIndicator] = {ui::kColorSysOnSurface};
++  mixer[kColorOmniboxResultsButtonBorder] = {ui::kColorSysNeutralOutline};
++  mixer[kColorOmniboxResultsButtonIcon] = {ui::kColorSysOnSurfaceSubtle};
++  mixer[kColorOmniboxResultsButtonIconSelected] = {
++      kColorOmniboxResultsButtonIcon};
+ 
+   // Apply specific baseline colors for the composebox submit button.
+   ApplyComposeboxBaselineColors(mixer, key);

@@ -35,6 +35,7 @@ namespace {
 
 constexpr size_t kMaxCosmeticNames = 4096;
 constexpr size_t kMaxCosmeticCssBytes = 1024 * 1024;
+constexpr size_t kMaxPendingMatchRequests = 4096;
 
 bool EnsureGhosteryV8Initialized() {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
@@ -223,8 +224,8 @@ void FocusBlockService::ShouldBlock(
     const GURL& source_url,
     ShouldBlockCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-  if (!engine_ready_ || IsOutermostMainDocumentRequest(request) ||
-      !IsEligibleUrl(request.url) || !enabled()) {
+  if (IsOutermostMainDocumentRequest(request) || !IsEligibleUrl(request.url) ||
+      !enabled()) {
     std::move(callback).Run(false);
     return;
   }
@@ -244,6 +245,32 @@ void FocusBlockService::ShouldBlock(
   match_request.url = request.url.spec();
   match_request.source_url = effective_source_url.spec();
   match_request.type = RequestTypeForRequest(request);
+
+  if (!engine_ready_) {
+    if (!engine_initialization_finished_ &&
+        pending_match_requests_.size() < kMaxPendingMatchRequests) {
+      pending_match_requests_.push_back(PendingMatchRequest{
+          std::move(match_request), top_level_url, std::move(callback)});
+      return;
+    }
+    // Initialization failed or the bounded startup queue is full. Fail open
+    // instead of hanging the network stack indefinitely.
+    std::move(callback).Run(false);
+    return;
+  }
+
+  DispatchMatch(std::move(match_request), top_level_url, std::move(callback));
+}
+
+void FocusBlockService::DispatchMatch(GhosteryMatchRequest match_request,
+                                      const GURL& top_level_url,
+                                      ShouldBlockCallback callback) {
+  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  if (!prefs_ || !enabled() ||
+      (IsEligibleUrl(top_level_url) && !IsEnabledForUrl(top_level_url))) {
+    std::move(callback).Run(false);
+    return;
+  }
   engine_.AsyncCall(&FocusBlockGhosteryEngine::Match)
       .WithArgs(std::move(match_request))
       .Then(base::BindOnce(
@@ -362,6 +389,11 @@ base::WeakPtr<FocusBlockService> FocusBlockService::GetWeakPtr() {
 void FocusBlockService::Shutdown() {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
   weak_ptr_factory_.InvalidateWeakPtrs();
+  engine_initialization_finished_ = true;
+  for (PendingMatchRequest& pending : pending_match_requests_) {
+    std::move(pending.callback).Run(false);
+  }
+  pending_match_requests_.clear();
   pref_change_registrar_.RemoveAll();
   for (Observer& observer : observers_) {
     observer.OnFocusBlockServiceShuttingDown();
@@ -380,6 +412,7 @@ void FocusBlockService::StartEngineBuild() {
   // before the dedicated engine sequence constructs its private isolate.
   if (!EnsureGhosteryV8Initialized()) {
     LOG(ERROR) << "FocusBlock could not initialize Gin for Ghostery";
+    OnEngineReady(false);
     return;
   }
   constexpr std::array<int, 3> kResourceIds = {
@@ -404,6 +437,7 @@ void FocusBlockService::StartEngineBuild() {
       bundle.LoadDataResourceBytes(IDR_FOCUS_GHOSTERY_ADBLOCKER_BUNDLE_JS);
   if (filter_text.empty() || !engine_bundle || engine_bundle->size() == 0) {
     LOG(ERROR) << "FocusBlock could not load the bundled Ghostery engine";
+    OnEngineReady(false);
     return;
   }
   std::string bundle_source(
@@ -422,9 +456,21 @@ void FocusBlockService::StartEngineBuild() {
 
 void FocusBlockService::OnEngineReady(bool ready) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  engine_initialization_finished_ = true;
   engine_ready_ = ready;
   if (!ready) {
     LOG(ERROR) << "FocusBlock failed to initialize Ghostery 2.18.1";
+  }
+  std::vector<PendingMatchRequest> pending_requests =
+      std::move(pending_match_requests_);
+  pending_match_requests_.clear();
+  for (PendingMatchRequest& pending : pending_requests) {
+    if (ready) {
+      DispatchMatch(std::move(pending.request), pending.top_level_url,
+                    std::move(pending.callback));
+    } else {
+      std::move(pending.callback).Run(false);
+    }
   }
   NotifyStateChanged();
 }
