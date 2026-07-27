@@ -4,6 +4,7 @@
 
 #include "chrome/browser/ui/webui/settings/settings_default_browser_handler.h"
 
+#include <string>
 #include <utility>
 
 #include "base/functional/bind.h"
@@ -80,12 +81,17 @@ void DefaultBrowserHandler::RegisterMessages() {
 }
 
 void DefaultBrowserHandler::OnJavascriptAllowed() {
-  PrefService* prefs = g_browser_process->local_state();
-  local_state_pref_registrar_.Init(prefs);
-  local_state_pref_registrar_.Add(
-      prefs::kDefaultBrowserSettingEnabled,
-      base::BindRepeating(&DefaultBrowserHandler::OnDefaultBrowserSettingChange,
-                          base::Unretained(this)));
+  PrefService* local_state =
+      g_browser_process ? g_browser_process->local_state() : nullptr;
+  if (local_state && local_state->FindPreference(
+                         prefs::kDefaultBrowserSettingEnabled)) {
+    local_state_pref_registrar_.Init(local_state);
+    local_state_pref_registrar_.Add(
+        prefs::kDefaultBrowserSettingEnabled,
+        base::BindRepeating(
+            &DefaultBrowserHandler::OnDefaultBrowserSettingChange,
+            base::Unretained(this)));
+  }
 
   default_browser_controller_ =
       default_browser::DefaultBrowserManager::CreateControllerFor(
@@ -109,23 +115,33 @@ void DefaultBrowserHandler::OnJavascriptDisallowed() {
 
 void DefaultBrowserHandler::RequestDefaultBrowserState(
     const base::ListValue& args) {
+  if (args.size() != 1u || !args[0].is_string()) {
+    return;
+  }
+
+  const std::string callback_id = args[0].GetString();
   AllowJavascript();
 
-  CHECK_EQ(args.size(), 1U);
-  auto& callback_id = args[0].GetString();
-
-  default_browser::DefaultBrowserManager::From(g_browser_process)
-      ->GetDefaultBrowserState(
-          base::BindOnce(&DefaultBrowserHandler::OnDefaultBrowserWorkerFinished,
-                         weak_ptr_factory_.GetWeakPtr(), callback_id));
+  auto* manager =
+      default_browser::DefaultBrowserManager::From(g_browser_process);
+  if (!manager) {
+    OnDefaultCheckFinished(callback_id, /*can_pin=*/false,
+                           shell_integration::UNKNOWN_DEFAULT);
+    return;
+  }
+  manager->GetDefaultBrowserState(
+      base::BindOnce(&DefaultBrowserHandler::OnDefaultBrowserWorkerFinished,
+                     weak_ptr_factory_.GetWeakPtr(), callback_id));
 }
 
 void DefaultBrowserHandler::HandleRequestUserValueStringsFeatureState(
     const base::ListValue& args) {
-  AllowJavascript();
+  if (args.size() != 1u || !args[0].is_string()) {
+    return;
+  }
 
-  CHECK_EQ(args.size(), 1U);
-  auto& callback_id = args[0].GetString();
+  const std::string callback_id = args[0].GetString();
+  AllowJavascript();
 
   bool is_enabled =
       base::FeatureList::IsEnabled(features::kUserValueDefaultBrowserStrings);
@@ -163,17 +179,24 @@ void DefaultBrowserHandler::SetAsDefaultBrowser(const base::ListValue& args) {
 
   // If the user attempted to make Chrome the default browser, notify
   // them when this changes and close all open prompts.
-  chrome::startup::default_prompt::UpdatePrefsForDismissedPrompt(
-      Profile::FromWebUI(web_ui()));
+  if (Profile* profile = Profile::FromWebUI(web_ui())) {
+    chrome::startup::default_prompt::UpdatePrefsForDismissedPrompt(profile);
+  }
   DefaultBrowserPromptManager::GetInstance()->CloseAllPrompts(
       DefaultBrowserPromptManager::CloseReason::kAccept);
 }
 
 void DefaultBrowserHandler::OnDefaultBrowserSettingChange() {
-  default_browser::DefaultBrowserManager::From(g_browser_process)
-      ->GetDefaultBrowserState(
-          base::BindOnce(&DefaultBrowserHandler::OnDefaultBrowserWorkerFinished,
-                         weak_ptr_factory_.GetWeakPtr(), std::nullopt));
+  auto* manager =
+      default_browser::DefaultBrowserManager::From(g_browser_process);
+  if (!manager) {
+    OnDefaultCheckFinished(std::nullopt, /*can_pin=*/false,
+                           shell_integration::UNKNOWN_DEFAULT);
+    return;
+  }
+  manager->GetDefaultBrowserState(
+      base::BindOnce(&DefaultBrowserHandler::OnDefaultBrowserWorkerFinished,
+                     weak_ptr_factory_.GetWeakPtr(), std::nullopt));
 }
 
 void DefaultBrowserHandler::RecordSetAsDefaultUMA() {
@@ -194,8 +217,9 @@ void DefaultBrowserHandler::OnDefaultBrowserWorkerFinished(
   if (state == shell_integration::IS_DEFAULT) {
     // Notify the user in the future if Chrome ceases to be the user's chosen
     // default browser.
-    chrome::startup::default_prompt::ResetPromptPrefs(
-        Profile::FromWebUI(web_ui()));
+    if (Profile* profile = Profile::FromWebUI(web_ui())) {
+      chrome::startup::default_prompt::ResetPromptPrefs(profile);
+    }
   } else {
 #if BUILDFLAG(IS_WIN)
     browser_util::ShouldOfferToPin(

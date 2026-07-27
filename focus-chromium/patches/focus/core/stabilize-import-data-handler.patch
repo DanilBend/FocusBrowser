@@ -1,0 +1,218 @@
+--- a/chrome/browser/ui/webui/settings/import_data_handler.cc
++++ b/chrome/browser/ui/webui/settings/import_data_handler.cc
+@@ -10,8 +10,6 @@
+ #include <string>
+ #include <utility>
+ 
+-#include "base/check.h"
+-#include "base/check_op.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
+ #include "base/logging.h"
+@@ -78,6 +76,7 @@
+ void ImportDataHandler::OnJavascriptDisallowed() {
+   // Cancels outstanding profile list detections.
+   importer_list_.reset();
++  importer_list_loaded_ = false;
+ 
+   // When the WebUI is unloading, we ignore all further updates from the host.
+   // Because we're no longer listening to the `ImportEnded` callback, we must
+@@ -95,7 +94,31 @@
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+ 
+   if (!imported_items) {
++    if (IsJavascriptAllowed()) {
++      FireWebUIListener("import-data-status-changed",
++                        base::Value(kImportStatusFailed));
++    }
+     return;
+   }
+ 
++  content::WebUI* ui = web_ui();
++  content::WebContents* web_contents = ui ? ui->GetWebContents() : nullptr;
++  if (!web_contents) {
++    LOG(ERROR) << "Cannot start import without a live profile and WebContents.";
++    if (IsJavascriptAllowed()) {
++      FireWebUIListener("import-data-status-changed",
++                        base::Value(kImportStatusFailed));
++    }
++    return;
++  }
++  Profile* profile = Profile::FromWebUI(ui);
++  if (!profile) {
++    LOG(ERROR) << "Cannot start import without a live profile.";
++    if (IsJavascriptAllowed()) {
++      FireWebUIListener("import-data-status-changed",
++                        base::Value(kImportStatusFailed));
++    }
++    return;
++  }
++
+   // If another import is already ongoing, let it finish silently.
+@@ -109,10 +132,8 @@
+ 
+   importer_host_ = new ExternalProcessImporterHost();
+   importer_host_->set_observer(this);
+-  Profile* profile = Profile::FromWebUI(web_ui());
+ 
+-  importer_host_->set_parent_window(
+-      web_ui()->GetWebContents()->GetTopLevelNativeWindow());
+-  importer_host_->set_parent_view(web_ui()->GetWebContents()->GetNativeView());
++  importer_host_->set_parent_window(web_contents->GetTopLevelNativeWindow());
++  importer_host_->set_parent_view(web_contents->GetNativeView());
+ 
+   importer_host_->StartImportSettings(source_profile, profile, imported_items,
+@@ -124,38 +145,45 @@
+ 
+ void ImportDataHandler::HandleImportData(const base::ListValue& args) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+-  const auto& list = args;
+-  CHECK_GE(list.size(), 2u);
+-
+-  int browser_index = list[0].GetInt();
+-
+-  const base::Value& types = list[1];
+-  CHECK(types.is_dict());
+-
+-  if (!importer_list_loaded_ || browser_index < 0 ||
++  AllowJavascript();
++
++  if (args.size() < 2u || !args[0].is_int() || !args[1].is_dict()) {
++    LOG(ERROR) << "Rejected malformed importData WebUI message.";
++    FireWebUIListener("import-data-status-changed",
++                      base::Value(kImportStatusFailed));
++    return;
++  }
++
++  const int browser_index = args[0].GetInt();
++  const base::Value& types = args[1];
++
++  if (!importer_list_loaded_ || !importer_list_ || browser_index < 0 ||
+       browser_index >= static_cast<int>(importer_list_->count())) {
+-    // Prevent out-of-bounds access.
++    LOG(ERROR) << "Rejected importData with an unavailable profile index.";
++    FireWebUIListener("import-data-status-changed",
++                      base::Value(kImportStatusFailed));
+     return;
+   }
+ 
+   const base::DictValue& type_dict = types.GetDict();
+   uint16_t selected_items = user_data_importer::NONE;
+-  if (*type_dict.FindBool(prefs::kImportDialogAutofillFormData)) {
++  if (type_dict.FindBool(prefs::kImportDialogAutofillFormData)
++          .value_or(false)) {
+     selected_items |= user_data_importer::AUTOFILL_FORM_DATA;
+   }
+-  if (*type_dict.FindBool(prefs::kImportDialogBookmarks)) {
++  if (type_dict.FindBool(prefs::kImportDialogBookmarks).value_or(false)) {
+     selected_items |= user_data_importer::FAVORITES;
+   }
+-  if (*type_dict.FindBool(prefs::kImportDialogHistory)) {
++  if (type_dict.FindBool(prefs::kImportDialogHistory).value_or(false)) {
+     selected_items |= user_data_importer::HISTORY;
+   }
+-  if (*type_dict.FindBool(prefs::kImportDialogSavedPasswords)) {
++  if (type_dict.FindBool(prefs::kImportDialogSavedPasswords).value_or(false)) {
+     selected_items |= user_data_importer::PASSWORDS;
+   }
+-  if (*type_dict.FindBool(prefs::kImportDialogSearchEngine)) {
++  if (type_dict.FindBool(prefs::kImportDialogSearchEngine).value_or(false)) {
+     selected_items |= user_data_importer::SEARCH_ENGINES;
+   }
+-  if (*type_dict.FindBool(prefs::kImportDialogExtensions)) {
++  if (type_dict.FindBool(prefs::kImportDialogExtensions).value_or(false)) {
+     selected_items |= user_data_importer::EXTENSIONS;
+   }
+ 
+@@ -169,16 +197,22 @@
+   } else {
+     LOG(WARNING) << "There were no settings to import from '"
+                  << source_profile.importer_name << "'.";
++    FireWebUIListener("import-data-status-changed",
++                      base::Value(kImportStatusFailed));
+   }
+ }
+ 
+ void ImportDataHandler::HandleInitializeImportDialog(
+     const base::ListValue& args) {
++  if (args.size() != 1u || !args[0].is_string()) {
++    LOG(ERROR) << "Rejected malformed initializeImportDialog WebUI message.";
++    return;
++  }
++
++  const std::string& callback_id = args[0].GetString();
+   AllowJavascript();
+ 
+-  CHECK_EQ(1U, args.size());
+-  const std::string& callback_id = args[0].GetString();
+-
++  importer_list_loaded_ = false;
+   importer_list_ = std::make_unique<ImporterList>();
+   importer_list_->DetectSourceProfiles(
+       g_browser_process->GetApplicationLocale(),
+@@ -191,25 +225,35 @@
+     const base::ListValue& args) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+ 
+-  if (select_file_dialog_) {
+-    return;
+-  }
+-
+-  DCHECK(args.empty());
++  if (!args.empty() || select_file_dialog_) {
++    return;
++  }
++
++  content::WebUI* ui = web_ui();
++  content::WebContents* web_contents = ui ? ui->GetWebContents() : nullptr;
++  BrowserWindowInterface* browser =
++      web_contents ? GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
++                         web_contents)
++                   : nullptr;
++  if (!web_contents || !browser || !browser->GetWindow()) {
++    LOG(ERROR) << "Cannot open bookmark import dialog without a live window.";
++    if (IsJavascriptAllowed()) {
++      FireWebUIListener("import-data-status-changed",
++                        base::Value(kImportStatusFailed));
++    }
++    return;
++  }
++
+   select_file_dialog_ = ui::SelectFileDialog::Create(
+       this,
+-      std::make_unique<ChromeSelectFilePolicy>(web_ui()->GetWebContents()));
++      std::make_unique<ChromeSelectFilePolicy>(web_contents));
+ 
+   ui::SelectFileDialog::FileTypeInfo file_type_info;
+   file_type_info.extensions.resize(1);
+   file_type_info.extensions[0].push_back(FILE_PATH_LITERAL("html"));
+ 
+-  BrowserWindowInterface* browser =
+-      GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
+-          web_ui()->GetWebContents());
+-
+   select_file_dialog_->SelectFile(
+       ui::SelectFileDialog::SELECT_OPEN_FILE, std::u16string(),
+       base::FilePath(), &file_type_info, 0, base::FilePath::StringType(),
+       browser->GetWindow()->GetNativeWindow(), nullptr);
+ }
+@@ -216,6 +260,9 @@
+ 
+ void ImportDataHandler::SendBrowserProfileData(const std::string& callback_id) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
++  if (!importer_list_) {
++    return;
++  }
+   importer_list_loaded_ = true;
+ 
+   base::ListValue browser_profiles;
+@@ -268,6 +315,9 @@
+ void ImportDataHandler::ImportEnded() {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+ 
++  if (!importer_host_) {
++    return;
++  }
+   importer_host_->set_observer(nullptr);
+   importer_host_ = nullptr;
+ 

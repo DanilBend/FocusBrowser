@@ -2,6 +2,34 @@
 
 <p><a href="CHANGELOG.md">Русский</a> · <strong>English</strong></p>
 
+## 1.0.4 — 2026-07-27
+
+- The browser interface now uses one consistent dark theme: light and system
+  appearance controls are removed, including for existing profiles.
+- Wallpaper selection remains available in the compact new-tab customization
+  panel.
+- Increased the usable size of the product icon on the taskbar, desktop and in
+  the installer; the mark remains crisp at system sizes from 16 through 256 px.
+- Strengthened bookmark and history import stability: first-run setup and
+  browser settings now use one consistent native import route.
+- Fixed regressions in the FocusYoutube address-bar button, with repeatable
+  coverage for startup, navigation and restored tabs.
+- Advanced the installer and updater to the monotonic `1.0.4.0` version. An
+  update is accepted only after mandatory feed-signature and artifact-metadata
+  validation.
+- Expanded pre-release checks for version metadata, installation, profile
+  preservation and reinstall behavior. Publication remains blocked until all
+  quality gates pass.
+
+### Windows x64 artifacts
+
+- `FocusBrowser_1.0.4_x64-installer.exe` — SHA-256
+  `1F54D5486E763214C3A319BD6CCB48E55D875DA237AF5458F5A1BF3BFFDF112E`
+- `FocusBrowser_1.0.4_x64-mini-installer.exe` — SHA-256
+  `45F2B8A496FFE2478C360C3AE56679553EFCD52C78EE541812573EC8E4A5B5FA`
+- `FocusBrowser_1.0.4_x64-windows.zip` — SHA-256
+  `550D5E77FCFA30E1C56911C76549F34C507FC55BBC8EB0A7D80EC58A36B5EAE5`
+
 ## 1.0.3 — 2026-07-25
 
 - Fixed FocusYoutube visibility: its icon now appears automatically after
@@ -15,7 +43,7 @@
 
 - FocusBlock's native engine was updated while retaining its interface, global
   and per-site controls, and blocked-request counters.
-- FocusYoutube now has a stable native crossed-out YouTube icon inside the
+- FocusYoutube now has a stable native crossed-out video icon inside the
   address bar and 25 essential controls.
 - Added a native next-launch prompt for discovered updates: **Update now**,
   **Remind later**, or skip that exact version. The production feed is published
@@ -36,21 +64,21 @@
 
 ## 1.0.1 — 2026-07-22
 
-- Text entry now follows a crisp Word-like model: each glyph is painted at its
-  final position immediately, without a translucent layer, fractional offset
-  or blur; Backspace/Delete no longer shifts a neighbouring glyph.
+- Text entry now follows a crisp document-editor model: each glyph is painted
+  at its final position immediately, without a translucent layer, fractional
+  offset or blur; Backspace/Delete no longer shifts a neighbouring glyph.
 - Added a smooth 110 ms caret glide without delaying the committed text, DOM,
   IME or accessibility state.
 - Fixed IME handling: provisional composition text no longer animates
   repeatedly, while committed text receives one correct paint update.
-- Fixed a critical crash after successful sign-in on Google, YouTube, Gmail and
-  other sites: the native save-password prompt no longer closes the browser.
+- Fixed a critical crash after successful sign-in on mail, video and other
+  sites: the native save-password prompt no longer closes the browser.
 - The smooth-motion preference and the operating system reduced-motion setting
   immediately disable glyph and caret motion.
 - Fixed a FocusYoutube startup race: its button appears immediately on supported
-  YouTube pages, while the native panel waits safely for the built-in component
+  video pages, while the native panel waits safely for the built-in component
   and remains open during the initial navigation.
-- Made the repository and GitHub templates bilingual: updated the README,
+- Made the repository and its templates bilingual: updated the README,
   changelog, contributing, privacy and security documentation, plus Issue and
   Pull Request templates in Russian and English.
 - Expanded automated and visual QA for typing, paste, deletion, caret motion,
@@ -75,13 +103,14 @@
 - Native FocusBlock protection with a simple Russian control surface and a
   shield at the right edge inside the address bar.
 - Built-in FocusYoutube panel with 20 essential distraction controls.
-- Russian first-run setup, detected-profile Chrome bookmark/history import and
-  shortcut selection.
+- Russian first-run setup, bookmark/history import from a detected standard
+  profile of a compatible browser, and shortcut selection.
 - Minimal new-tab page containing only search and shortcuts.
 - Optional smooth interface and text-input animations.
-- Meditation page in the main menu with direct YouTube playback.
-- Chromium password manager, Chrome Web Store installation path, proprietary
-  codecs and Widevine integration hooks.
+- Meditation page in the main menu with direct opening of the configured
+  external video.
+- Built-in password manager, extension installation from a compatible catalog,
+  proprietary codecs and protected-media integration hooks.
 - Installer/update path preserves an existing Focus Browser profile.
 
 ### Windows x64 artifacts
@@ -102,5 +131,5 @@ This archive is used only by `build.py`; it is not an installer. It is
 published in the separate build-dependencies prerelease so the main Focus
 Browser 1.0 download list contains only end-user packages and checksums.
 
-The Windows binaries are not Authenticode-signed. Verify the hashes before
-installation; SmartScreen may show **Unknown publisher**.
+The Windows binaries do not have a publisher signature. Verify the hashes before
+installation; the system may show an **Unknown publisher** warning.

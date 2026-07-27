@@ -109,7 +109,10 @@ async function waitFor(page, expression, attempts = 200) {
 async function screenshot(page, suffix) {
   // The welcome copy is intentionally staggered through 1.14 seconds. Capture
   // the settled UI rather than a valid-but-blurred intermediate animation.
-  await delay(suffix === '00-welcome' ? 1300 : 300);
+  // Page transitions use a 50 ms delay followed by a 300 ms animation.
+  // Leave one additional frame budget so screenshots never capture the
+  // animation's clipped/blurred boundary frame on a busy release machine.
+  await delay(suffix === '00-welcome' ? 1300 : 1200);
   const result = await page.send('Page.captureScreenshot', {
     format: 'png',
     captureBeyondViewport: false,

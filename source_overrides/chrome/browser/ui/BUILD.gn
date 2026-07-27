@@ -1284,10 +1284,10 @@ static_library("ui") {
       "webui/settings/accessibility_main_handler.h",
       "webui/settings/appearance_handler.cc",
       "webui/settings/appearance_handler.h",
-      "webui/settings/brave_import_data_handler.cc",
-      "webui/settings/brave_import_data_handler.h",
-      "webui/settings/brave_importer_observer.cc",
-      "webui/settings/brave_importer_observer.h",
+      "webui/settings/focus_import_data_handler.cc",
+      "webui/settings/focus_import_data_handler.h",
+      "webui/settings/focus_importer_observer.cc",
+      "webui/settings/focus_importer_observer.h",
       "webui/settings/browser_lifetime_handler.cc",
       "webui/settings/browser_lifetime_handler.h",
       "webui/settings/captions_handler.cc",
@@ -1464,8 +1464,8 @@ static_library("ui") {
       sources += [
         "browser_shortcuts/browser_shortcut_platform_mac.h",
         "browser_shortcuts/browser_shortcut_platform_mac.mm",
-        "webui/settings/brave_full_disk_access_confirm_dialog_delegate.h",
-        "webui/settings/brave_full_disk_access_confirm_dialog_delegate_mac.mm",
+        "webui/settings/focus_full_disk_access_confirm_dialog_delegate.h",
+        "webui/settings/focus_full_disk_access_confirm_dialog_delegate_mac.mm",
       ]
     }
 

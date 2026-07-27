@@ -13,20 +13,20 @@ use.
 - FocusYoutube stores its switches in the local browser profile. The packaged
   component contains no analytics, payment, donation, remote-font or external
   settings flows.
-- The meditation page does not embed or preload YouTube. Pressing its video
-  button opens YouTube in a normal tab, after which YouTube receives the normal
-  request metadata for that visit.
+- The meditation page does not embed or preload an external video service. Its
+  button opens the configured video in a normal tab, after which that service
+  receives the normal request metadata for the visit.
 - Smooth-animation preferences, shortcut selections and onboarding choices are
   stored in the local profile.
 
-## Chromium services
+## Browser network services
 
-Focus Browser inherits networking required for normal Chromium functionality,
-including websites, selected search providers, extension installation and
-allowed component updates. Google Chrome account Sync is not enabled.
+Focus Browser uses networking required for websites, selected search providers,
+extension installation and allowed component updates. Third-party account
+synchronization is not enabled.
 
 ## Diagnostic reports
 
 Do not upload a real profile, cookies, saved passwords, tokens, browsing
-databases or unsanitized crash dumps to GitHub issues. Use a disposable profile
-when reproducing bugs and follow [SECURITY.en.md](SECURITY.en.md) for vulnerabilities.
+databases or unsanitized crash dumps to public issue trackers. Use a disposable
+profile when reproducing bugs and follow [SECURITY.en.md](SECURITY.en.md) for vulnerabilities.

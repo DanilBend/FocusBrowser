@@ -1,0 +1,145 @@
+diff --git a/chrome/browser/importer/chrome_importer_list.cc b/chrome/browser/importer/chrome_importer_list.cc
+--- a/chrome/browser/importer/chrome_importer_list.cc
++++ b/chrome/browser/importer/chrome_importer_list.cc
+@@ -5,19 +5,115 @@
+ 
+ #include "chrome/browser/importer/importer_list.h"
+ 
+ #include "base/check.h"
++#include "base/command_line.h"
++#include "base/environment.h"
+ #include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/logging.h"
+ #include "base/strings/strcat.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/threading/scoped_blocking_call.h"
+ #include "base/values.h"
++#include "build/build_config.h"
++#include "chrome/common/chrome_switches.h"
+ #include "chrome/common/importer/chrome_importer_utils.h"
+ #include "chrome/common/importer/importer_constants.h"
+ #include "chrome/grit/generated_resources.h"
+ #include "components/user_data_importer/common/importer_type.h"
+ #include "ui/base/l10n/l10n_util.h"
+ 
+ namespace {
++#if BUILDFLAG(IS_WIN)
++constexpr char kFocusImportQaChromeUserDataDir[] =
++    "FOCUS_IMPORT_QA_CHROME_USER_DATA_DIR";
++
++enum class FocusImportQaOverrideState {
++  kUnset,
++  kValid,
++  kInvalid,
++};
++
++struct FocusImportQaOverride {
++  FocusImportQaOverrideState state;
++  base::FilePath source_path;
++};
++
++bool FocusImportQaPathsEqual(const base::FilePath& left,
++                             const base::FilePath& right) {
++  return base::FilePath::CompareEqualIgnoreCase(left.value(), right.value());
++}
++
++FocusImportQaOverride ResolveFocusImportQaChromeOverride() {
++  auto environment = base::Environment::Create();
++  const std::optional<std::string> override_value =
++      environment->GetVar(kFocusImportQaChromeUserDataDir);
++  if (!override_value.has_value()) {
++    return {FocusImportQaOverrideState::kUnset, base::FilePath()};
++  }
++
++  const auto reject = [](const char* reason) {
++    LOG(ERROR) << kFocusImportQaChromeUserDataDir
++               << " was rejected: " << reason;
++    return FocusImportQaOverride{FocusImportQaOverrideState::kInvalid,
++                                 base::FilePath()};
++  };
++
++  const base::FilePath requested_source =
++      base::FilePath::FromUTF8Unsafe(*override_value)
++          .StripTrailingSeparators();
++  const base::CommandLine* command_line =
++      base::CommandLine::ForCurrentProcess();
++  if (override_value->empty() ||
++      !command_line->HasSwitch(switches::kUserDataDir)) {
++    return reject("the source or destination path is missing");
++  }
++  const base::FilePath requested_target =
++      command_line->GetSwitchValuePath(switches::kUserDataDir)
++          .StripTrailingSeparators();
++  if (!requested_source.IsAbsolute() || !requested_target.IsAbsolute()) {
++    return reject("both paths must be absolute");
++  }
++  if (!base::DirectoryExists(requested_source) ||
++      !base::DirectoryExists(requested_target)) {
++    return reject("both paths must already exist");
++  }
++
++  base::FilePath source;
++  base::FilePath target;
++  base::FilePath temp_dir;
++  base::FilePath normalized_temp_dir;
++  if (!base::NormalizeFilePath(requested_source, &source) ||
++      !base::NormalizeFilePath(requested_target, &target) ||
++      !base::GetTempDir(&temp_dir) ||
++      !base::NormalizeFilePath(temp_dir, &normalized_temp_dir)) {
++    return reject("the paths could not be normalized");
++  }
++
++  const base::FilePath owned_root = source.DirName().DirName();
++  const base::FilePath target_owned_root = target.DirName();
++  const base::FilePath::StringType owned_root_prefix =
++      FILE_PATH_LITERAL("focus-real-import-qa-");
++  const base::FilePath::StringType owned_root_name =
++      owned_root.BaseName().value();
++  if (!FocusImportQaPathsEqual(owned_root, target_owned_root) ||
++      !FocusImportQaPathsEqual(owned_root.DirName(), normalized_temp_dir) ||
++      owned_root_name.size() <= owned_root_prefix.size() ||
++      owned_root_name.compare(0, owned_root_prefix.size(),
++                              owned_root_prefix) != 0 ||
++      !FocusImportQaPathsEqual(
++          source, owned_root.AppendASCII("chrome-source")
++                      .AppendASCII("User Data")) ||
++      !FocusImportQaPathsEqual(target,
++                               owned_root.AppendASCII("focus-target")) ||
++      !base::PathExists(source.AppendASCII("Local State"))) {
++    return reject("the disposable TEMP ownership contract is not satisfied");
++  }
++
++  return {FocusImportQaOverrideState::kValid, source};
++}
++#endif  // BUILDFLAG(IS_WIN)
++
+ void AddChromeToProfiles(
+     std::vector<user_data_importer::SourceProfile>* profiles,
+     base::ListValue chrome_profiles,
+@@ -56,5 +152,25 @@ void DetectChromeProfiles(
+   base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
+                                                 base::BlockingType::WILL_BLOCK);
++#if BUILDFLAG(IS_WIN)
++  const FocusImportQaOverride qa_override =
++      ResolveFocusImportQaChromeOverride();
++  if (qa_override.state != FocusImportQaOverrideState::kUnset) {
++    // A present QA override makes profile discovery hermetic. Invalid input
++    // returns without touching a normal browser profile; valid input exposes
++    // only the disposable source profile paired with this QA destination.
++    if (qa_override.state == FocusImportQaOverrideState::kValid) {
++      AddChromeToProfiles(
++          profiles,
++          GetChromeSourceProfiles(qa_override.source_path.Append(
++              base::FilePath::StringType(
++                  FILE_PATH_LITERAL("Local State")))),
++          qa_override.source_path, kGoogleChromeBrowser,
++          user_data_importer::TYPE_CHROME);
++    }
++    return;
++  }
++#endif  // BUILDFLAG(IS_WIN)
++
+   AddChromeToProfiles(
+       profiles,
+       GetChromeSourceProfiles(GetChromeUserDataFolder().Append(

@@ -1,0 +1,986 @@
+diff --git a/chrome/browser/importer/brave_external_process_importer_client.cc b/chrome/browser/importer/focus_external_process_importer_client.cc
+similarity index 85%
+rename from chrome/browser/importer/brave_external_process_importer_client.cc
+rename to chrome/browser/importer/focus_external_process_importer_client.cc
+--- a/chrome/browser/importer/brave_external_process_importer_client.cc
++++ b/chrome/browser/importer/focus_external_process_importer_client.cc
+@@ -3,17 +3,17 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at https://mozilla.org/MPL/2.0/. */
+ 
+-#include "chrome/browser/importer/brave_external_process_importer_client.h"
++#include "chrome/browser/importer/focus_external_process_importer_client.h"
+ 
+ #include <utility>
+ 
+ #include "base/functional/bind.h"
+-#include "chrome/browser/importer/brave_in_process_importer_bridge.h"
++#include "chrome/browser/importer/focus_in_process_importer_bridge.h"
+ #include "chrome/grit/generated_resources.h"
+ #include "content/public/browser/service_process_host.h"
+ 
+ namespace {
+-bool ShouldUseBraveImporter(user_data_importer::ImporterType type) {
++bool ShouldUseFocusImporter(user_data_importer::ImporterType type) {
+   switch (type) {
+     case user_data_importer::TYPE_CHROME:
+     case user_data_importer::TYPE_EDGE_CHROMIUM:
+@@ -38,7 +38,7 @@
+   return sandbox::mojom::Sandbox::kNoSandbox;
+ }
+ 
+-BraveExternalProcessImporterClient::BraveExternalProcessImporterClient(
++FocusExternalProcessImporterClient::FocusExternalProcessImporterClient(
+     base::WeakPtr<ExternalProcessImporterHost> importer_host,
+     const user_data_importer::SourceProfile& source_profile,
+     uint16_t items,
+@@ -48,11 +48,11 @@
+                                     items,
+                                     bridge) {}
+ 
+-BraveExternalProcessImporterClient::
+-    ~BraveExternalProcessImporterClient() = default;
++FocusExternalProcessImporterClient::
++    ~FocusExternalProcessImporterClient() = default;
+ 
+-void BraveExternalProcessImporterClient::Start() {
+-  if (!ShouldUseBraveImporter(source_profile_.importer_type)) {
++void FocusExternalProcessImporterClient::Start() {
++  if (!ShouldUseFocusImporter(source_profile_.importer_type)) {
+     ExternalProcessImporterClient::Start();
+     return;
+   }
+@@ -63,19 +63,19 @@
+                      .WithDisplayName(IDS_UTILITY_PROCESS_PROFILE_IMPORTER_NAME)
+                      .Pass();
+   content::ServiceProcessHost::Launch(
+-      brave_profile_import_.BindNewPipeAndPassReceiver(), std::move(options));
++      focus_profile_import_.BindNewPipeAndPassReceiver(), std::move(options));
+ 
+-  brave_profile_import_.set_disconnect_handler(
++  focus_profile_import_.set_disconnect_handler(
+       base::BindOnce(&ExternalProcessImporterClient::OnProcessCrashed, this));
+ 
+   base::flat_map<uint32_t, std::string> localized_strings;
+-  brave_profile_import_->StartImport(
++  focus_profile_import_->StartImport(
+       source_profile_, items_, localized_strings,
+       receiver_.BindNewPipeAndPassRemote());
+ }
+ 
+-void BraveExternalProcessImporterClient::Cancel() {
+-  if (!ShouldUseBraveImporter(source_profile_.importer_type)) {
++void FocusExternalProcessImporterClient::Cancel() {
++  if (!ShouldUseFocusImporter(source_profile_.importer_type)) {
+     ExternalProcessImporterClient::Cancel();
+     return;
+   }
+@@ -84,24 +84,24 @@
+     return;
+ 
+   cancelled_ = true;
+-  brave_profile_import_->CancelImport();
++  focus_profile_import_->CancelImport();
+   CloseMojoHandles();
+   Release();
+ }
+ 
+-void BraveExternalProcessImporterClient::CloseMojoHandles() {
+-  if (!ShouldUseBraveImporter(source_profile_.importer_type)) {
++void FocusExternalProcessImporterClient::CloseMojoHandles() {
++  if (!ShouldUseFocusImporter(source_profile_.importer_type)) {
+     ExternalProcessImporterClient::CloseMojoHandles();
+     return;
+   }
+ 
+-  brave_profile_import_.reset();
++  focus_profile_import_.reset();
+   receiver_.reset();
+ }
+ 
+-void BraveExternalProcessImporterClient::OnImportItemFinished(
++void FocusExternalProcessImporterClient::OnImportItemFinished(
+     user_data_importer::ImportItem import_item) {
+-  if (!ShouldUseBraveImporter(source_profile_.importer_type)) {
++  if (!ShouldUseFocusImporter(source_profile_.importer_type)) {
+     ExternalProcessImporterClient::OnImportItemFinished(import_item);
+     return;
+   }
+@@ -110,5 +110,5 @@
+     return;
+ 
+   bridge_->NotifyItemEnded(import_item);
+-  brave_profile_import_->ReportImportItemFinished(import_item);
++  focus_profile_import_->ReportImportItemFinished(import_item);
+ }
+diff --git a/chrome/browser/importer/brave_external_process_importer_client.h b/chrome/browser/importer/focus_external_process_importer_client.h
+similarity index 85%
+rename from chrome/browser/importer/brave_external_process_importer_client.h
+rename to chrome/browser/importer/focus_external_process_importer_client.h
+--- a/chrome/browser/importer/brave_external_process_importer_client.h
++++ b/chrome/browser/importer/focus_external_process_importer_client.h
+@@ -3,8 +3,8 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at https://mozilla.org/MPL/2.0/. */
+ 
+-#ifndef BRAVE_BROWSER_IMPORTER_BRAVE_EXTERNAL_PROCESS_IMPORTER_CLIENT_H_
+-#define BRAVE_BROWSER_IMPORTER_BRAVE_EXTERNAL_PROCESS_IMPORTER_CLIENT_H_
++#ifndef CHROME_BROWSER_IMPORTER_FOCUS_EXTERNAL_PROCESS_IMPORTER_CLIENT_H_
++#define CHROME_BROWSER_IMPORTER_FOCUS_EXTERNAL_PROCESS_IMPORTER_CLIENT_H_
+ 
+ #include <string>
+ 
+@@ -14,19 +14,19 @@
+ #include "mojo/public/cpp/bindings/receiver.h"
+ #include "mojo/public/cpp/bindings/remote.h"
+ 
+-class BraveExternalProcessImporterClient
++class FocusExternalProcessImporterClient
+     : public ExternalProcessImporterClient {
+  public:
+-  BraveExternalProcessImporterClient(
++  FocusExternalProcessImporterClient(
+       base::WeakPtr<ExternalProcessImporterHost> importer_host,
+       const user_data_importer::SourceProfile& source_profile,
+       uint16_t items,
+       InProcessImporterBridge* bridge);
+ 
+-  BraveExternalProcessImporterClient(
+-      const BraveExternalProcessImporterClient&) = delete;
+-  BraveExternalProcessImporterClient& operator=(
+-      const BraveExternalProcessImporterClient&) = delete;
++  FocusExternalProcessImporterClient(
++      const FocusExternalProcessImporterClient&) = delete;
++  FocusExternalProcessImporterClient& operator=(
++      const FocusExternalProcessImporterClient&) = delete;
+ 
+   // ExternalProcessImportClient overrides:
+   void Start() override;
+@@ -36,12 +36,12 @@
+       user_data_importer::ImportItem import_item) override;
+ 
+  protected:
+-  ~BraveExternalProcessImporterClient() override;
++  ~FocusExternalProcessImporterClient() override;
+ 
+  private:
+-  // Used to start and stop the actual brave importer running in a different
++  // Used to start and stop the extended profile importer running in a different
+   // process.
+-  mojo::Remote<chrome::mojom::ChromeProfileImport> brave_profile_import_;
++  mojo::Remote<chrome::mojom::ChromeProfileImport> focus_profile_import_;
+ };
+ 
+-#endif  // BRAVE_BROWSER_IMPORTER_BRAVE_EXTERNAL_PROCESS_IMPORTER_CLIENT_H_
++#endif  // CHROME_BROWSER_IMPORTER_FOCUS_EXTERNAL_PROCESS_IMPORTER_CLIENT_H_
+diff --git a/chrome/browser/importer/brave_external_process_importer_host.cc b/chrome/browser/importer/focus_external_process_importer_host.cc
+similarity index 85%
+rename from chrome/browser/importer/brave_external_process_importer_host.cc
+rename to chrome/browser/importer/focus_external_process_importer_host.cc
+--- a/chrome/browser/importer/brave_external_process_importer_host.cc
++++ b/chrome/browser/importer/focus_external_process_importer_host.cc
+@@ -3,18 +3,18 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-#include "chrome/browser/importer/brave_external_process_importer_host.h"
++#include "chrome/browser/importer/focus_external_process_importer_host.h"
+ 
+ #include "base/check.h"
+ #include "chrome/browser/importer/extensions_import_helpers.h"
+ #include "chrome/browser/importer/importer_lock_dialog.h"
+ #include "chrome/grit/generated_resources.h"
+ 
+-BraveExternalProcessImporterHost::BraveExternalProcessImporterHost()
++FocusExternalProcessImporterHost::FocusExternalProcessImporterHost()
+     : weak_ptr_factory_(this) {}
+-BraveExternalProcessImporterHost::~BraveExternalProcessImporterHost() = default;
++FocusExternalProcessImporterHost::~FocusExternalProcessImporterHost() = default;
+ 
+-void BraveExternalProcessImporterHost::NotifyImportEnded() {
++void FocusExternalProcessImporterHost::NotifyImportEnded() {
+   // If user chooses extension importing, start importing extensions.
+   // and NotifyImportEnded() will be called from OnGetChromeExtensionsList().
+   // Handling extensions importing after finishing all other properties makes
+@@ -24,7 +24,7 @@
+   if (NeedToImportExtensions() && extensions_importer_) {
+     NotifyImportItemStarted(user_data_importer::EXTENSIONS);
+     if (extensions_importer_->Import(base::BindRepeating(
+-            &BraveExternalProcessImporterHost::OnExtensionImported,
++            &FocusExternalProcessImporterHost::OnExtensionImported,
+             weak_ptr_factory_.GetWeakPtr()))) {
+       return;
+     }
+@@ -37,7 +37,7 @@
+   ExternalProcessImporterHost::NotifyImportEnded();
+ }
+ 
+-void BraveExternalProcessImporterHost::LaunchImportIfReady() {
++void FocusExternalProcessImporterHost::LaunchImportIfReady() {
+ #if BUILDFLAG(ENABLE_EXTENSIONS)
+   if (NeedToImportExtensions()) {
+     if (!extensions_importer_) {
+@@ -45,7 +45,7 @@
+           std::make_unique<extensions_import::ExtensionsImporter>(
+               source_profile_.source_path, profile_);
+       extensions_importer_->Prepare(base::BindOnce(
+-          &BraveExternalProcessImporterHost::OnExtensionsImportReady,
++          &FocusExternalProcessImporterHost::OnExtensionsImportReady,
+           weak_ptr_factory_.GetWeakPtr()));
+       return;
+     }
+@@ -63,27 +63,27 @@
+   }
+ }
+ 
+-void BraveExternalProcessImporterHost::DoNotLaunchImportForTesting() {
++void FocusExternalProcessImporterHost::DoNotLaunchImportForTesting() {
+   do_not_launch_import_for_testing_ = true;
+ }
+ 
+-void BraveExternalProcessImporterHost::NotifyImportEndedForTesting() {
++void FocusExternalProcessImporterHost::NotifyImportEndedForTesting() {
+   ExternalProcessImporterHost::NotifyImportEnded();
+ }
+ 
+ importer::ImporterProgressObserver*
+-BraveExternalProcessImporterHost::GetObserverForTesting() {
++FocusExternalProcessImporterHost::GetObserverForTesting() {
+   return observer_;
+ }
+ 
+ #if BUILDFLAG(ENABLE_EXTENSIONS)
+ 
+-bool BraveExternalProcessImporterHost::NeedToImportExtensions() const {
++bool FocusExternalProcessImporterHost::NeedToImportExtensions() const {
+   return !cancelled_ && (items_ & user_data_importer::EXTENSIONS) ==
+                             user_data_importer::EXTENSIONS;
+ }
+ 
+-void BraveExternalProcessImporterHost::OnExtensionsImportReady(bool ready) {
++void FocusExternalProcessImporterHost::OnExtensionsImportReady(bool ready) {
+   if (cancelled_) {
+     return;
+   }
+@@ -92,7 +92,7 @@
+     importer::ShowImportLockDialog(
+         parent_view_, parent_window_,
+         base::BindOnce(
+-            &BraveExternalProcessImporterHost::OnExtensionsImportLockDialogEnd,
++            &FocusExternalProcessImporterHost::OnExtensionsImportLockDialogEnd,
+             weak_ptr_factory_.GetWeakPtr()),
+         IDS_EXTENSIONS_IMPORTER_LOCK_TITLE, IDS_EXTENSIONS_IMPORTER_LOCK_TEXT);
+   } else {
+@@ -101,7 +101,7 @@
+   }
+ }
+ 
+-void BraveExternalProcessImporterHost::OnExtensionsImportLockDialogEnd(
++void FocusExternalProcessImporterHost::OnExtensionsImportLockDialogEnd(
+     bool is_continue) {
+   DCHECK(!extensions_importer_);
+   if (is_continue) {
+@@ -111,7 +111,7 @@
+   }
+ }
+ 
+-void BraveExternalProcessImporterHost::OnExtensionImported(
++void FocusExternalProcessImporterHost::OnExtensionImported(
+     const std::string& extension_id,
+     extensions_import::ExtensionImportStatus status) {
+   if (!extensions_importer_ || !extensions_importer_->IsImportInProgress()) {
+diff --git a/chrome/browser/importer/brave_external_process_importer_host.h b/chrome/browser/importer/focus_external_process_importer_host.h
+similarity index 85%
+rename from chrome/browser/importer/brave_external_process_importer_host.h
+rename to chrome/browser/importer/focus_external_process_importer_host.h
+--- a/chrome/browser/importer/brave_external_process_importer_host.h
++++ b/chrome/browser/importer/focus_external_process_importer_host.h
+@@ -3,8 +3,8 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-#ifndef BRAVE_BROWSER_IMPORTER_BRAVE_EXTERNAL_PROCESS_IMPORTER_HOST_H_
+-#define BRAVE_BROWSER_IMPORTER_BRAVE_EXTERNAL_PROCESS_IMPORTER_HOST_H_
++#ifndef CHROME_BROWSER_IMPORTER_FOCUS_EXTERNAL_PROCESS_IMPORTER_HOST_H_
++#define CHROME_BROWSER_IMPORTER_FOCUS_EXTERNAL_PROCESS_IMPORTER_HOST_H_
+ 
+ #include <memory>
+ #include <string>
+@@ -21,22 +21,22 @@
+ }  // namespace extensions_import
+ #endif
+ 
+-class BraveExternalProcessImporterHost : public ExternalProcessImporterHost {
++class FocusExternalProcessImporterHost : public ExternalProcessImporterHost {
+  public:
+-  BraveExternalProcessImporterHost();
+-  BraveExternalProcessImporterHost(const BraveExternalProcessImporterHost&) =
++  FocusExternalProcessImporterHost();
++  FocusExternalProcessImporterHost(const FocusExternalProcessImporterHost&) =
+       delete;
+-  BraveExternalProcessImporterHost& operator=(
+-      const BraveExternalProcessImporterHost&) = delete;
++  FocusExternalProcessImporterHost& operator=(
++      const FocusExternalProcessImporterHost&) = delete;
+ 
+  private:
+   friend class ExternalProcessImporterHost;
+-  friend class BraveExternalProcessImporterHostUnitTest;
++  friend class FocusExternalProcessImporterHostUnitTest;
+ 
+   FRIEND_TEST_ALL_PREFIXES(FocusImporterObserverUnitTest, ImportEvents);
+   FRIEND_TEST_ALL_PREFIXES(FocusImporterObserverUnitTest, DestroyObserverEarly);
+ 
+-  ~BraveExternalProcessImporterHost() override;
++  ~FocusExternalProcessImporterHost() override;
+ 
+   void DoNotLaunchImportForTesting();
+   void NotifyImportEndedForTesting();
+@@ -60,7 +60,7 @@
+ 
+   bool do_not_launch_import_for_testing_ = false;
+   // Vends weak pointers for the importer to call us back.
+-  base::WeakPtrFactory<BraveExternalProcessImporterHost> weak_ptr_factory_;
++  base::WeakPtrFactory<FocusExternalProcessImporterHost> weak_ptr_factory_;
+ };
+ 
+-#endif  // BRAVE_BROWSER_IMPORTER_BRAVE_EXTERNAL_PROCESS_IMPORTER_HOST_H_
++#endif  // CHROME_BROWSER_IMPORTER_FOCUS_EXTERNAL_PROCESS_IMPORTER_HOST_H_
+diff --git a/chrome/browser/importer/brave_in_process_importer_bridge.cc b/chrome/browser/importer/focus_in_process_importer_bridge.cc
+similarity index 85%
+rename from chrome/browser/importer/brave_in_process_importer_bridge.cc
+rename to chrome/browser/importer/focus_in_process_importer_bridge.cc
+--- a/chrome/browser/importer/brave_in_process_importer_bridge.cc
++++ b/chrome/browser/importer/focus_in_process_importer_bridge.cc
+@@ -3,8 +3,8 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-#include "chrome/browser/importer/brave_in_process_importer_bridge.h"
++#include "chrome/browser/importer/focus_in_process_importer_bridge.h"
+ 
+ #include "chrome/browser/importer/profile_writer.h"
+ 
+-BraveInProcessImporterBridge::~BraveInProcessImporterBridge() = default;
++FocusInProcessImporterBridge::~FocusInProcessImporterBridge() = default;
+diff --git a/chrome/browser/importer/brave_in_process_importer_bridge.h b/chrome/browser/importer/focus_in_process_importer_bridge.h
+similarity index 85%
+rename from chrome/browser/importer/brave_in_process_importer_bridge.h
+rename to chrome/browser/importer/focus_in_process_importer_bridge.h
+--- a/chrome/browser/importer/brave_in_process_importer_bridge.h
++++ b/chrome/browser/importer/focus_in_process_importer_bridge.h
+@@ -3,23 +3,23 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-#ifndef BRAVE_BROWSER_IMPORTER_BRAVE_IN_PROCESS_IMPORTER_BRIDGE_H_
+-#define BRAVE_BROWSER_IMPORTER_BRAVE_IN_PROCESS_IMPORTER_BRIDGE_H_
++#ifndef CHROME_BROWSER_IMPORTER_FOCUS_IN_PROCESS_IMPORTER_BRIDGE_H_
++#define CHROME_BROWSER_IMPORTER_FOCUS_IN_PROCESS_IMPORTER_BRIDGE_H_
+ 
+ #include <string>
+ 
+ #include "chrome/browser/importer/in_process_importer_bridge.h"
+ 
+-class BraveInProcessImporterBridge : public InProcessImporterBridge {
++class FocusInProcessImporterBridge : public InProcessImporterBridge {
+  public:
+   using InProcessImporterBridge::InProcessImporterBridge;
+ 
+-  BraveInProcessImporterBridge(const BraveInProcessImporterBridge&) = delete;
+-  BraveInProcessImporterBridge operator=(
+-      const BraveInProcessImporterBridge&) = delete;
++  FocusInProcessImporterBridge(const FocusInProcessImporterBridge&) = delete;
++  FocusInProcessImporterBridge operator=(
++      const FocusInProcessImporterBridge&) = delete;
+ 
+  private:
+-  ~BraveInProcessImporterBridge() override;
++  ~FocusInProcessImporterBridge() override;
+ };
+ 
+-#endif  // BRAVE_BROWSER_IMPORTER_BRAVE_IN_PROCESS_IMPORTER_BRIDGE_H_
++#endif  // CHROME_BROWSER_IMPORTER_FOCUS_IN_PROCESS_IMPORTER_BRIDGE_H_
+diff --git a/chrome/utility/importer/brave_external_process_importer_bridge.cc b/chrome/utility/importer/focus_external_process_importer_bridge.cc
+similarity index 85%
+rename from chrome/utility/importer/brave_external_process_importer_bridge.cc
+rename to chrome/utility/importer/focus_external_process_importer_bridge.cc
+--- a/chrome/utility/importer/brave_external_process_importer_bridge.cc
++++ b/chrome/utility/importer/focus_external_process_importer_bridge.cc
+@@ -3,15 +3,15 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-#include "chrome/utility/importer/brave_external_process_importer_bridge.h"
++#include "chrome/utility/importer/focus_external_process_importer_bridge.h"
+ 
+ #include <utility>
+ 
+-BraveExternalProcessImporterBridge::BraveExternalProcessImporterBridge(
++FocusExternalProcessImporterBridge::FocusExternalProcessImporterBridge(
+     const base::flat_map<uint32_t, std::string>& localized_strings,
+     mojo::SharedRemote<chrome::mojom::ProfileImportObserver> observer)
+     : ExternalProcessImporterBridge(std::move(localized_strings),
+                                          std::move(observer)) {}
+ 
+-BraveExternalProcessImporterBridge::
+-    ~BraveExternalProcessImporterBridge() = default;
++FocusExternalProcessImporterBridge::
++    ~FocusExternalProcessImporterBridge() = default;
+diff --git a/chrome/utility/importer/brave_external_process_importer_bridge.h b/chrome/utility/importer/focus_external_process_importer_bridge.h
+similarity index 85%
+rename from chrome/utility/importer/brave_external_process_importer_bridge.h
+rename to chrome/utility/importer/focus_external_process_importer_bridge.h
+--- a/chrome/utility/importer/brave_external_process_importer_bridge.h
++++ b/chrome/utility/importer/focus_external_process_importer_bridge.h
+@@ -3,27 +3,27 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-#ifndef BRAVE_UTILITY_IMPORTER_BRAVE_EXTERNAL_PROCESS_IMPORTER_BRIDGE_H_
+-#define BRAVE_UTILITY_IMPORTER_BRAVE_EXTERNAL_PROCESS_IMPORTER_BRIDGE_H_
++#ifndef CHROME_UTILITY_IMPORTER_FOCUS_EXTERNAL_PROCESS_IMPORTER_BRIDGE_H_
++#define CHROME_UTILITY_IMPORTER_FOCUS_EXTERNAL_PROCESS_IMPORTER_BRIDGE_H_
+ 
+ #include <string>
+ 
+ #include "chrome/common/importer/chrome_profile_import.mojom.h"
+ #include "chrome/utility/importer/external_process_importer_bridge.h"
+ 
+-class BraveExternalProcessImporterBridge : public ExternalProcessImporterBridge {
++class FocusExternalProcessImporterBridge : public ExternalProcessImporterBridge {
+  public:
+-  BraveExternalProcessImporterBridge(
++  FocusExternalProcessImporterBridge(
+       const base::flat_map<uint32_t, std::string>& localized_strings,
+       mojo::SharedRemote<chrome::mojom::ProfileImportObserver> observer);
+ 
+-  BraveExternalProcessImporterBridge(
+-      const BraveExternalProcessImporterBridge&) = delete;
+-  BraveExternalProcessImporterBridge& operator=(
+-      const BraveExternalProcessImporterBridge&) = delete;
++  FocusExternalProcessImporterBridge(
++      const FocusExternalProcessImporterBridge&) = delete;
++  FocusExternalProcessImporterBridge& operator=(
++      const FocusExternalProcessImporterBridge&) = delete;
+ 
+  private:
+-  ~BraveExternalProcessImporterBridge() override;
++  ~FocusExternalProcessImporterBridge() override;
+ };
+ 
+-#endif  // BRAVE_UTILITY_IMPORTER_BRAVE_EXTERNAL_PROCESS_IMPORTER_BRIDGE_H_
++#endif  // CHROME_UTILITY_IMPORTER_FOCUS_EXTERNAL_PROCESS_IMPORTER_BRIDGE_H_
+diff --git a/chrome/utility/importer/brave_profile_import_impl.cc b/chrome/utility/importer/focus_profile_import_impl.cc
+similarity index 85%
+rename from chrome/utility/importer/brave_profile_import_impl.cc
+rename to chrome/utility/importer/focus_profile_import_impl.cc
+--- a/chrome/utility/importer/brave_profile_import_impl.cc
++++ b/chrome/utility/importer/focus_profile_import_impl.cc
+@@ -3,7 +3,7 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-#include "chrome/utility/importer/brave_profile_import_impl.h"
++#include "chrome/utility/importer/focus_profile_import_impl.h"
+ 
+ #include <memory>
+ #include <utility>
+@@ -18,7 +18,7 @@
+ #include "build/build_config.h"
+ #include "chrome/common/importer/profile_import.mojom.h"
+ #include "chrome/utility/importer/arc_sidebar_importer.h"
+-#include "chrome/utility/importer/brave_external_process_importer_bridge.h"
++#include "chrome/utility/importer/focus_external_process_importer_bridge.h"
+ #include "chrome/utility/importer/chrome_importer.h"
+ #include "chrome/utility/importer/external_process_importer_bridge.h"
+ #include "chrome/utility/importer/importer.h"
+@@ -60,13 +60,13 @@
+ 
+ }  // namespace
+ 
+-BraveProfileImportImpl::BraveProfileImportImpl(
++FocusProfileImportImpl::FocusProfileImportImpl(
+     mojo::PendingReceiver<chrome::mojom::ChromeProfileImport> receiver)
+     : receiver_(this, std::move(receiver)) {}
+ 
+-BraveProfileImportImpl::~BraveProfileImportImpl() = default;
++FocusProfileImportImpl::~FocusProfileImportImpl() = default;
+ 
+-void BraveProfileImportImpl::StartImport(
++void FocusProfileImportImpl::StartImport(
+     const user_data_importer::SourceProfile& source_profile,
+     uint16_t items,
+     const base::flat_map<uint32_t, std::string>& localized_strings,
+@@ -87,7 +87,7 @@
+   import_thread_->init_com_with_mta(false);
+ #endif
+   CHECK(import_thread_->Start());
+-  bridge_ = new BraveExternalProcessImporterBridge(
++  bridge_ = new FocusExternalProcessImporterBridge(
+       localized_strings,
+       mojo::SharedRemote<chrome::mojom::ProfileImportObserver>(
+           std::move(observer)));
+@@ -97,11 +97,11 @@
+                      base::RetainedRef(bridge_)));
+ }
+ 
+-void BraveProfileImportImpl::CancelImport() {
++void FocusProfileImportImpl::CancelImport() {
+   ImporterCleanup();
+ }
+ 
+-void BraveProfileImportImpl::ReportImportItemFinished(
++void FocusProfileImportImpl::ReportImportItemFinished(
+     user_data_importer::ImportItem item) {
+   items_to_import_ ^= item;  // Remove finished item from mask.
+   if (items_to_import_ == 0) {
+@@ -109,7 +109,7 @@
+   }
+ }
+ 
+-void BraveProfileImportImpl::ImporterCleanup() {
++void FocusProfileImportImpl::ImporterCleanup() {
+   importer_->Cancel();
+   importer_.reset();
+   bridge_.reset();
+diff --git a/chrome/utility/importer/brave_profile_import_impl.h b/chrome/utility/importer/focus_profile_import_impl.h
+similarity index 85%
+rename from chrome/utility/importer/brave_profile_import_impl.h
+rename to chrome/utility/importer/focus_profile_import_impl.h
+--- a/chrome/utility/importer/brave_profile_import_impl.h
++++ b/chrome/utility/importer/focus_profile_import_impl.h
+@@ -3,8 +3,8 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-#ifndef BRAVE_UTILITY_IMPORTER_BRAVE_PROFILE_IMPORT_IMPL_H_
+-#define BRAVE_UTILITY_IMPORTER_BRAVE_PROFILE_IMPORT_IMPL_H_
++#ifndef CHROME_UTILITY_IMPORTER_FOCUS_PROFILE_IMPORT_IMPL_H_
++#define CHROME_UTILITY_IMPORTER_FOCUS_PROFILE_IMPORT_IMPL_H_
+ 
+ #include <memory>
+ #include <string>
+@@ -14,7 +14,7 @@
+ #include "mojo/public/cpp/bindings/pending_remote.h"
+ #include "mojo/public/cpp/bindings/receiver.h"
+ 
+-class BraveExternalProcessImporterBridge;
++class FocusExternalProcessImporterBridge;
+ class Importer;
+ 
+ namespace base {
+@@ -25,14 +25,14 @@
+ struct SourceProfile;
+ }  // namespace importer
+ 
+-class BraveProfileImportImpl : public chrome::mojom::ChromeProfileImport {
++class FocusProfileImportImpl : public chrome::mojom::ChromeProfileImport {
+  public:
+-  explicit BraveProfileImportImpl(
++  explicit FocusProfileImportImpl(
+       mojo::PendingReceiver<chrome::mojom::ChromeProfileImport> receiver);
+-  ~BraveProfileImportImpl() override;
++  ~FocusProfileImportImpl() override;
+ 
+-  BraveProfileImportImpl(const BraveProfileImportImpl&) = delete;
+-  BraveProfileImportImpl& operator=(const BraveProfileImportImpl&) = delete;
++  FocusProfileImportImpl(const FocusProfileImportImpl&) = delete;
++  FocusProfileImportImpl& operator=(const FocusProfileImportImpl&) = delete;
+ 
+  private:
+   // chrome::mojom::ChromeProfileImport overrides:
+@@ -52,7 +52,7 @@
+ 
+   // Bridge object is passed to importer, so that it can send IPC calls
+   // directly back to the ProfileImportProcessHost.
+-  scoped_refptr<BraveExternalProcessImporterBridge> bridge_;
++  scoped_refptr<FocusExternalProcessImporterBridge> bridge_;
+ 
+   // A bitmask of user_data_importer::ImportItem.
+   uint16_t items_to_import_ = 0;
+@@ -61,4 +61,4 @@
+   scoped_refptr<Importer> importer_;
+ };
+ 
+-#endif  // BRAVE_UTILITY_IMPORTER_BRAVE_PROFILE_IMPORT_IMPL_H_
++#endif  // CHROME_UTILITY_IMPORTER_FOCUS_PROFILE_IMPORT_IMPL_H_
+diff --git a/chrome/browser/ui/webui/settings/brave_full_disk_access_confirm_dialog_delegate.h b/chrome/browser/ui/webui/settings/focus_full_disk_access_confirm_dialog_delegate.h
+similarity index 85%
+rename from chrome/browser/ui/webui/settings/brave_full_disk_access_confirm_dialog_delegate.h
+rename to chrome/browser/ui/webui/settings/focus_full_disk_access_confirm_dialog_delegate.h
+--- a/chrome/browser/ui/webui/settings/brave_full_disk_access_confirm_dialog_delegate.h
++++ b/chrome/browser/ui/webui/settings/focus_full_disk_access_confirm_dialog_delegate.h
+@@ -3,8 +3,8 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-#ifndef BRAVE_BROWSER_UI_WEBUI_SETTINGS_BRAVE_FULL_DISK_ACCESS_CONFIRM_DIALOG_DELEGATE_H_
+-#define BRAVE_BROWSER_UI_WEBUI_SETTINGS_BRAVE_FULL_DISK_ACCESS_CONFIRM_DIALOG_DELEGATE_H_
++#ifndef CHROME_BROWSER_UI_WEBUI_SETTINGS_FOCUS_FULL_DISK_ACCESS_CONFIRM_DIALOG_DELEGATE_H_
++#define CHROME_BROWSER_UI_WEBUI_SETTINGS_FOCUS_FULL_DISK_ACCESS_CONFIRM_DIALOG_DELEGATE_H_
+ 
+ #include <string>
+ 
+@@ -41,4 +41,4 @@
+   raw_ptr<Browser> browser_;
+ };
+ 
+-#endif  // BRAVE_BROWSER_UI_WEBUI_SETTINGS_BRAVE_FULL_DISK_ACCESS_CONFIRM_DIALOG_DELEGATE_H_
++#endif  // CHROME_BROWSER_UI_WEBUI_SETTINGS_FOCUS_FULL_DISK_ACCESS_CONFIRM_DIALOG_DELEGATE_H_
+diff --git a/chrome/browser/ui/webui/settings/brave_full_disk_access_confirm_dialog_delegate_mac.mm b/chrome/browser/ui/webui/settings/focus_full_disk_access_confirm_dialog_delegate_mac.mm
+similarity index 85%
+rename from chrome/browser/ui/webui/settings/brave_full_disk_access_confirm_dialog_delegate_mac.mm
+rename to chrome/browser/ui/webui/settings/focus_full_disk_access_confirm_dialog_delegate_mac.mm
+--- a/chrome/browser/ui/webui/settings/brave_full_disk_access_confirm_dialog_delegate_mac.mm
++++ b/chrome/browser/ui/webui/settings/focus_full_disk_access_confirm_dialog_delegate_mac.mm
+@@ -3,7 +3,7 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-#include "chrome/browser/ui/webui/settings/brave_full_disk_access_confirm_dialog_delegate.h"
++#include "chrome/browser/ui/webui/settings/focus_full_disk_access_confirm_dialog_delegate.h"
+ 
+ #import <AppKit/AppKit.h>
+ 
+diff --git a/chrome/browser/importer/BUILD.gn b/chrome/browser/importer/BUILD.gn
+--- a/chrome/browser/importer/BUILD.gn
++++ b/chrome/browser/importer/BUILD.gn
+@@ -6,9 +6,9 @@
+ 
+ source_set("importer") {
+   sources = [
+-    "brave_external_process_importer_client.h",
+-    "brave_external_process_importer_host.h",
+-    "brave_in_process_importer_bridge.h",
++    "focus_external_process_importer_client.h",
++    "focus_external_process_importer_host.h",
++    "focus_in_process_importer_bridge.h",
+     "extensions_import_helpers.h",
+     "external_process_importer_client.h",
+     "external_process_importer_host.h",
+@@ -41,9 +41,9 @@
+   public_deps = [ "//chrome/browser:browser_public_dependencies" ]
+ 
+   sources = [
+-    "brave_external_process_importer_client.cc",
+-    "brave_external_process_importer_host.cc",
+-    "brave_in_process_importer_bridge.cc",
++    "focus_external_process_importer_client.cc",
++    "focus_external_process_importer_host.cc",
++    "focus_in_process_importer_bridge.cc",
+     "extensions_import_helpers.cc",
+     "external_process_importer_client.cc",
+     "external_process_importer_host.cc",
+diff --git a/chrome/browser/importer/external_process_importer_host.cc b/chrome/browser/importer/external_process_importer_host.cc
+--- a/chrome/browser/importer/external_process_importer_host.cc
++++ b/chrome/browser/importer/external_process_importer_host.cc
+@@ -8,8 +8,8 @@
+ 
+ #include "base/functional/bind.h"
+ #include "chrome/browser/bookmarks/bookmark_model_factory.h"
+-#include "chrome/browser/importer/brave_external_process_importer_client.h"
+-#include "chrome/browser/importer/brave_in_process_importer_bridge.h"
++#include "chrome/browser/importer/focus_external_process_importer_client.h"
++#include "chrome/browser/importer/focus_in_process_importer_bridge.h"
+ #include "chrome/browser/importer/external_process_importer_client.h"
+ #include "chrome/browser/importer/firefox_profile_lock.h"
+ #include "chrome/browser/importer/importer_lock_dialog.h"
+@@ -104,10 +104,10 @@
+   // bridge lives in the external process (see ProfileImportThread).
+   // The ExternalProcessImporterClient created in the next line owns the bridge,
+   // and will delete it.
+-  BraveInProcessImporterBridge* bridge =
+-      new BraveInProcessImporterBridge(writer_.get(),
++  FocusInProcessImporterBridge* bridge =
++      new FocusInProcessImporterBridge(writer_.get(),
+                                   weak_ptr_factory_.GetWeakPtr());
+-  client_ = new BraveExternalProcessImporterClient(
++  client_ = new FocusExternalProcessImporterClient(
+       weak_ptr_factory_.GetWeakPtr(), source_profile_, items_, bridge);
+   client_->Start();
+ }
+diff --git a/chrome/browser/importer/external_process_importer_host.h b/chrome/browser/importer/external_process_importer_host.h
+--- a/chrome/browser/importer/external_process_importer_host.h
++++ b/chrome/browser/importer/external_process_importer_host.h
+@@ -81,7 +81,7 @@
+   void NotifyImportItemEnded(user_data_importer::ImportItem item);
+   void virtual NotifyImportEnded();
+ 
+-  friend class BraveExternalProcessImporterHost;
++  friend class FocusExternalProcessImporterHost;
+   void set_parent_view(gfx::NativeView parent_view) {
+     parent_view_ = parent_view;
+   }
+diff --git a/chrome/browser/importer/external_process_importer_client.h b/chrome/browser/importer/external_process_importer_client.h
+--- a/chrome/browser/importer/external_process_importer_client.h
++++ b/chrome/browser/importer/external_process_importer_client.h
+@@ -82,7 +82,7 @@
+       const std::vector<ImporterAutofillFormDataEntry>&
+           autofill_form_data_entry_group) override;
+ 
+- friend class BraveExternalProcessImporterClient;
++ friend class FocusExternalProcessImporterClient;
+ 
+  protected:
+   ~ExternalProcessImporterClient() override;
+diff --git a/chrome/browser/importer/in_process_importer_bridge.h b/chrome/browser/importer/in_process_importer_bridge.h
+--- a/chrome/browser/importer/in_process_importer_bridge.h
++++ b/chrome/browser/importer/in_process_importer_bridge.h
+@@ -59,7 +59,7 @@
+ 
+   std::u16string GetLocalizedString(int message_id) override;
+   // End ImporterBridge implementation.
+-  friend class BraveInProcessImporterBridge;
++  friend class FocusInProcessImporterBridge;
+  private:
+   ~InProcessImporterBridge() override;
+ 
+diff --git a/chrome/utility/BUILD.gn b/chrome/utility/BUILD.gn
+--- a/chrome/utility/BUILD.gn
++++ b/chrome/utility/BUILD.gn
+@@ -93,10 +93,10 @@
+     sources += [
+       "importer/bookmarks_file_importer.cc",
+       "importer/bookmarks_file_importer.h",
+-      "importer/brave_external_process_importer_bridge.cc",
+-      "importer/brave_external_process_importer_bridge.h",
+-      "importer/brave_profile_import_impl.cc",
+-      "importer/brave_profile_import_impl.h",
++      "importer/focus_external_process_importer_bridge.cc",
++      "importer/focus_external_process_importer_bridge.h",
++      "importer/focus_profile_import_impl.cc",
++      "importer/focus_profile_import_impl.h",
+       "importer/arc_sidebar_importer.cc",
+       "importer/arc_sidebar_importer.h",
+       "importer/chrome_importer.cc",
+diff --git a/chrome/utility/services.cc b/chrome/utility/services.cc
+--- a/chrome/utility/services.cc
++++ b/chrome/utility/services.cc
+@@ -58,7 +58,7 @@
+ #if !BUILDFLAG(IS_ANDROID)
+ #include "chrome/common/importer/chrome_profile_import.mojom.h"
+ #include "chrome/common/importer/profile_import.mojom.h"
+-#include "chrome/utility/importer/brave_profile_import_impl.h"
++#include "chrome/utility/importer/focus_profile_import_impl.h"
+ #include "chrome/utility/importer/profile_import_impl.h"
+ #include "components/mirroring/service/mirroring_service.h"
+ #include "components/private_ai/oak_session_service/oak_session_service.h"  // nogncheck
+@@ -142,9 +142,9 @@
+ namespace {
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+-auto RunBraveProfileImporter(
++auto RunFocusProfileImporter(
+     mojo::PendingReceiver<chrome::mojom::ChromeProfileImport> receiver) {
+-  return std::make_unique<BraveProfileImportImpl>(std::move(receiver));
++  return std::make_unique<FocusProfileImportImpl>(std::move(receiver));
+ }
+ #endif
+ 
+@@ -449,7 +449,7 @@
+   services.Add(RunPassageEmbeddingsService);
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+-  services.Add(RunBraveProfileImporter);
++  services.Add(RunFocusProfileImporter);
+   services.Add(RunOakSessionService);
+   services.Add(RunProfileImporter);
+   services.Add(RunMirroringService);
+diff --git a/chrome/utility/importer/external_process_importer_bridge.h b/chrome/utility/importer/external_process_importer_bridge.h
+--- a/chrome/utility/importer/external_process_importer_bridge.h
++++ b/chrome/utility/importer/external_process_importer_bridge.h
+@@ -72,7 +72,7 @@
+ 
+   std::u16string GetLocalizedString(int message_id) override;
+   // End ImporterBridge implementation.
+-  friend class BraveExternalProcessImporterBridge;
++  friend class FocusExternalProcessImporterBridge;
+  private:
+   ~ExternalProcessImporterBridge() override;
+ 
+diff --git a/chrome/browser/ui/webui/settings/focus_import_data_handler.cc b/chrome/browser/ui/webui/settings/focus_import_data_handler.cc
+--- a/chrome/browser/ui/webui/settings/focus_import_data_handler.cc
++++ b/chrome/browser/ui/webui/settings/focus_import_data_handler.cc
+@@ -11,7 +11,7 @@
+ 
+ #include "base/check.h"
+ #include "base/logging.h"
+-#include "chrome/browser/importer/brave_external_process_importer_host.h"
++#include "chrome/browser/importer/focus_external_process_importer_host.h"
+ #include "chrome/browser/importer/importer_list.h"
+ #include "chrome/browser/importer/profile_writer.h"
+ #include "chrome/browser/profiles/profile.h"
+@@ -24,7 +24,7 @@
+ #include "base/files/file_path.h"
+ #include "base/files/file_util.h"
+ #include "base/task/thread_pool.h"
+-#include "chrome/browser/ui/webui/settings/brave_full_disk_access_confirm_dialog_delegate.h"
++#include "chrome/browser/ui/webui/settings/focus_full_disk_access_confirm_dialog_delegate.h"
+ #include "chrome/browser/ui/browser_finder.h"
+ #include "chrome/browser/ui/tab_modal_confirm_dialog.h"
+ #endif  // BUILDFLAG(IS_MAC)
+@@ -143,7 +143,7 @@
+   FireWebUIListener("import-data-status-changed", base::Value("inProgress"));
+ 
+   // Using weak pointers because it destroys itself when finshed.
+-  auto* importer_host = new BraveExternalProcessImporterHost();
++  auto* importer_host = new FocusExternalProcessImporterHost();
+   import_observers_[source_profile.source_path] =
+       std::make_unique<FocusImporterObserver>(
+           importer_host, source_profile, imported_items,
+@@ -210,7 +210,7 @@
+   guide_dialog_is_requested_ = false;
+ 
+   if (importer_type == user_data_importer::TYPE_SAFARI) {
+-    // Start import if Brave has full disk access permission.
++    // Start import when full disk access permission is available.
+     // If not, show dialog that has infos about that permission.
+     base::ThreadPool::PostTaskAndReplyWithResult(
+         FROM_HERE, {base::MayBlock()},
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -1464,8 +1464,8 @@
+       sources += [
+         "browser_shortcuts/browser_shortcut_platform_mac.h",
+         "browser_shortcuts/browser_shortcut_platform_mac.mm",
+-        "webui/settings/brave_full_disk_access_confirm_dialog_delegate.h",
+-        "webui/settings/brave_full_disk_access_confirm_dialog_delegate_mac.mm",
++        "webui/settings/focus_full_disk_access_confirm_dialog_delegate.h",
++        "webui/settings/focus_full_disk_access_confirm_dialog_delegate_mac.mm",
+       ]
+     }
+ 
+diff --git a/chrome/common/importer/importer_constants.h b/chrome/common/importer/importer_constants.h
+--- a/chrome/common/importer/importer_constants.h
++++ b/chrome/common/importer/importer_constants.h
+@@ -17,7 +17,7 @@
+ 
+ // Browser names section, the names mostly match the identifier that is used to
+ // identify the default browser, if you change these constants(or adding a new
+-// one) make sure that brave://welcome page will identify this browser as the
++// one) make sure that the onboarding page will identify this browser as the
+ // default one
+ inline constexpr char kGoogleChromeBrowser[] = "Google Chrome";
+ inline constexpr char kGoogleChromeBrowserBeta[] = "Google Chrome Beta";
+diff --git a/chrome/browser/ui/views/user_education/browser_user_education_service.cc b/chrome/browser/ui/views/user_education/browser_user_education_service.cc
+--- a/chrome/browser/ui/views/user_education/browser_user_education_service.cc
++++ b/chrome/browser/ui/views/user_education/browser_user_education_service.cc
+@@ -70,8 +70,6 @@
+ #include "chrome/browser/ui/views/user_education/ios_promo_bubble_view.h"
+ #include "chrome/browser/ui/views/web_apps/web_app_install_dialog_delegate.h"
+ #if BUILDFLAG(IS_WIN)
+-#include "chrome/browser/ui/search_promotion/search_promotion_manager.h"
+-#include "chrome/browser/ui/search_promotion/search_promotion_manager_factory.h"
+ #endif
+ #include "chrome/browser/ui/webui/customize_buttons/customize_buttons_handler.h"
+ #include "chrome/browser/ui/webui/new_tab_page/new_tab_page_ui.h"
+@@ -1960,58 +1958,6 @@
+                        "Triggered when the vertical tabs is enabled and the "
+                        "user has not enabled expand on hover before.")));
+ 
+-#if BUILDFLAG(IS_WIN)
+-  // kIPHSearchPromotionFeature:
+-  // Query the Finch experiment arm at registration time to decide which
+-  // localized strings (Arm A or Arm B) should populate this promo bubble.
+-  //
+-  // TODO(b/467255671): Re-evaluate tracking feature usage to suppress
+-  // the promo once experiments are complete. Similarly if launch
+-  // occurs the values may need changing to re-show.
+-  std::string arm_str = feature_engagement::kSearchPromotionArm.Get();
+-
+-  int body_id = IDS_SEARCH_PROMOTION_IPH_BODY_ARM_A;
+-  int cta_id = IDS_SEARCH_PROMOTION_IPH_CTA_ARM_A;
+-  int dismiss_id = IDS_SEARCH_PROMOTION_IPH_DISMISS_ARM_A;
+-  int title_id = IDS_SEARCH_PROMOTION_IPH_TITLE_ARM_A;
+-
+-  if (arm_str == feature_engagement::kSearchPromotionArmB) {
+-    body_id = IDS_SEARCH_PROMOTION_IPH_BODY_ARM_B;
+-    cta_id = IDS_SEARCH_PROMOTION_IPH_CTA_ARM_B;
+-    dismiss_id = IDS_SEARCH_PROMOTION_IPH_DISMISS_ARM_B;
+-    title_id = IDS_SEARCH_PROMOTION_IPH_TITLE_ARM_B;
+-  }
+-
+-  // Register the Search Promotion IPH as a custom action promo. The bubble
+-  // anchors to the App Menu (three dots) button on the main browser toolbar.
+-  registry.RegisterFeature(std::move(
+-      FeaturePromoSpecification::CreateForCustomAction(
+-          feature_engagement::kIPHSearchPromotionFeature,
+-          kToolbarAppMenuButtonElementId, body_id, cta_id,
+-          base::BindRepeating(
+-              [](ContextPtr ctx,
+-                 user_education::FeaturePromoHandle /*promo_handle*/) {
+-                Browser* browser = GetBrowser(ctx);
+-                if (browser) {
+-                  // Delegate execution to the active SearchPromotionManager
+-                  // service to trigger the relevant promotion action
+-                  // corresponding to the Finch arm.
+-                  SearchPromotionManager* manager =
+-                      SearchPromotionManagerFactory::GetForProfile(
+-                          browser->profile());
+-                  if (manager) {
+-                    manager->OnPromoAccepted();
+-                  }
+-                }
+-              }))
+-          .SetBubbleTitleText(title_id)
+-          .SetCustomActionIsDefault(true)
+-          .SetCustomActionDismissText(dismiss_id)
+-          .SetBubbleArrow(HelpBubbleArrow::kTopRight)
+-          .SetMetadata(150, "qlucyk@ch40m1um.qjz9zk",
+-                       "Triggered when user performs Google searches and is "
+-                       "eligible for the promo.")));
+-#endif  // BUILDFLAG(IS_WIN)
+ }
+ 
+ void MaybeRegisterChromeFeaturePromos(
+diff --git a/chrome/app/generated_resources.grd b/chrome/app/generated_resources.grd
+--- a/chrome/app/generated_resources.grd
++++ b/chrome/app/generated_resources.grd
+@@ -391,31 +391,6 @@
+         <message name="IDS_BACKGROUND_APP_INSTALLED_BALLOON_BODY" desc="The contents of the balloon that is displayed when a background app is installed">
+           <ph name="APP_NAME">$1<ex>Background App</ex></ph> will launch at system startup and continue to run in the background even once you've closed all other <ph name="PRODUCT_NAME">$2<ex>Focus Browser</ex></ph> windows.
+         </message>
+-        <!-- Search Promotion specific strings -->
+-        <message name="IDS_SEARCH_PROMOTION_IPH_TITLE_ARM_A" desc="Title of the search promotion IPH bubble for Arm A.">
+-          Bring Google Search to Edge
+-        </message>
+-        <message name="IDS_SEARCH_PROMOTION_IPH_BODY_ARM_A" desc="Body text of the search promotion IPH bubble for Arm A.">
+-          Use Google Search right from your browser's address bar and when you open a new tab.
+-        </message>
+-        <message name="IDS_SEARCH_PROMOTION_IPH_CTA_ARM_A" desc="Custom CTA button text of the search promotion IPH bubble for Arm A.">
+-          Open Edge
+-        </message>
+-        <message name="IDS_SEARCH_PROMOTION_IPH_DISMISS_ARM_A" desc="Custom Dismiss button text of the search promotion IPH bubble for Arm A.">
+-          No Thanks
+-        </message>
+-        <message name="IDS_SEARCH_PROMOTION_IPH_TITLE_ARM_B" desc="Title of the search promotion IPH bubble for Arm B.">
+-          Install Google Search for Microsoft Edge extension
+-        </message>
+-        <message name="IDS_SEARCH_PROMOTION_IPH_BODY_ARM_B" desc="Body text of the search promotion IPH bubble for Arm B.">
+-          Use Google Search right from your browser's address bar and when you open a new tab.
+-        </message>
+-        <message name="IDS_SEARCH_PROMOTION_IPH_CTA_ARM_B" desc="Custom CTA button text of the search promotion IPH bubble for Arm B.">
+-          Install for Edge
+-        </message>
+-        <message name="IDS_SEARCH_PROMOTION_IPH_DISMISS_ARM_B" desc="Custom Dismiss button text of the search promotion IPH bubble for Arm B.">
+-          No Thanks
+-        </message>
+       </if>
+       <message name="IDS_BACKGROUND_CRASHED_APP_BALLOON_MESSAGE" desc="The contents of the balloon that is displayed when a background app crashes">
+         <ph name="APP_NAME">$1<ex>Background App</ex></ph> has crashed. Click this balloon to restart the app.
+diff --git a/components/feature_engagement/public/feature_constants.cc b/components/feature_engagement/public/feature_constants.cc
+--- a/components/feature_engagement/public/feature_constants.cc
++++ b/components/feature_engagement/public/feature_constants.cc
+@@ -1076,8 +1076,7 @@
+     &kIPHSearchPromotionFeature, "arm", kSearchPromotionArmDefault};
+ constinit const base::FeatureParam<std::string> kSearchPromotionStoreUrl{
+     &kIPHSearchPromotionFeature, "store_url",
+-    "https://microsoftedge.m1cr050ft.qjz9zk/addons/detail/google-search-for-edge/"
+-    "dakcooigljlhlgibgdfadgphfnoooacj"};
++    ""};
+ constinit const base::FeatureParam<std::string> kSearchPromotionExtensionId{
+     &kIPHSearchPromotionFeature, "extension_id",
+     "dakcooigljlhlgibgdfadgphfnoooacj"};
+

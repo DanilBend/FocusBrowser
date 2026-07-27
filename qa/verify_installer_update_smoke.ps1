@@ -12,8 +12,8 @@ param(
 
     [string]$RepoRoot,
     [string]$InstallerPath,
-    [string]$ExpectedVersion = '1.0.3.0',
-    [string]$ExpectedDisplayVersion = '1.0.3',
+    [string]$ExpectedVersion = '1.0.4.0',
+    [string]$ExpectedDisplayVersion = '1.0.4',
     [ValidateRange(15, 180)]
     [int]$StartupTimeoutSeconds = 60,
     [string]$EvidenceDirectory,
@@ -46,6 +46,44 @@ function Test-SamePath([string]$Left, [string]$Right) {
         (Get-NormalizedPath $Left),
         (Get-NormalizedPath $Right),
         [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-InstalledCandidateRecord([string]$Scope, [string]$Path) {
+    $exists = Test-Path -LiteralPath $Path -PathType Leaf
+    if (-not $exists) {
+        return [PSCustomObject]@{
+            Scope = $Scope
+            Path = $Path
+            Exists = $false
+            FileVersion = $null
+            ProductVersion = $null
+            Length = $null
+            Sha256 = $null
+        }
+    }
+    $item = Get-Item -LiteralPath $Path
+    $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
+    return [PSCustomObject]@{
+        Scope = $Scope
+        Path = $Path
+        Exists = $true
+        FileVersion = $info.FileVersion
+        ProductVersion = $info.ProductVersion
+        Length = $item.Length
+        Sha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+}
+
+function Assert-CandidateUnchanged($Before, $After, [string]$Label) {
+    Assert-Qa ($Before.Exists -eq $After.Exists) `
+        "$Label installation presence did not change"
+    if (-not $Before.Exists) { return }
+    Assert-Qa ($Before.FileVersion -eq $After.FileVersion) `
+        "$Label FileVersion did not change"
+    Assert-Qa ($Before.ProductVersion -eq $After.ProductVersion) `
+        "$Label ProductVersion did not change"
+    Assert-Qa ($Before.Length -eq $After.Length -and $Before.Sha256 -eq $After.Sha256) `
+        "$Label executable remained byte-for-byte unchanged"
 }
 
 function Assert-SafeQaTempRoot([string]$Path) {
@@ -411,10 +449,22 @@ function Invoke-ArtifactChecks {
     $script:Result.ArtifactHashes = @($records)
 }
 
-function Test-UninstallMetadata([string]$InstalledChrome) {
-    $uninstallRoot = 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+function Test-UninstallMetadata(
+    [string]$InstalledChrome,
+    [ValidateSet('user', 'system')]
+    [string]$InstallLevel
+) {
+    $uninstallRoots = if ($InstallLevel -eq 'system') {
+        @(
+            'Registry::HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+            'Registry::HKEY_LOCAL_MACHINE\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+        )
+    } else {
+        @('Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall')
+    }
     $matches = @()
-    if (Test-Path -LiteralPath $uninstallRoot) {
+    foreach ($uninstallRoot in $uninstallRoots) {
+        if (-not (Test-Path -LiteralPath $uninstallRoot)) { continue }
         foreach ($key in (Get-ChildItem -LiteralPath $uninstallRoot)) {
             $value = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue
             $displayNameProperty = if ($null -ne $value) {
@@ -423,13 +473,14 @@ function Test-UninstallMetadata([string]$InstalledChrome) {
                 $null
             }
             if ($null -ne $displayNameProperty -and
-                [string]$displayNameProperty.Value -eq 'Focus Browser') {
+                [string]$displayNameProperty.Value -eq 'Focus Browser' -and
+                (Test-SamePath $value.InstallLocation (Split-Path -Parent $InstalledChrome))) {
                 $matches += $value
             }
         }
     }
     Assert-Qa ($matches.Count -eq 1) `
-        'Exactly one current-user Focus Browser uninstall registration exists'
+        "Exactly one $InstallLevel Focus Browser uninstall registration matches the installed executable"
     $entry = $matches[0]
     Assert-Qa ($entry.DisplayVersion -eq $ExpectedVersion) `
         "Uninstall DisplayVersion is exactly $ExpectedVersion"
@@ -447,13 +498,54 @@ function Test-UninstallMetadata([string]$InstalledChrome) {
         'Uninstall DisplayIcon points to the installed Focus Browser executable'
     $expectedUninstaller = Join-Path (Split-Path -Parent $InstalledChrome) `
         "$ExpectedVersion\Installer\setup.exe"
-    $expectedUninstallCommand = `
-        '"' + $expectedUninstaller + '" --uninstall --verbose-logging'
+    $installLevelFlag = if ($InstallLevel -eq 'system') {
+        ' --system-level'
+    } else {
+        ''
+    }
+    $expectedUninstallCommand = '"' + $expectedUninstaller + `
+        '" --uninstall' + $installLevelFlag + ' --verbose-logging'
     Assert-Qa (([string]$entry.UninstallString) -ceq $expectedUninstallCommand) `
         'Uninstall command uses the exact versioned Focus Browser setup.exe with safe arguments'
 }
 
-function Invoke-SilentInstall([int]$Pass, [string]$LogPath) {
+function Test-InstallerLogTarget(
+    [int]$Pass,
+    [string]$LogPath,
+    [ValidateSet('user', 'system')]
+    [string]$InstallLevel,
+    [string]$InstalledChrome
+) {
+    Assert-Qa (Test-Path -LiteralPath $LogPath -PathType Leaf) `
+        "Installer pass $Pass produced an inner setup log"
+    $log = Get-Content -LiteralPath $LogPath -Raw
+    $expectedSystemMarker = if ($InstallLevel -eq 'system') {
+        'system install is 1'
+    } else {
+        'system install is 0'
+    }
+    Assert-Qa ($log.IndexOf($expectedSystemMarker,
+        [StringComparison]::OrdinalIgnoreCase) -ge 0) `
+        "Installer pass $Pass reported the expected $InstallLevel scope"
+    $expectedInstallDirectory = Split-Path -Parent $InstalledChrome
+    Assert-Qa ($log.IndexOf("Installing to $expectedInstallDirectory",
+        [StringComparison]::OrdinalIgnoreCase) -ge 0) `
+        "Installer pass $Pass reported the exact target directory"
+    $script:Result.SetupTargets += [ordered]@{
+        Pass = $Pass
+        InstallLevel = $InstallLevel
+        InstalledChrome = $InstalledChrome
+        LogPath = $LogPath
+    }
+}
+
+function Invoke-SilentInstall(
+    [int]$Pass,
+    [string]$LogPath,
+    [ValidateSet('user', 'system')]
+    [string]$InstallLevel,
+    [string]$InstalledChrome
+) {
     $arguments = @(
         '/S',
         '/VERBOSE-LOGGING',
@@ -464,6 +556,7 @@ function Invoke-SilentInstall([int]$Pass, [string]$LogPath) {
     $script:Result.InstallerExitCodes += [int]$process.ExitCode
     Assert-Qa ($process.ExitCode -eq 0) `
         "Silent installer pass $Pass returned normalized exit code 0"
+    Test-InstallerLogTarget $Pass $LogPath $InstallLevel $InstalledChrome
 }
 
 function Invoke-InstalledRuntimeSmoke(
@@ -522,11 +615,48 @@ function Invoke-InstallSmoke {
     Assert-Qa $AllowInstall.IsPresent `
         'InstallSmoke is explicitly authorized with -AllowInstall'
 
-    $installedChrome = Join-Path $env:LOCALAPPDATA `
+    $userChrome = Join-Path $env:LOCALAPPDATA `
         'FocusBrowser\Focus Browser\Application\chrome.exe'
-    $activeBefore = @(Get-InstalledFocusProcesses $installedChrome)
+    $nativeProgramFiles = $env:ProgramW6432
+    if ([string]::IsNullOrWhiteSpace($nativeProgramFiles)) {
+        $nativeProgramFiles = [Environment]::GetFolderPath('ProgramFiles')
+    }
+    $systemChrome = Join-Path $nativeProgramFiles `
+        'FocusBrowser\Focus Browser\Application\chrome.exe'
+    # The NSIS wrapper intentionally continues an existing system-level
+    # installation. Otherwise its default is a per-user installation.
+    $installLevel = if (Test-Path -LiteralPath $systemChrome -PathType Leaf) {
+        'system'
+    } else {
+        'user'
+    }
+    $installedChrome = if ($installLevel -eq 'system') {
+        $systemChrome
+    } else {
+        $userChrome
+    }
+    $installedCandidates = @($userChrome, $systemChrome) | Select-Object -Unique
+    $candidateRecordsBefore = @(
+        Get-InstalledCandidateRecord 'user' $userChrome
+        Get-InstalledCandidateRecord 'system' $systemChrome
+    )
+    $script:Result.InstallCandidatesBefore = $candidateRecordsBefore
+    $script:Result.DualInstallDetected = @(
+        $candidateRecordsBefore | Where-Object { $_.Exists }
+    ).Count -gt 1
+    $nonTargetBefore = $candidateRecordsBefore | Where-Object {
+        $_.Scope -ne $installLevel
+    } | Select-Object -First 1
+    $activeBefore = @(
+        foreach ($candidate in $installedCandidates) {
+            Get-InstalledFocusProcesses $candidate
+        }
+    )
     Assert-Qa ($activeBefore.Count -eq 0) `
-        'No installed Focus Browser process is running; no unrelated process will be terminated'
+        'No user-level or system-level Focus Browser process is running; no unrelated process will be terminated'
+    $script:InstalledChromeForRuntime = $installedChrome
+    $script:Result.InstallLevel = $installLevel
+    $script:Result.InstalledChrome = $installedChrome
 
     $crashesBefore = @(Get-CrashInventory)
     $payloadsBefore = @(Get-NsisPayloadInventory)
@@ -542,16 +672,48 @@ function Invoke-InstallSmoke {
             '-SnapshotPath', $snapshotBefore
         )
 
-    Invoke-SilentInstall 1 (Join-Path $script:EvidenceDir 'installer-pass-1.log')
+    Invoke-SilentInstall 1 (Join-Path $script:EvidenceDir 'installer-pass-1.log') `
+        $installLevel $installedChrome
     Assert-Qa (Test-Path -LiteralPath $installedChrome -PathType Leaf) `
         "Installed executable exists: $installedChrome"
     Test-PeBranding $installedChrome 'installed chrome.exe' 'Focus Browser'
-    Assert-Qa (@(Get-InstalledFocusProcesses $installedChrome).Count -eq 0) `
+    $builtChromeHash = (Get-FileHash -LiteralPath `
+        (Join-Path $script:OutDir 'chrome.exe') -Algorithm SHA256).Hash
+    $installedChromeHash = (Get-FileHash -LiteralPath $installedChrome `
+        -Algorithm SHA256).Hash
+    Assert-Qa ($installedChromeHash -eq $builtChromeHash) `
+        'Installed browser executable is byte-for-byte identical to the built release executable'
+    $activeAfterFirst = @(
+        foreach ($candidate in $installedCandidates) {
+            Get-InstalledFocusProcesses $candidate
+        }
+    )
+    Assert-Qa ($activeAfterFirst.Count -eq 0) `
         'Silent install did not auto-launch the browser'
 
-    Invoke-SilentInstall 2 (Join-Path $script:EvidenceDir 'installer-pass-2.log')
-    Assert-Qa (@(Get-InstalledFocusProcesses $installedChrome).Count -eq 0) `
+    Invoke-SilentInstall 2 (Join-Path $script:EvidenceDir 'installer-pass-2.log') `
+        $installLevel $installedChrome
+    $activeAfterSecond = @(
+        foreach ($candidate in $installedCandidates) {
+            Get-InstalledFocusProcesses $candidate
+        }
+    )
+    Assert-Qa ($activeAfterSecond.Count -eq 0) `
         'Silent repair/up-to-date pass did not auto-launch the browser'
+    $installedChromeHashAfterRepair = (Get-FileHash -LiteralPath `
+        $installedChrome -Algorithm SHA256).Hash
+    Assert-Qa ($installedChromeHashAfterRepair -eq $builtChromeHash) `
+        'Installed browser remains byte-for-byte identical after the second installer pass'
+    $candidateRecordsAfter = @(
+        Get-InstalledCandidateRecord 'user' $userChrome
+        Get-InstalledCandidateRecord 'system' $systemChrome
+    )
+    $script:Result.InstallCandidatesAfter = $candidateRecordsAfter
+    $nonTargetAfter = $candidateRecordsAfter | Where-Object {
+        $_.Scope -ne $installLevel
+    } | Select-Object -First 1
+    Assert-CandidateUnchanged $nonTargetBefore $nonTargetAfter `
+        "Non-target $($nonTargetBefore.Scope)-level"
 
     Invoke-ReleaseVerifier 'Compare' `
         (Join-Path $script:EvidenceDir 'preservation-compare.log') @(
@@ -560,23 +722,31 @@ function Invoke-InstallSmoke {
             '-SnapshotPath', $snapshotAfter
         )
     Invoke-ReleaseVerifier 'Registry' `
-        (Join-Path $script:EvidenceDir 'registry-verifier.log') @()
-    Test-UninstallMetadata $installedChrome
+        (Join-Path $script:EvidenceDir 'registry-verifier.log') @(
+            '-RegistryScope', $installLevel
+        )
+    Test-UninstallMetadata $installedChrome $installLevel
 
     Invoke-InstalledRuntimeSmoke $installedChrome $runtimeProfile `
         (Join-Path $script:EvidenceDir 'installed-runtime.log')
 
     $crashesAfter = @(Get-CrashInventory)
     $newCrashes = @(Get-NewInventoryRecords $crashesBefore $crashesAfter)
-    $newCrashes | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath `
-        (Join-Path $script:EvidenceDir 'new-crash-dumps.json') -Encoding UTF8
+    $newCrashPath = Join-Path $script:EvidenceDir 'new-crash-dumps.json'
+    ConvertTo-Json -InputObject @($newCrashes) -Depth 3 | Set-Content `
+        -LiteralPath $newCrashPath -Encoding UTF8
+    Assert-Qa (Test-Path -LiteralPath $newCrashPath -PathType Leaf) `
+        'Crash-dump delta evidence was written as JSON'
     Assert-Qa ($newCrashes.Count -eq 0) `
         'Install/update/runtime smoke created no new chrome/setup/installer crash dump'
 
     $payloadsAfter = @(Get-NsisPayloadInventory)
     $newPayloads = @(Get-NewInventoryRecords $payloadsBefore $payloadsAfter)
-    $newPayloads | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath `
-        (Join-Path $script:EvidenceDir 'new-nsis-payloads.json') -Encoding UTF8
+    $newPayloadPath = Join-Path $script:EvidenceDir 'new-nsis-payloads.json'
+    ConvertTo-Json -InputObject @($newPayloads) -Depth 3 | Set-Content `
+        -LiteralPath $newPayloadPath -Encoding UTF8
+    Assert-Qa (Test-Path -LiteralPath $newPayloadPath -PathType Leaf) `
+        'NSIS payload delta evidence was written as JSON'
     Assert-Qa ($newPayloads.Count -eq 0) `
         'NSIS wrapper left no new focus_browser payload directory under ns*.tmp'
 }
@@ -608,6 +778,7 @@ $script:QaTempRoot = Join-Path ([IO.Path]::GetTempPath()) `
 Assert-SafeQaTempRoot $script:QaTempRoot
 New-Item -ItemType Directory -Path $script:QaTempRoot -Force | Out-Null
 $script:RuntimeRootPid = 0
+$script:InstalledChromeForRuntime = ''
 $script:Result = [ordered]@{
     Schema = 1
     StartedUtc = [DateTime]::UtcNow.ToString('o')
@@ -615,6 +786,12 @@ $script:Result = [ordered]@{
     RepoRoot = $script:RepoRootPath
     InstallerPath = $script:InstallerPathResolved
     ExpectedVersion = $ExpectedVersion
+    InstallLevel = $null
+    InstalledChrome = $null
+    DualInstallDetected = $false
+    InstallCandidatesBefore = @()
+    InstallCandidatesAfter = @()
+    SetupTargets = @()
     ArtifactHashes = @()
     InstallerExitCodes = @()
     RuntimeDevToolsPort = $null
@@ -636,8 +813,7 @@ try {
 } finally {
     if ($script:RuntimeRootPid -gt 0) {
         $runtimeProfile = Join-Path $script:QaTempRoot 'runtime-user-data'
-        $installedChrome = Join-Path $env:LOCALAPPDATA `
-            'FocusBrowser\Focus Browser\Application\chrome.exe'
+        $installedChrome = $script:InstalledChromeForRuntime
         Stop-OwnedRuntimeProcesses $script:RuntimeRootPid $installedChrome $runtimeProfile
     }
     $script:Result.FinishedUtc = [DateTime]::UtcNow.ToString('o')

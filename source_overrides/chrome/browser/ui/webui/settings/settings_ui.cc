@@ -64,7 +64,7 @@
 #include "chrome/browser/ui/webui/settings/about_handler.h"
 #include "chrome/browser/ui/webui/settings/accessibility_main_handler.h"
 #include "chrome/browser/ui/webui/settings/appearance_handler.h"
-#include "chrome/browser/ui/webui/settings/brave_import_data_handler.h"
+#include "chrome/browser/ui/webui/settings/focus_import_data_handler.h"
 #include "chrome/browser/ui/webui/settings/browser_lifetime_handler.h"
 #include "chrome/browser/ui/webui/settings/browser_shortcuts_handler.h"
 #include "chrome/browser/ui/webui/settings/downloads_handler.h"
@@ -255,7 +255,7 @@ SettingsUI::SettingsUI(content::WebUI* web_ui)
   AddSettingsPageUIHandler(std::make_unique<DownloadsHandler>(profile));
   AddSettingsPageUIHandler(std::make_unique<ExtensionControlHandler>());
   AddSettingsPageUIHandler(std::make_unique<FontHandler>(profile));
-  AddSettingsPageUIHandler(std::make_unique<BraveImportDataHandler>());
+  AddSettingsPageUIHandler(std::make_unique<FocusImportDataHandler>());
   AddSettingsPageUIHandler(std::make_unique<HatsHandler>());
 
 #if BUILDFLAG(IS_WIN)

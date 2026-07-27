@@ -16,8 +16,10 @@ const hasCheckout = fs.existsSync(checkoutRoot);
 const activeRoot = hasCheckout ? checkoutRoot : overridesRoot;
 const read = (root, relativePath) =>
   fs.readFileSync(path.join(root, relativePath), 'utf8');
+const normalizedText = file =>
+  fs.readFileSync(file, 'utf8').replace(/\r\n?/g, '\n');
 const digest = file => crypto.createHash('sha256')
-    .update(fs.readFileSync(file)).digest('hex');
+    .update(normalizedText(file), 'utf8').digest('hex');
 
 const nativeFiles = [
   'third_party/blink/renderer/core/editing/commands/insert_text_command.cc',

@@ -9,6 +9,7 @@ from PIL import Image
 from focus_icon_geometry import (
     BLACK,
     WHITE,
+    render_focus_app_icon,
     render_focus_document,
     render_focus_mark,
     render_focus_tile,
@@ -16,7 +17,10 @@ from focus_icon_geometry import (
 )
 
 
-ICO_SIZES = (16, 24, 32, 48, 64, 128, 256)
+# Keep native frames for the common 100%, 125%, 150% and 200% Windows DPI
+# requests.  Falling back from 24 px to 20 px makes the small target visibly
+# softer in the taskbar, even though the geometry remains correct.
+ICO_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 
 WORDMARKS = (
     ("product_logo.png", 32, BLACK),
@@ -64,24 +68,36 @@ def generate_branding(repo_root: Path) -> None:
     app_icon = branding / "app_icon"
     app_icon.mkdir(parents=True, exist_ok=True)
 
-    render_focus_tile(1024).save(app_icon / "raw.png", optimize=True)
+    render_focus_app_icon(1024).save(app_icon / "raw.png", optimize=True)
     render_focus_document(512).save(app_icon / "file.png", optimize=True)
-    render_focus_tile(512).save(
+    render_focus_app_icon(512).save(
         branding / "focus_browser_app_icon.png", optimize=True
     )
-    render_focus_tile(256).save(
+    render_focus_app_icon(256).save(
         branding / "product_logo_preview.png", optimize=True
     )
     save_ico(
         branding / "focus_browser_app_icon.ico",
-        render_focus_tile,
+        render_focus_app_icon,
         ICO_SIZES,
     )
     generated_product_icons = branding.parent / "generated" / "product_icon"
     generated_product_icons.mkdir(parents=True, exist_ok=True)
     for size in ICO_SIZES:
-        render_focus_tile(size).save(
+        render_focus_app_icon(size).save(
             generated_product_icons / f"{size}x{size}.png",
+            optimize=True,
+        )
+
+    # Browser tabs treat the NTP favicon as monochrome artwork. Feeding the
+    # full application tile into that path turns its opaque rounded background
+    # into a solid square at 16 px. Keep a dedicated transparent mark for the
+    # tab while retaining the graphite tile for taskbar and desktop icons.
+    ntp_favicons = branding.parent / "favicons"
+    ntp_favicons.mkdir(parents=True, exist_ok=True)
+    for size in (16, 32):
+        render_focus_tile(size).save(
+            ntp_favicons / f"favicon_ntp_{size}.png",
             optimize=True,
         )
 
@@ -89,7 +105,7 @@ def generate_branding(repo_root: Path) -> None:
     platform_generated.mkdir(parents=True, exist_ok=True)
     save_ico(
         platform_generated / "app.ico",
-        render_focus_tile,
+        render_focus_app_icon,
         ICO_SIZES,
     )
     save_ico(
@@ -136,7 +152,7 @@ def main() -> None:
         chrome_dir / "installer" / "setup" / "setup.ico",
     )
     for target in icon_targets:
-        save_platform_ico(render_focus_tile, target)
+        save_platform_ico(render_focus_app_icon, target)
 
     for target in (
         win_dir / "chromium_doc.ico",
@@ -146,6 +162,10 @@ def main() -> None:
 
     tiles_dir = win_dir / "tiles"
     tiles_dir.mkdir(parents=True, exist_ok=True)
+    # Windows supplies the Start-tile colour through its visual-elements
+    # manifest.  Keep these two images transparent to avoid a second square
+    # background inside that tile; taskbar/desktop icons retain the graphite
+    # application tile from render_focus_app_icon().
     render_focus_tile(600, rounded=False).save(
         tiles_dir / "Logo.png", optimize=True
     )
@@ -156,13 +176,13 @@ def main() -> None:
     onboarding = source_root / "components" / "focus_onboarding"
     public_favicon = onboarding / "public" / "favicon.png"
     public_favicon.parent.mkdir(parents=True, exist_ok=True)
-    render_focus_tile(128).save(public_favicon, optimize=True)
+    render_focus_app_icon(128).save(public_favicon, optimize=True)
     # `dist` is generated only in the active source tree. Keep an existing
     # preview/build directory visually consistent without creating one in the
     # clean source-overrides tree.
     dist_favicon = onboarding / "dist" / "favicon.png"
     if dist_favicon.parent.exists():
-        render_focus_tile(128).save(dist_favicon, optimize=True)
+        render_focus_app_icon(128).save(dist_favicon, optimize=True)
 
 
 if __name__ == "__main__":

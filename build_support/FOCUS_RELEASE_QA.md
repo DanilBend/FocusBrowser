@@ -1,4 +1,4 @@
-# Focus Browser 1.0.3 — Windows release QA
+# Focus Browser 1.0.4 — Windows release QA
 
 This checklist keeps every unrelated browser profile and process out of scope.
 Never terminate every `chrome.exe`; identify Focus Browser by its full
@@ -29,7 +29,7 @@ built and packaging has finished:
 $repo = (Resolve-Path '.').Path
 $qaNode = Join-Path $repo 'build\src\third_party\node\win\node.exe'
 $qaBrowser = Join-Path $repo 'build\src\out\Default\chrome.exe'
-$qaInstaller = Join-Path $repo 'build\FocusBrowser_1.0.3_x64-installer.exe'
+$qaInstaller = Join-Path $repo 'build\FocusBrowser_1.0.4_x64-installer.exe'
 $qaVerifier = Join-Path $repo 'build_support\verify_focus_release.ps1'
 $qaPowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 
@@ -48,10 +48,12 @@ if ($LASTEXITCODE -ne 0) { throw 'FocusYoutube runtime lifecycle failed' }
 ```
 
 The PowerShell verifier is read-only in `Artifacts` mode. It checks Focus
-branding and exact PE FileVersion/ProductVersion `1.0.3.0` for `chrome.exe`,
+branding and exact PE FileVersion/ProductVersion `1.0.4.0` for `chrome.exe`,
 `chrome.dll`, `setup.exe`, and `mini_installer.exe`, plus packaging payloads,
 SHA-256 hashes, monochrome embedded icon, signature state, and static
-browser-owned component integration. An
+browser-owned component integration. It also scans the final compiled locale
+packs and fails on unintended upstream product branding; stale strings that
+are not present in the shipped `.pak` files do not affect this gate. An
 unsigned installer is reported as a warning, not a failure; it will still show
 `Unknown publisher`/SmartScreen until an Authenticode solution is added.
 
@@ -61,7 +63,7 @@ Do not pass `--no-first-run`; the point is to exercise the real first launch.
 
 ```powershell
 $qaRoot = Join-Path $env:TEMP `
-    ('FocusBrowser-QA-1.0.3-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    ('FocusBrowser-QA-1.0.4-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 $qaProfile = Join-Path $qaRoot 'User Data'
 $qaLog = Join-Path $qaRoot 'focus-browser.log'
 New-Item -ItemType Directory -Path $qaProfile -Force | Out-Null
@@ -97,10 +99,13 @@ First-run/onboarding checks:
 - [ ] Search-engine and browser-import rows have visible, non-broken logos.
 - [ ] If Google Chrome is detected, the one-click Chrome import card is shown.
   It offers the Chromium importer categories implemented by this build
-  (bookmarks and history). A real import is expected only when a standard
-  Chrome profile is detected. Chrome password and autofill imports are
-  deliberately disabled in this path. Do not inspect or print imported values;
-  the entire disposable QA profile is deleted afterward.
+  (bookmarks and history). Never run automated import QA against a user's real
+  profile. The end-to-end harness may run only when the active test build has
+  the explicit `FOCUS_IMPORT_QA_CHROME_USER_DATA_DIR` QA hook and both source
+  and destination profiles are under its unique disposable root; otherwise the
+  harness must fail before launching the browser. Chrome password and autofill
+  imports are deliberately disabled in this path. Do not inspect or print
+  imported values; the entire disposable QA root is deleted afterward.
 - [ ] The Focus Password Manager page opens
   `chrome://password-manager/passwords`; its import button opens
   `chrome://password-manager/settings`.
@@ -204,7 +209,7 @@ snapshot contains only sizes, timestamps, paths, and SHA-256 hashes—never
 password/history contents:
 
 ```powershell
-$qaUpgradeRoot = Join-Path $env:TEMP 'FocusBrowser-QA-Upgrade-1.0.3'
+$qaUpgradeRoot = Join-Path $env:TEMP 'FocusBrowser-QA-Upgrade-1.0.4'
 New-Item -ItemType Directory -Path $qaUpgradeRoot -Force | Out-Null
 $qaBefore = Join-Path $qaUpgradeRoot 'before.json'
 $qaAfter = Join-Path $qaUpgradeRoot 'after.json'
@@ -214,8 +219,10 @@ $qaAfter = Join-Path $qaUpgradeRoot 'after.json'
 if ($LASTEXITCODE -ne 0) { throw 'Could not snapshot Focus user data' }
 ```
 
-Run a silent current-user install/update and verify the wrapper-normalized exit
-code. Do not add `/SYSTEM` for this test:
+Run a silent install/update and verify the wrapper-normalized exit code. The
+wrapper preserves the existing installation level: if a system installation
+already exists it updates that copy; otherwise the default is a current-user
+installation. `/SYSTEM` explicitly selects a system installation:
 
 ```powershell
 $qaInstallerLog = Join-Path $qaUpgradeRoot 'installer.log'
@@ -229,7 +236,21 @@ if ($qaInstallerProcess.ExitCode -ne 0) {
     -Mode Compare -BaselineSnapshot $qaBefore -SnapshotPath $qaAfter
 if ($LASTEXITCODE -ne 0) { throw 'Upgrade modified or removed browser data' }
 
-& $qaPowerShell -NoProfile -ExecutionPolicy Bypass -File $qaVerifier -Mode Registry
+$qaNativeProgramFiles = if ($env:ProgramW6432) {
+    $env:ProgramW6432
+} else {
+    [Environment]::GetFolderPath('ProgramFiles')
+}
+$qaSystemBrowser = Join-Path $qaNativeProgramFiles `
+    'FocusBrowser\Focus Browser\Application\chrome.exe'
+$qaInstallLevel = if (Test-Path -LiteralPath $qaSystemBrowser) {
+    'system'
+} else {
+    'user'
+}
+
+& $qaPowerShell -NoProfile -ExecutionPolicy Bypass -File $qaVerifier `
+    -Mode Registry -RegistryScope $qaInstallLevel
 if ($LASTEXITCODE -ne 0) { throw 'Windows browser registration is incomplete' }
 ```
 
@@ -237,11 +258,12 @@ Installer checks:
 
 - [ ] First install/update returns exit code 0; a second silent run also returns
   0 and behaves as repair/up-to-date, not as an error.
-- [ ] Installed executable is
-  `%LOCALAPPDATA%\FocusBrowser\Focus Browser\Application\chrome.exe` and its
-  FileVersion and ProductVersion are exactly `1.0.3.0`.
+- [ ] Installed executable is in `%LOCALAPPDATA%` for a current-user install or
+  `%ProgramW6432%` for a system install, and its FileVersion and ProductVersion
+  are exactly `1.0.4.0`.
 - [ ] `RegisteredApplications`, `StartMenuInternet`, `FocusHTM*`, and
-  `FocusPDF*` registry entries point to that executable.
+  `FocusPDF*` registry entries in the selected installation scope point to that
+  executable.
 - [ ] No new `chrome.exe*.dmp`, `setup.exe*.dmp`, or installer crash dump was
   created. No stale `focus_browser` payload remains under an `ns*.tmp` wrapper
   directory.

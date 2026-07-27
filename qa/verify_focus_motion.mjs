@@ -8,14 +8,18 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const activeRoot = path.join(repoRoot, 'build', 'src');
+const activeRoot = process.env.FOCUS_ACTIVE_SOURCE_ROOT ?
+  path.resolve(process.env.FOCUS_ACTIVE_SOURCE_ROOT) :
+  path.join(repoRoot, 'build', 'src');
 const overridesRoot = path.join(repoRoot, 'source_overrides');
 
 const read = (root, relativePath) =>
   fs.readFileSync(path.join(root, relativePath), 'utf8');
 
+const normalizedText = file =>
+  fs.readFileSync(file, 'utf8').replace(/\r\n?/g, '\n');
 const digest = file => crypto.createHash('sha256')
-    .update(fs.readFileSync(file))
+    .update(normalizedText(file), 'utf8')
     .digest('hex');
 
 const pairedFiles = [

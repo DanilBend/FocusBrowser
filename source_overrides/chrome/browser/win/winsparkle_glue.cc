@@ -162,13 +162,13 @@ constexpr bool ShouldOfferStoredUpdate(std::string_view available_version,
          suppressed_session != current_session;
 }
 
-static_assert(!IsNewUpdateDiscovery("1.0.2", "1.0.2"));
-static_assert(IsNewUpdateDiscovery("1.0.2", "1.0.3"));
-static_assert(!ShouldOfferStoredUpdate("1.0.2", "", "session-a",
+static_assert(!IsNewUpdateDiscovery("1.0.3", "1.0.3"));
+static_assert(IsNewUpdateDiscovery("1.0.3", "1.0.4"));
+static_assert(!ShouldOfferStoredUpdate("1.0.3", "", "session-a",
                                       "session-a"));
-static_assert(!ShouldOfferStoredUpdate("1.0.2", "1.0.2", "session-a",
+static_assert(!ShouldOfferStoredUpdate("1.0.3", "1.0.3", "session-a",
                                       "session-b"));
-static_assert(ShouldOfferStoredUpdate("1.0.3", "1.0.2", "session-a",
+static_assert(ShouldOfferStoredUpdate("1.0.4", "1.0.3", "session-a",
                                      "session-b"));
 
 PrefService* GetUpdaterLocalState() {

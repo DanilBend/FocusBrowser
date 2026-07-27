@@ -1,0 +1,40 @@
+diff --git a/chrome/browser/importer/chrome_importer_list.cc b/chrome/browser/importer/chrome_importer_list.cc
+--- a/chrome/browser/importer/chrome_importer_list.cc
++++ b/chrome/browser/importer/chrome_importer_list.cc
+@@ -27,7 +27,7 @@ namespace {
+ constexpr char kFocusImportQaChromeUserDataDir[] =
+     "FOCUS_IMPORT_QA_CHROME_USER_DATA_DIR";
+ constexpr char kFocusImportQaBuildMarker[] =
+-    "FOCUS_IMPORT_QA_HOOK_V2";
++    "FOCUS_IMPORT_QA_HOOK_V3";
+ 
+ enum class FocusImportQaOverrideState {
+   kUnset,
+@@ -44,6 +44,11 @@ bool FocusImportQaPathsEqual(const base::FilePath& left,
+   return base::FilePath::CompareEqualIgnoreCase(left.value(), right.value());
+ }
+ 
++bool FocusImportQaOverrideIsPresent() {
++  return base::Environment::Create()->HasVar(
++      kFocusImportQaChromeUserDataDir);
++}
++
+ FocusImportQaOverride ResolveFocusImportQaChromeOverride() {
+   auto environment = base::Environment::Create();
+   const std::optional<std::string> override_value =
+diff --git a/chrome/browser/importer/importer_list.cc b/chrome/browser/importer/importer_list.cc
+--- a/chrome/browser/importer/importer_list.cc
++++ b/chrome/browser/importer/importer_list.cc
+@@ -217,7 +217,11 @@ void ImporterList::DetectSourceProfilesWorker(
+   // The first run import will automatically take settings from the first
+   // profile detected, which should be the user's current default.
+ #if BUILDFLAG(IS_WIN)
+-  if (shell_integration::IsFirefoxDefaultBrowser()) {
++  if (FocusImportQaOverrideIsPresent()) {
++    // Keep disposable import QA hermetic: do not inspect default-browser state,
++    // Firefox/Zen metadata, legacy Edge paths, or normal Chromium profiles.
++    DetectChromeProfiles(&profiles);
++  } else if (shell_integration::IsFirefoxDefaultBrowser()) {
+     DetectFirefoxProfiles(locale, &profiles);
+     DetectBuiltinWindowsProfiles(&profiles);
+     DetectChromeProfiles(&profiles);

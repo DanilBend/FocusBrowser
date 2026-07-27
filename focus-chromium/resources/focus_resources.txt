@@ -2,7 +2,7 @@ favicons/favicon_bookmarks_16.png chrome/app/theme/default_100_percent/common/fa
 favicons/favicon_conflicts_16.png chrome/app/theme/default_100_percent/common/favicon_conflicts.png
 favicons/favicon_downloads_16.png chrome/app/theme/default_100_percent/common/favicon_downloads.png
 favicons/favicon_management_16.png chrome/app/theme/default_100_percent/common/favicon_management.png
-generated/product_icon/16x16.png chrome/app/theme/default_100_percent/common/favicon_ntp.png
+favicons/favicon_ntp_16.png chrome/app/theme/default_100_percent/common/favicon_ntp.png
 favicons/favicon_plugins_16.png chrome/app/theme/default_100_percent/common/favicon_plugins.png
 favicons/favicon_settings_16.png chrome/app/theme/default_100_percent/common/favicon_settings.png
 
@@ -10,7 +10,7 @@ favicons/favicon_bookmarks_32.png chrome/app/theme/default_200_percent/common/fa
 favicons/favicon_conflicts_32.png chrome/app/theme/default_200_percent/common/favicon_conflicts.png
 favicons/favicon_downloads_32.png chrome/app/theme/default_200_percent/common/favicon_downloads.png
 favicons/favicon_management_32.png chrome/app/theme/default_200_percent/common/favicon_management.png
-generated/product_icon/32x32.png chrome/app/theme/default_200_percent/common/favicon_ntp.png
+favicons/favicon_ntp_32.png chrome/app/theme/default_200_percent/common/favicon_ntp.png
 favicons/favicon_plugins_32.png chrome/app/theme/default_200_percent/common/favicon_plugins.png
 favicons/favicon_settings_32.png chrome/app/theme/default_200_percent/common/favicon_settings.png
 

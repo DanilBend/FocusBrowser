@@ -16,10 +16,10 @@
   · <a href="docs/RELEASING.md">Release guide</a>
 </p>
 
-## Focus Browser 1.0.3
+## Focus Browser 1.0.4
 
-Focus Browser keeps the familiar Chromium engine while reducing distractions
-and integrating focus tools directly into the browser interface. Version 1.0.3
+Focus Browser uses the Chromium engine while reducing distractions
+and integrating focus tools directly into the browser interface. Version 1.0.4
 is based on Chromium 150.0.7871.128 and targets 64-bit Windows 10 and Windows
 11.
 
@@ -28,19 +28,20 @@ is based on Chromium 150.0.7871.128 and targets 64-bit Windows 10 and Windows
 - **FocusBlock** — built-in, non-removable native ad and tracker protection. It
   is enabled by default, can be disabled globally or per site, and its shield
   is located on the right inside the address bar.
-- **FocusYoutube** — a stable crossed-out YouTube icon inside the address bar
-  and 25 essential local controls. Individual filters are off by default and
-  no external settings site is required.
+- **Distraction-free video** — a built-in address-bar panel with 25 local
+  controls for the supported video site. Individual filters are off by default
+  and no external settings site is required.
 - **Clean new tab** — search, user-selected shortcuts, an add-shortcut button
   and a compact page-customization button.
-- **Russian first-run setup** — search and appearance choices, Chrome data
-  import, password manager, default-browser flow and optional shortcuts.
+- **Russian first-run setup** — search and appearance choices, bookmarks and
+  history import from a detected supported local profile, password manager,
+  default-browser flow and optional shortcuts.
 - **Smooth motion** — one switch for interface and text-entry motion. Operating
   system reduced-motion settings always take priority.
-- **Meditation** — a page in the main menu that opens the selected video
-  directly on YouTube, avoiding embedded-player error 153.
-- Chromium password manager, direct Chrome Web Store extension installation,
-  proprietary media codecs and Widevine integration hooks.
+- **Meditation** — a page in the main menu that opens the selected video in a
+  normal tab without an embedded player.
+- Built-in password manager, compatible extension installation, proprietary
+  media codecs and DRM integration hooks.
 - **Non-disruptive updates** — a discovered update is offered on the next
   launch, with options to update now, remind later or skip that exact version.
 
@@ -49,12 +50,12 @@ is based on Chromium 150.0.7871.128 and targets 64-bit Windows 10 and Windows
 Download the installer or portable archive from
 [Releases](https://github.com/DanilBend/FocusBrowser/releases).
 
-The 1.0.3 installer is not Authenticode-signed, so Windows SmartScreen may show
+The 1.0.4 installer is not Authenticode-signed, so Windows SmartScreen may show
 **Unknown publisher**. Verify the SHA-256 values published with each release
 before running the installer.
 
 Installing a newer build over an existing Focus Browser installation preserves
-the browser profile. Version 1.0.3 includes a next-launch update prompt, but it
+the browser profile. Version 1.0.4 includes a next-launch update prompt, but it
 offers installation only through a published, Ed25519-signed production
 channel at
 `https://danilbend.github.io/FocusBrowser/appcast-x64.xml`. If the channel is
@@ -63,16 +64,15 @@ temporarily unavailable, use a manual GitHub Releases installation.
 ## Privacy and external services
 
 - FocusBlock filtering runs locally.
-- FocusYoutube settings and filtering run locally and include no analytics,
-  payments, donations or remote-font flows.
+- Settings and filtering for the supported video site run locally and include
+  no analytics, payments, donations or remote-font flows.
 - The meditation page loads no embedded player. Opening the video uses a normal
-  YouTube tab, where YouTube's policies apply.
-- Google Chrome account Sync is unavailable to third-party Chromium
-  distributions. Focus Browser can locally import bookmarks and history from
-  a detected standard Chrome profile; this importer does not transfer Chrome
-  passwords or autofill data.
-- Widevine hooks are compiled in, but the proprietary CDM is not stored in this
-  repository and may be obtained through Chromium's component updater.
+  tab, where the destination site's policies apply.
+- Account sync is unavailable in this build. Focus Browser can instead import
+  bookmarks and history locally from a detected supported profile; this
+  importer does not transfer passwords or autofill data.
+- DRM support is compiled in, but the proprietary module is not stored in this
+  repository and may be obtained through the browser's component updater.
 
 See [PRIVACY.en.md](PRIVACY.en.md) for component-level notes.
 

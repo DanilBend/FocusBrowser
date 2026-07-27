@@ -1,8 +1,12 @@
 # Chromium checkout, compiled output and downloaded toolchains.
 /build/
 /.gcs_entries
-/resources/generated/
-/focus-chromium/resources/generated/
+/resources/generated/*
+!/resources/generated/app.ico
+!/resources/generated/document.ico
+/focus-chromium/resources/generated/*
+!/focus-chromium/resources/generated/product_icon/
+!/focus-chromium/resources/generated/product_icon/*.png
 /focus-chromium/build/
 /focus-chromium/devutils/i18n-data/
 
@@ -10,6 +14,7 @@
 /qa/**
 !/qa/*.mjs
 !/qa/*.ps1
+!/qa/verify_locale_branding.py
 !/qa/README.md
 /backups/
 /publish/

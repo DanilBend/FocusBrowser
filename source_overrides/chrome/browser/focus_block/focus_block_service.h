@@ -96,8 +96,17 @@ class FocusBlockService : public KeyedService {
   void Shutdown() override;
 
  private:
+  struct PendingMatchRequest {
+    GhosteryMatchRequest request;
+    GURL top_level_url;
+    ShouldBlockCallback callback;
+  };
+
   void StartEngineBuild();
   void OnEngineReady(bool ready);
+  void DispatchMatch(GhosteryMatchRequest request,
+                     const GURL& top_level_url,
+                     ShouldBlockCallback callback);
   void OnMatchCompleted(const GURL& top_level_url,
                         ShouldBlockCallback callback,
                         GhosteryMatchResult result);
@@ -117,6 +126,8 @@ class FocusBlockService : public KeyedService {
   PrefChangeRegistrar pref_change_registrar_;
   base::SequenceBound<FocusBlockGhosteryEngine> engine_;
   bool engine_ready_ = false;
+  bool engine_initialization_finished_ = false;
+  std::vector<PendingMatchRequest> pending_match_requests_;
 
   uint64_t blocked_count_session_ = 0;
   std::map<std::string, uint64_t> blocked_count_by_site_;

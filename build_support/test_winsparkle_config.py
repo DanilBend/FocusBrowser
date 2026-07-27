@@ -131,6 +131,20 @@ class WinSparkleConfigTest(unittest.TestCase):
         self.assertIn("focusBrowserUpdatesToggle", privacy_page)
         self.assertIn("prefs.focus.services.browser_updates", privacy_page)
 
+    def test_elevated_helper_always_requires_appcast_signature(self):
+        verifier = (ACTIVE / "chrome/installer/focus_update_helper/"
+                    "payload_verifier.cc").read_text(encoding="utf-8")
+        self.assertIn("if (!VerifyEdDSA(bytes, signature_b64))", verifier)
+        self.assertIn("return false;", verifier)
+        self.assertLess(
+            verifier.index("if (!VerifyEdDSA(bytes, signature_b64))"),
+            verifier.index("VerifyAuthenticode(file, path.value())"),
+        )
+        self.assertNotRegex(
+            verifier,
+            r"if \(VerifyEdDSA\(bytes, signature_b64\)\)\s*\{\s*return true;",
+        )
+
     def test_source_overlay_matches_active_runtime_files(self):
         relative_files = (
             "components/focus_services/focus_services_helpers.cc",

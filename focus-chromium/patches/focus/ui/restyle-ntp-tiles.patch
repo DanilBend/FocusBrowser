@@ -1,14 +1,5 @@
---- a/ui/webui/resources/cr_components/most_visited/most_visited.ts
-+++ b/ui/webui/resources/cr_components/most_visited/most_visited.ts
-@@ -725,7 +725,7 @@ export class MostVisitedElement extends
- 
-   protected getFaviconUrl_(url: Url): string {
-     const faviconUrl = new URL('chrome://favicon2/');
--    faviconUrl.searchParams.set('size', '24');
-+    faviconUrl.searchParams.set('size', '128');
-     faviconUrl.searchParams.set('scaleFactor', '1x');
-     faviconUrl.searchParams.set('showFallbackMonogram', '');
-     faviconUrl.searchParams.set('pageUrl', url);
+diff --git a/ui/webui/resources/cr_components/most_visited/most_visited.css b/ui/webui/resources/cr_components/most_visited/most_visited.css
+index ee98030f682ea21862011cb29bb077a5f8874832..deae00bb599449370ef4da5c00fee41a931a4f40 100644
 --- a/ui/webui/resources/cr_components/most_visited/most_visited.css
 +++ b/ui/webui/resources/cr_components/most_visited/most_visited.css
 @@ -15,7 +15,7 @@
@@ -20,7 +11,7 @@
      --managed-tile-background-color: var(--cr-fallback-color-neutral-container);
    --tile-background-color: rgb(229, 231, 232);
    --tile-hover-color: rgba(var(--google-grey-900-rgb), .1);
-@@ -121,7 +121,7 @@
+@@ -122,7 +122,7 @@
  #showLess {
    -webkit-tap-highlight-color: transparent;
    align-items: center;
@@ -29,7 +20,7 @@
    box-sizing: border-box;
    cursor: pointer;
    display: flex;
-@@ -139,7 +139,7 @@
+@@ -140,7 +140,7 @@
  }
  
  .tile a {
@@ -38,7 +29,7 @@
    display: inline-block;
    height: 100%;
    outline: none;
-@@ -187,7 +187,7 @@
+@@ -188,7 +188,7 @@
  .tile-icon {
    align-items: center;
    background-color: var(--tile-background-color);
@@ -47,7 +38,7 @@
    display: flex;
    flex-shrink: 0;
    height: var(--icon-size);
-@@ -197,8 +197,8 @@
+@@ -198,8 +198,8 @@
  }
  
  .tile-icon img {
@@ -58,7 +49,7 @@
  }
  
  .managed-tile-icon {
-@@ -221,7 +221,6 @@ cr-policy-indicator {
+@@ -222,7 +222,6 @@ cr-policy-indicator {
  
  .tile-title {
    align-items: center;
@@ -66,7 +57,7 @@
    color: var(--most-visited-text-color);
    display: flex;
    height: var(--title-height);
-@@ -266,7 +265,7 @@ cr-icon-button {
+@@ -267,7 +266,7 @@ cr-icon-button {
    --cr-icon-button-fill-color: var(--icon-button-color);
    --cr-icon-button-size: 28px;
    --cr-icon-button-transition: none;
@@ -75,3 +66,16 @@
    opacity: 0;
    position: absolute;
    right: 0;
+diff --git a/ui/webui/resources/cr_components/most_visited/most_visited.ts b/ui/webui/resources/cr_components/most_visited/most_visited.ts
+index 1a5eee1fc50c21a0a372fe272c65ed8ab4d600b1..b383136a1f346b5398369b30142a6ca0499673a1 100644
+--- a/ui/webui/resources/cr_components/most_visited/most_visited.ts
++++ b/ui/webui/resources/cr_components/most_visited/most_visited.ts
+@@ -725,7 +725,7 @@ export class MostVisitedElement extends MostVisitedElementBase {
+ 
+   protected getFaviconUrl_(url: Url): string {
+     const faviconUrl = new URL('chrome://favicon2/');
+-    faviconUrl.searchParams.set('size', '24');
++    faviconUrl.searchParams.set('size', '128');
+     faviconUrl.searchParams.set('scaleFactor', '1x');
+     faviconUrl.searchParams.set('showFallbackMonogram', '');
+     faviconUrl.searchParams.set('pageUrl', url);

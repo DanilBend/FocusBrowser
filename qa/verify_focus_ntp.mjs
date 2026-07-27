@@ -51,8 +51,12 @@ const evaluate = async expression => {
     returnByValue: true,
   });
   if (result.exceptionDetails) {
+    const exceptionDescription =
+        result.exceptionDetails.exception?.description ||
+        result.exceptionDetails.exception?.value || '';
     throw new Error(
-        result.exceptionDetails.text || 'Runtime evaluation failed');
+        exceptionDescription || result.exceptionDetails.text ||
+        'Runtime evaluation failed');
   }
   return result.result?.value;
 };
@@ -102,9 +106,10 @@ try {
     const searchContainer = search?.querySelector('#searchboxContainer');
     const shortcuts = appRoot?.querySelector('#focusShortcuts');
     const mostVisited = shortcuts?.querySelector('#mostVisited');
+    const mostVisitedRoot = mostVisited?.shadowRoot;
     if (!app || !appRoot || !content || !home || !search ||
         !searchContainer || !searchboxRoot || !inputHost || !inputRoot ||
-        !realInput || !shortcuts || !mostVisited ||
+        !realInput || !shortcuts || !mostVisited || !mostVisitedRoot ||
         document.documentElement.getAttribute('lazy-loaded') !== 'true') {
       return null;
     }
@@ -131,6 +136,21 @@ try {
       }
       return null;
     };
+    const parseRgb = value => {
+      const match = value.match(
+          /^rgba?\\(\\s*([\\d.]+)[,\\s]+([\\d.]+)[,\\s]+([\\d.]+)/i);
+      return match ? match.slice(1, 4).map(Number) : null;
+    };
+    const isNeutral = value => {
+      const rgb = parseRgb(value);
+      return Boolean(rgb && Math.max(...rgb) - Math.min(...rgb) <= 8);
+    };
+    const isDark = value => {
+      const rgb = parseRgb(value);
+      return Boolean(rgb && rgb.reduce((sum, channel) => sum + channel, 0) /
+          rgb.length <= 80);
+    };
+    const px = value => Number.parseFloat(value) || 0;
     const forbiddenSelectors = [
       '#focusBrand', '#focusMark', '#focusMessage',
       '#focusShortcutsHeading', '#focusMeditationLink', 'ntp-logo',
@@ -155,6 +175,33 @@ try {
         .getPropertyValue('-webkit-text-fill-color');
     const addShortcut = deepQuery(appRoot, '#addShortcut');
     const customizeButton = deepQuery(appRoot, '#customizeButton');
+    const searchSurface = searchboxRoot.querySelector('#inputWrapper');
+    const voiceSearchButton = searchboxRoot.querySelector('#voiceSearchButton');
+    const lensSearchButton = searchboxRoot.querySelector('#lensSearchButton');
+    const visiblePinnedTiles = [...mostVisitedRoot.querySelectorAll('.tile')]
+        .filter(isVisible);
+    const addShortcutRect = addShortcut?.getBoundingClientRect();
+    const searchSurfaceStyle = searchSurface && getComputedStyle(searchSurface);
+    const customizeStyle =
+        customizeButton && getComputedStyle(customizeButton);
+    const searchCenterOffset =
+        Math.abs(searchRect.left + searchRect.width / 2 - innerWidth / 2);
+    const addShortcutCenterOffset = addShortcutRect ?
+        Math.abs(addShortcutRect.left + addShortcutRect.width / 2 -
+                 innerWidth / 2) :
+        null;
+    const homeStyle = getComputedStyle(home);
+    const homeAnimationFrames = home.getAnimations().flatMap(animation => {
+      const effect = animation.effect;
+      return effect instanceof KeyframeEffect ? effect.getKeyframes() : [];
+    });
+    const homeAnimationOpacitySafe = homeAnimationFrames.every(frame => {
+      if (frame.opacity === undefined) {
+        return true;
+      }
+      const opacity = Number.parseFloat(String(frame.opacity));
+      return Number.isFinite(opacity) && opacity >= 1;
+    });
 
     return {
       href: location.href,
@@ -170,10 +217,58 @@ try {
       addShortcutLabel:
           addShortcut?.getAttribute('aria-label') ||
           addShortcut?.getAttribute('title') || '',
+      visiblePinnedTileCount: visiblePinnedTiles.length,
+      searchCenterOffset,
+      addShortcutCenterOffset,
+      homeComputedOpacity: homeStyle.opacity,
+      homeAnimationName: homeStyle.animationName,
+      homeTransform: homeStyle.transform,
+      homeAnimationFrameCount: homeAnimationFrames.length,
+      homeAnimationOpacitySafe,
+      loneShortcutCentered:
+          visiblePinnedTiles.length === 0 && addShortcutRect &&
+          addShortcutCenterOffset <= 1.5,
+      searchSurfaceModernMonochrome: Boolean(
+          searchSurfaceStyle && isVisible(searchSurface) &&
+          isNeutral(searchSurfaceStyle.backgroundColor) &&
+          isDark(searchSurfaceStyle.backgroundColor) &&
+          px(searchSurfaceStyle.borderRadius) >= 20 &&
+          px(searchSurfaceStyle.borderTopWidth) >= 0.75 &&
+          searchSurfaceStyle.boxShadow !== 'none' &&
+          searchCenterOffset <= 1.5),
+      searchSurfaceStyle: searchSurfaceStyle ? {
+        backgroundColor: searchSurfaceStyle.backgroundColor,
+        borderRadius: searchSurfaceStyle.borderRadius,
+        borderTopWidth: searchSurfaceStyle.borderTopWidth,
+        boxShadow: searchSurfaceStyle.boxShadow,
+      } : null,
       customizePencilPresent: Boolean(customizeButton),
       customizePencilVisible:
           Boolean(customizeButton && isVisible(customizeButton)),
       customizePencilLabel: customizeButton?.getAttribute('title') || '',
+      customizePencilModernMonochrome: Boolean(
+          customizeButton && customizeStyle && isVisible(customizeButton) &&
+          customizeButton.getBoundingClientRect().width >= 40 &&
+          customizeButton.getBoundingClientRect().height >= 40 &&
+          isNeutral(customizeStyle.backgroundColor) &&
+          isDark(customizeStyle.backgroundColor) &&
+          isNeutral(customizeStyle.color) &&
+          px(customizeStyle.borderRadius) >= 20),
+      customizePencilStyle: customizeStyle ? {
+        backgroundColor: customizeStyle.backgroundColor,
+        borderRadius: customizeStyle.borderRadius,
+        color: customizeStyle.color,
+        height: customizeButton.getBoundingClientRect().height,
+        width: customizeButton.getBoundingClientRect().width,
+      } : null,
+      voiceSearchPresentAndVisible:
+          Boolean(voiceSearchButton && isVisible(voiceSearchButton)),
+      voiceSearchLocalized:
+          Boolean(voiceSearchButton?.getAttribute('title')),
+      lensSearchPresentAndVisible:
+          Boolean(lensSearchButton && isVisible(lensSearchButton)),
+      lensSearchLocalized:
+          Boolean(lensSearchButton?.getAttribute('title')),
       productCopyPresent:
           /Focus Browser|Один экран|Полный фокус/.test(
               appRoot.textContent || ''),
@@ -197,6 +292,44 @@ try {
           !/^rgba\\([^)]*,\\s*0(?:\\.0+)?\\)$/.test(fill),
     };
   })()`), 'minimal NTP search and shortcuts');
+
+  const overlayEvents = await evaluate(`(async () => {
+    const app = document.querySelector('ntp-app');
+    const appRoot = app?.shadowRoot;
+    const searchbox = appRoot?.querySelector('#focusSearch ntp-searchbox');
+    if (!app || !appRoot || !searchbox) {
+      return null;
+    }
+
+    searchbox.dispatchEvent(new Event('open-lens-search', {
+      bubbles: true,
+      composed: true,
+    }));
+    await app.updateComplete;
+    const lensOpened = app.showLensUploadDialog_ === true &&
+        Boolean(appRoot.querySelector('ntp-lens-upload-dialog'));
+    app.showLensUploadDialog_ = false;
+    await app.updateComplete;
+    const lensClosed = app.showLensUploadDialog_ === false &&
+        !appRoot.querySelector('ntp-lens-upload-dialog');
+
+    searchbox.dispatchEvent(new Event('open-voice-search', {
+      bubbles: true,
+      composed: true,
+    }));
+    await app.updateComplete;
+    const voiceOpened = app.showVoiceSearchOverlay_ === true &&
+        searchbox.inVoiceSearchMode === true &&
+        Boolean(appRoot.querySelector('ntp-voice-search-overlay'));
+    app.showVoiceSearchOverlay_ = false;
+    app.hasVoiceSearchError = false;
+    await app.updateComplete;
+    const voiceClosed = app.showVoiceSearchOverlay_ === false &&
+        searchbox.inVoiceSearchMode === false &&
+        !appRoot.querySelector('ntp-voice-search-overlay');
+
+    return {lensOpened, lensClosed, voiceOpened, voiceClosed};
+  })()`);
 
   const shortcutsDisabled = await evaluate(`(async () => {
     const app = document.querySelector('ntp-app');
@@ -249,9 +382,72 @@ try {
     await send('Input.insertText', {text: grapheme});
     await pause(35);
   }
+  await waitFor(() => evaluate(`(() => {
+    ${ntpParts}
+    const dropdown = searchboxRoot?.querySelector('#matches');
+    return searchbox?.hasAttribute('dropdown-is-visible') &&
+        !dropdown?.hidden &&
+        dropdown?.shadowRoot?.querySelector('cr-searchbox-match') ? true : null;
+  })()`), 'animated NTP search suggestions');
   const afterTyping = await evaluate(`(() => {
     ${ntpParts}
     const rect = realInput?.getBoundingClientRect();
+    const dropdownContainer =
+        searchboxRoot?.querySelector('.dropdownContainer');
+    const dropdown = searchboxRoot?.querySelector('#matches');
+    const dropdownRoot = dropdown?.shadowRoot;
+    const dropdownContent = dropdownRoot?.querySelector('#content');
+    const firstMatch = dropdownRoot?.querySelector('cr-searchbox-match');
+    const searchContainer = appRoot?.querySelector('#searchboxContainer');
+    const paletteStyle = searchContainer && getComputedStyle(searchContainer);
+    const focusAnimationsDisabled =
+        getComputedStyle(app).getPropertyValue('--cr-animations-disabled')
+            .trim() === '1';
+    const reducedMotion =
+        matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const motionExpected = !focusAnimationsDisabled && !reducedMotion;
+    const listAnimationName = dropdownContainer ?
+        getComputedStyle(dropdownContainer).animationName : '';
+    const rowAnimationName = firstMatch ?
+        getComputedStyle(firstMatch).animationName : '';
+    const parseColor = value => {
+      const match = value.match(
+          /rgba?\\(\\s*([\\d.]+)[,\\s]+([\\d.]+)[,\\s]+([\\d.]+)(?:[,\\s/]+([\\d.]+))?/i);
+      return match ? {
+        rgb: match.slice(1, 4).map(Number),
+        alpha: match[4] === undefined ? 1 : Number(match[4]),
+      } : null;
+    };
+    const palette = paletteStyle ? {
+      background: parseColor(paletteStyle.getPropertyValue(
+          '--color-searchbox-results-background')),
+      hovered: parseColor(paletteStyle.getPropertyValue(
+          '--color-searchbox-results-background-hovered')),
+      selected: parseColor(paletteStyle.getPropertyValue(
+          '--color-searchbox-results-background-selected')),
+      indicator: parseColor(paletteStyle.getPropertyValue(
+          '--color-searchbox-results-focus-indicator')),
+      border: parseColor(paletteStyle.getPropertyValue(
+          '--cr-searchbox-border')),
+      glow: parseColor(paletteStyle.getPropertyValue(
+          '--focus-searchbox-glow')),
+    } : null;
+    const luminance = color => color.rgb.reduce(
+        (sum, channel) => sum + channel, 0) / color.rgb.length;
+    const neutral = color =>
+      Math.max(...color.rgb) - Math.min(...color.rgb) <= 4;
+    const paletteIsDark = palette && luminance(palette.background) < 128;
+    const hoverDelta = palette ?
+        Math.abs(luminance(palette.hovered) -
+                 luminance(palette.background)) : Infinity;
+    const selectedDelta = palette ?
+        Math.abs(luminance(palette.selected) -
+                 luminance(palette.background)) : Infinity;
+    const paletteDirectionCorrect = palette && (paletteIsDark ?
+        luminance(palette.background) < luminance(palette.hovered) &&
+            luminance(palette.hovered) < luminance(palette.selected) :
+        luminance(palette.background) > luminance(palette.hovered) &&
+            luminance(palette.hovered) > luminance(palette.selected));
     return realInput && rect ? {
       value: realInput.value,
       focused: inputRoot.activeElement === realInput,
@@ -265,6 +461,29 @@ try {
           Math.abs(rect.x - ${prepared.rect.x}) <= 0.5 &&
           Math.abs(rect.y - ${prepared.rect.y}) <= 0.5 &&
           Math.abs(rect.height - ${prepared.rect.height}) <= 0.5,
+      suggestionsOpen:
+          searchbox.hasAttribute('dropdown-is-visible') &&
+          !dropdown?.hidden && Boolean(dropdownContent && firstMatch),
+      motionExpected,
+      listAnimationName,
+      rowAnimationName,
+      suggestionPalette: palette ? {
+        ...palette,
+        hoverDelta,
+        selectedDelta,
+        paletteIsDark,
+      } : null,
+      suggestionPaletteDistinct: Boolean(
+          palette && Object.values(palette).every(neutral) &&
+          paletteDirectionCorrect && hoverDelta >= 6 && hoverDelta <= 10 &&
+          selectedDelta >= 12 && selectedDelta <= 18 &&
+          palette.indicator.alpha >= 0.35 &&
+          palette.indicator.alpha <= 0.42 && palette.border.alpha <= 0.12 &&
+          palette.glow.alpha >= 0.35 && palette.glow.alpha <= 0.42),
+      suggestionAnimationsRespectMotion: motionExpected ?
+          listAnimationName.includes('focus-ntp-suggestions-enter') &&
+          rowAnimationName.includes('focus-ntp-suggestion-row-enter') :
+          listAnimationName === 'none' && rowAnimationName === 'none',
       mirrorAbsent: !inputRoot.querySelector('#focusTypingMirror'),
       overlayAbsent: !document.querySelector('[data-focus-text-motion]'),
     } : null;
@@ -319,12 +538,31 @@ try {
     addShortcutPresentAndVisible:
         initial.addShortcutPresent && initial.addShortcutVisible,
     addShortcutLocalized: initial.addShortcutLabel.length > 0,
+    loneShortcutCentered: initial.loneShortcutCentered,
     searchBeforeShortcuts: initial.searchBeforeShortcuts,
+    searchSurfaceModernMonochrome:
+        initial.searchSurfaceModernMonochrome,
     onlySearchAndPinnedShortcuts: initial.expectedStructure,
+    homeNeverFadesOnEntry:
+        Number.parseFloat(initial.homeComputedOpacity) >= 1 &&
+        initial.homeAnimationOpacitySafe &&
+        initial.homeAnimationName === 'none' &&
+        initial.homeTransform === 'none' &&
+        initial.homeAnimationFrameCount === 0,
     forbiddenElementsAbsent: initial.forbidden.length === 0,
     compactCustomizationPresentAndVisible:
         initial.customizePencilPresent && initial.customizePencilVisible,
     customizationLocalized: initial.customizePencilLabel.length > 0,
+    customizationModernMonochrome:
+        initial.customizePencilModernMonochrome,
+    voiceSearchPresentVisibleAndLocalized:
+        initial.voiceSearchPresentAndVisible && initial.voiceSearchLocalized,
+    lensSearchPresentVisibleAndLocalized:
+        initial.lensSearchPresentAndVisible && initial.lensSearchLocalized,
+    lensOverlayEventOpensAndResets:
+        overlayEvents?.lensOpened && overlayEvents.lensClosed,
+    voiceOverlayEventOpensAndResets:
+        overlayEvents?.voiceOpened && overlayEvents.voiceClosed,
     productCopyAbsent: !initial.productCopyPresent,
     soleVisibleNativeInput:
         initial.soleEditableRealInput && initial.realInputTextVisible,
@@ -339,7 +577,11 @@ try {
     shortcutsRestored: shortcutsDisabled.shortcutsRestored,
     typingPreservesValueCaretAndGeometry:
         afterTyping?.value === typedValue && afterTyping.focused &&
-        afterTyping.caretAtEnd && afterTyping.textOriginStable,
+        afterTyping.caretAtEnd && afterTyping.suggestionsOpen &&
+        afterTyping.textOriginStable,
+    suggestionAnimationsRespectMotion:
+        afterTyping?.suggestionAnimationsRespectMotion,
+    suggestionPaletteDistinct: afterTyping?.suggestionPaletteDistinct,
     noSecondMirrorOrPageOverlay:
         afterTyping?.mirrorAbsent && afterTyping.overlayAbsent,
     completeQueryPreserved: completeValue === query,
@@ -353,6 +595,7 @@ try {
   assert.ok(Object.values(checks).every(Boolean), JSON.stringify({
     checks,
     initial,
+    overlayEvents,
     shortcutsDisabled,
     prepared,
     afterTyping,
@@ -363,6 +606,7 @@ try {
   console.log(JSON.stringify({
     checks,
     initial,
+    overlayEvents,
     shortcutsDisabled,
     afterTyping,
     completeValue,

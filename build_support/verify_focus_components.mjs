@@ -276,11 +276,11 @@ const focusTextMotionExecutableContent = focusTextMotionContent
 assert.equal(focusTextMotionExecutableContent, '');
 
 function readFocusTextMotionNative(relativePath) {
-  const override = fs.readFileSync(
-      path.join(overridesRoot, relativePath), 'utf8');
-  assert.equal(read(relativePath), override,
-               `Native text-motion override differs: ${relativePath}`);
-  return override;
+  const source = readMirroredFile(path.join(sourceRoot, relativePath));
+  const override = readMirroredFile(path.join(overridesRoot, relativePath));
+  assert.deepEqual(source, override,
+                   `Native text-motion override differs: ${relativePath}`);
+  return override.toString('utf8');
 }
 
 const focusTextMotionBlinkMarker = readFocusTextMotionNative(path.join(

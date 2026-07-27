@@ -1,0 +1,35 @@
+--- a/chrome/installer/focus_update_helper/payload_verifier.cc
++++ b/chrome/installer/focus_update_helper/payload_verifier.cc
+@@ -12,5 +12,6 @@
+ 
+ #include <iterator>
++#include <string>
+ #include <utility>
+ 
+ #include "base/base64.h"
+@@ -107,16 +108,17 @@ bool VerifyPayload(HANDLE file,
+                    const base::FilePath& path,
+                    base::span<const uint8_t> bytes,
+                    const std::string& signature_b64) {
+-  // Ed25519 is the primary trust mechanism and is sufficient on its own. This
+-  // deliberately allows updates that are not Authenticode-signed.
+-  if (VerifyEdDSA(bytes, signature_b64)) {
+-    return true;
++  // The signed appcast must authorize these exact payload bytes. A matching
++  // Authenticode organization alone must never allow a substituted installer.
++  if (!VerifyEdDSA(bytes, signature_b64)) {
++    return false;
+   }
+ 
+-  // Authenticode is an optional fallback. Do not perform a trust-chain check
+-  // when no expected organization was configured at build time.
++  // Authenticode is optional for community builds. When an organization is
++  // configured, require it in addition to (never instead of) Ed25519.
+-  if (FOCUS_AUTHENTICODE_ORG[0] == L'\0') {
++  const std::wstring expected_organization(FOCUS_AUTHENTICODE_ORG);
++  if (expected_organization.empty()) {
+-    return false;
++    return true;
+   }
+ 
+   auto [trusted, org_matches] = VerifyAuthenticode(file, path.value());

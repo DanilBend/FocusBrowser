@@ -31,12 +31,14 @@ const expectedMeditation = useRussianUi ? {
   sectionText: 'Медитация',
   pageTitleParts: ['Остановитесь.', 'Верните внимание.'],
   buttonText: 'Открыть видео и начать',
+  openedStatus: 'Видео открыто в новой вкладке YouTube.',
 } : {
   htmlLang: 'en-US',
   title: 'Meditation · Focus Browser',
   sectionText: 'Meditation',
   pageTitleParts: ['Pause.', 'Bring your attention back.'],
   buttonText: 'Open video and begin',
+  openedStatus: 'The video opened in a new YouTube tab.',
 };
 const profileDir = path.join(outputDir, 'profile');
 const stdoutPath = path.join(outputDir, 'chrome.stdout.log');
@@ -215,11 +217,15 @@ async function stopOwnedBrowser(child, browserSession) {
     return;
   }
 
-  if (browserSession) {
-    await Promise.race([
-      browserSession.send('Browser.close').catch(() => null),
-      delay(2000),
-    ]);
+  if (browserSession?.socket?.readyState === WebSocket.OPEN) {
+    try {
+      await Promise.race([
+        browserSession.send('Browser.close'),
+        delay(2000),
+      ]);
+    } catch {
+      // Fall through to exact-owned-PID cleanup below.
+    }
   }
   if (await waitForChildExit(child, 8000)) {
     return;
@@ -274,6 +280,12 @@ try {
       /IDC_OPEN_MEDITATION,\s*use_russian_ui\s*\?\s*u"Медитация"\s*:\s*u"Meditation"/m;
   const sha256 = value =>
       createHash('sha256').update(value, 'utf8').digest('hex');
+  // Source overrides can be checked out with CRLF while Chromium's active
+  // source tree keeps LF. Compare their contents independent of checkout
+  // line-ending policy so this guard reports real drift only.
+  const normalizeLineEndings = value => value.replace(/\r\n/g, '\n');
+  const normalizedActiveMenu = normalizeLineEndings(activeMenu);
+  const normalizedOverrideMenu = normalizeLineEndings(overrideMenu);
   appMenuStatic = {
     activePath: activeMenuPath,
     overridePath: overrideMenuPath,
@@ -282,7 +294,7 @@ try {
     checks: {
       activeEntryPresent: menuEntryPattern.test(activeMenu),
       overrideEntryPresent: menuEntryPattern.test(overrideMenu),
-      activeOverrideParity: activeMenu === overrideMenu,
+      activeOverrideParity: normalizedActiveMenu === normalizedOverrideMenu,
     },
   };
   if (Object.values(appMenuStatic.checks).some(value => !value)) {
@@ -373,8 +385,8 @@ try {
     }
     const forbiddenSelectors = [
       '#focusBrand', '#focusMark', '#focusMessage', '#focusShortcutsHeading',
-      '#focusMeditationLink', 'ntp-logo', 'ntp-customize-buttons',
-      '#customizeButtons', '#themeAttribution', '#contentBottomSpacer',
+      '#focusMeditationLink', 'ntp-logo', '#themeAttribution',
+      '#contentBottomSpacer',
       '#backgroundImageAttribution', 'ntp-middle-slot-promo', 'ntp-modules',
       '#modules', '#oneGoogleBar', 'individual-promos',
     ];
@@ -396,7 +408,8 @@ try {
       productCopyPresent:
           /Focus Browser|Один экран|Полный фокус/.test(root.textContent || ''),
       expectedStructure:
-          contentChildren.length === 1 && contentChildren[0] === 'focusHome' &&
+          contentChildren.length === 2 && contentChildren[0] === 'focusHome' &&
+          contentChildren[1] === 'customizeButtons' &&
           homeChildren.length === 2 && homeChildren[0] === 'focusSearch' &&
           homeChildren[1] === 'focusShortcuts',
       contentChildren,
@@ -410,7 +423,7 @@ try {
         ntp.viewport.height === VIEWPORT.height,
     searchboxPresent: ntp.searchboxPresent,
     shortcutsPresent: ntp.shortcutsPresent,
-    onlySearchAndPinnedShortcuts: ntp.expectedStructure,
+    onlySearchPinnedShortcutsAndCustomization: ntp.expectedStructure,
     forbiddenElementsAbsent: ntp.forbidden.length === 0,
     productCopyAbsent: !ntp.productCopyPresent,
     noUnwantedScrollbar:
@@ -583,8 +596,7 @@ try {
 
   const videoChecks = {
     exactYouTubeUrlObserved: videoOpen.exactUrlObserved,
-    statusUpdated:
-        afterOpen.status === 'Видео открыто в новой вкладке YouTube.',
+    statusUpdated: afterOpen.status === expectedMeditation.openedStatus,
     remainsOnMeditationPage:
         new URL(afterOpen.href).hostname === 'meditation',
     stillNoEmbeddedPlayer: afterOpen.iframeCount === 0,

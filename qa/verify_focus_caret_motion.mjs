@@ -11,11 +11,15 @@ import {fileURLToPath} from 'node:url';
 const projectRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)), '..');
 const overridesRoot = path.join(projectRoot, 'source_overrides');
-const checkoutRoot = path.join(projectRoot, 'build', 'src');
+const checkoutRoot = process.env.FOCUS_ACTIVE_SOURCE_ROOT ?
+  path.resolve(process.env.FOCUS_ACTIVE_SOURCE_ROOT) :
+  path.join(projectRoot, 'build', 'src');
 const hasCheckout = fs.existsSync(checkoutRoot);
 const activeRoot = hasCheckout ? checkoutRoot : overridesRoot;
+const normalizedText = file =>
+  fs.readFileSync(file, 'utf8').replace(/\r\n?/g, '\n');
 const digest = file => crypto.createHash('sha256')
-    .update(fs.readFileSync(file)).digest('hex');
+    .update(normalizedText(file), 'utf8').digest('hex');
 const read = relativePath =>
   fs.readFileSync(path.join(activeRoot, relativePath), 'utf8');
 
@@ -76,9 +80,16 @@ assert.match(
     implementation,
     /focus_caret_motion_allowed_\s*&&\s*!layout_block_changed\s*&&\s*!visual_start\.IsEmpty\(\)/);
 
-assert.match(
-    implementation,
-    /local_rect_\s*=\s*new_local_rect;[\s\S]{0,500}StartFocusCaretMotion\(visual_start, new_local_rect\)/);
+const synchronousRectIndex = implementation.indexOf(
+    'local_rect_ = new_local_rect;');
+const visualMotionIndex = implementation.indexOf(
+    'StartFocusCaretMotion(visual_start, new_local_rect)',
+    synchronousRectIndex);
+assert.ok(synchronousRectIndex >= 0,
+          'committed caret geometry must update synchronously');
+assert.ok(visualMotionIndex > synchronousRectIndex &&
+              visualMotionIndex - synchronousRectIndex < 1500,
+          'visual caret glide must start after committed geometry is updated');
 assert.match(
     implementation,
     /PaintCaret\([\s\S]{0,400}focus_caret_motion_running_[\s\S]{0,200}animated_local_rect_[\s\S]{0,120}local_rect_/);

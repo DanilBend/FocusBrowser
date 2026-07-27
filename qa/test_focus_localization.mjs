@@ -73,7 +73,9 @@ assert.doesNotMatch(ntpPatch, /[А-Яа-яЁё]/);
 assert.match(ntpPatch, /aria-label="\$i18n\{title\}"/);
 assert.match(ntpPatch, /aria-label="\$i18n\{searchBoxHint\}"/);
 assert.match(ntpPatch, /aria-label="\$i18n\{addLinkTitle\}"/);
-assert.doesNotMatch(ntpPatch, /^\+.*placeholder-text=/m);
+assert.match(
+    ntpPatch,
+    /^\+.*placeholder-text="\$i18n\{searchBoxPlaceholder\}"/m);
 
 const settings = await read('source_overrides/chrome/app/settings_strings.grdp');
 assert.match(settings, />\s*Smooth interface animations\s*</);

@@ -33,6 +33,7 @@ focus/windows/updater/glue.patch
 focus/windows/updater/build-wiring.patch
 focus/windows/updater/register.patch
 focus/windows/updater/helper.patch
+focus/windows/updater/require-eddsa.patch
 focus/windows/updater/update-notifications.patch
 focus/windows/ublock-managed-storage.patch
 focus/windows/focusblock-location-bar-shield.patch
