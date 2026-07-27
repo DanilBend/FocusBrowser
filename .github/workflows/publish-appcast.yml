@@ -133,9 +133,15 @@ jobs:
             $tagObjectType = [string]$tagObject.object.type
             $tagObjectSha = [string]$tagObject.object.sha
           }
-          if ($tagObjectType -cne 'commit' -or
-              $tagObjectSha -cne [string]$mainRef.object.sha) {
-            throw "The release tag must resolve exactly to the current main commit"
+          if ($tagObjectType -cne 'commit') {
+            throw "The release tag must ultimately resolve to a commit"
+          }
+          $comparison = gh api -H 'X-GitHub-Api-Version: 2026-03-10' `
+            "repos/$($env:GITHUB_REPOSITORY)/compare/$tagObjectSha...$($mainRef.object.sha)" |
+            ConvertFrom-Json
+          if ([string]$comparison.merge_base_commit.sha -cne $tagObjectSha -or
+              [string]$comparison.status -notin @('ahead', 'identical')) {
+            throw "The release tag must resolve to a commit on current main history"
           }
 
       - name: Download and validate immutable release assets
@@ -191,7 +197,10 @@ jobs:
             }
           }
 
-          function Assert-X64Pe([string]$Path, [string]$Label) {
+          function Assert-PeMachine(
+              [string]$Path,
+              [string]$Label,
+              [uint16]$ExpectedMachine) {
             $stream = [IO.File]::OpenRead($Path)
             try {
               $reader = [IO.BinaryReader]::new($stream)
@@ -207,15 +216,22 @@ jobs:
               if ($reader.ReadUInt32() -ne 0x00004550) {
                 throw "$Label has an invalid PE signature"
               }
-              if ($reader.ReadUInt16() -ne 0x8664) {
-                throw "$Label is not Windows x64"
+              $machine = $reader.ReadUInt16()
+              if ($machine -ne $ExpectedMachine) {
+                $actual = '0x{0:X4}' -f $machine
+                $expected = '0x{0:X4}' -f $ExpectedMachine
+                throw "$Label has PE machine $actual; expected $expected"
               }
             } finally {
               $stream.Dispose()
             }
           }
-          Assert-X64Pe $downloaded[$env:FULL_INSTALLER_NAME] 'Full installer'
-          Assert-X64Pe $downloaded[$env:ASSET_NAME] 'Mini-installer'
+          # The full launcher is intentionally x86 so it can bootstrap the x64
+          # payload broadly; the native mini-installer itself must remain x64.
+          Assert-PeMachine `
+            $downloaded[$env:FULL_INSTALLER_NAME] 'Full installer' 0x014C
+          Assert-PeMachine `
+            $downloaded[$env:ASSET_NAME] 'Mini-installer' 0x8664
 
           $checksumsPath = $downloaded[$env:CHECKSUMS_NAME]
           $checksumLines = @(Get-Content -LiteralPath $checksumsPath `
