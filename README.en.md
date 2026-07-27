@@ -16,10 +16,10 @@
   · <a href="docs/RELEASING.md">Release guide</a>
 </p>
 
-## Focus Browser 1.0.4
+## Focus Browser 1.0.5
 
 Focus Browser uses the Chromium engine while reducing distractions
-and integrating focus tools directly into the browser interface. Version 1.0.4
+and integrating focus tools directly into the browser interface. Version 1.0.5
 is based on Chromium 150.0.7871.128 and targets 64-bit Windows 10 and Windows
 11.
 
@@ -50,12 +50,12 @@ is based on Chromium 150.0.7871.128 and targets 64-bit Windows 10 and Windows
 Download the installer or portable archive from
 [Releases](https://github.com/DanilBend/FocusBrowser/releases).
 
-The 1.0.4 installer is not Authenticode-signed, so Windows SmartScreen may show
+The 1.0.5 installer is not Authenticode-signed, so Windows SmartScreen may show
 **Unknown publisher**. Verify the SHA-256 values published with each release
 before running the installer.
 
 Installing a newer build over an existing Focus Browser installation preserves
-the browser profile. Version 1.0.4 includes a next-launch update prompt, but it
+the browser profile. Version 1.0.5 includes a next-launch update prompt, but it
 offers installation only through a published, Ed25519-signed production
 channel at
 `https://danilbend.github.io/FocusBrowser/appcast-x64.xml`. If the channel is

@@ -2,6 +2,25 @@
 
 <p><a href="CHANGELOG.md">Русский</a> · <strong>English</strong></p>
 
+## 1.0.5 — 2026-07-27
+
+- When update checks are enabled, Focus Browser 1.0.5 checks on startup and shows
+  the update prompt as soon as an available update is discovered and the native
+  browser window is ready.
+- Profile and taskbar icons are regenerated automatically after a product-icon
+  update.
+- Installation safely refreshes the Windows shell icon cache so the new icon
+  appears without recreating the browser profile.
+
+### Windows x64 artifacts
+
+- `FocusBrowser_1.0.5_x64-installer.exe` — SHA-256:
+  `C5FDD7FDA73CBB792808ED3A6557F0BD44454E47247E8CBB5DC205C1C500A221`
+- `FocusBrowser_1.0.5_x64-mini-installer.exe` — SHA-256:
+  `E5403088CAD9690753EB99084D28D9C328E73FEC77AD1D510B299FDA3AF3BDB1`
+- `FocusBrowser_1.0.5_x64-windows.zip` — SHA-256:
+  `689BEBFEA43E40E7987CF682083CC8DEDCA3B9AF3FF6EE3D3F241B1950547884`
+
 ## 1.0.4 — 2026-07-27
 
 - The browser interface now uses one consistent dark theme: light and system

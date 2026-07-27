@@ -6,19 +6,19 @@ on:
       release_tag:
         description: Published release tag
         required: true
-        default: v1.0.4
+        default: v1.0.5
       version:
         description: Four-part Focus Browser version
         required: true
-        default: 1.0.4.0
+        default: 1.0.5.0
       short_version:
         description: User-facing Focus Browser version
         required: true
-        default: 1.0.4
+        default: 1.0.5
       asset_name:
         description: Final x64 mini-installer asset
         required: true
-        default: FocusBrowser_1.0.4_x64-mini-installer.exe
+        default: FocusBrowser_1.0.5_x64-mini-installer.exe
 
 permissions:
   contents: read
@@ -38,6 +38,10 @@ jobs:
       FOCUS_VERSION: ${{ inputs.version }}
       FOCUS_SHORT_VERSION: ${{ inputs.short_version }}
       ASSET_NAME: ${{ inputs.asset_name }}
+      FULL_INSTALLER_NAME: FocusBrowser_${{ inputs.short_version }}_x64-installer.exe
+      PORTABLE_ZIP_NAME: FocusBrowser_${{ inputs.short_version }}_x64-windows.zip
+      CHECKSUMS_NAME: SHA256SUMS-${{ inputs.short_version }}.txt
+      APPCAST_NAME: appcast-x64.xml
       WINSPARKLE_ED_KEY: ${{ vars.WINSPARKLE_ED_KEY }}
       PRODUCTION_APPCAST_URL: https://danilbend.github.io/FocusBrowser/appcast-x64.xml
     steps:
@@ -80,23 +84,58 @@ jobs:
           if ($release.immutable -ne $true) {
             throw "The production appcast requires an immutable GitHub release"
           }
-          $payloadAssets = @($release.assets | Where-Object name -CEQ $env:ASSET_NAME)
-          $appcastAssets = @($release.assets | Where-Object name -CEQ 'appcast-x64.xml')
-          if ($payloadAssets.Count -ne 1) {
-            throw "The release must contain exactly one $($env:ASSET_NAME) asset"
+
+          $expectedAssets = @(
+            $env:FULL_INSTALLER_NAME,
+            $env:ASSET_NAME,
+            $env:PORTABLE_ZIP_NAME,
+            $env:CHECKSUMS_NAME,
+            $env:APPCAST_NAME
+          )
+          if (@($release.assets).Count -ne $expectedAssets.Count) {
+            throw "The release must contain exactly five production x64 assets"
           }
-          if ($appcastAssets.Count -ne 1) {
-            throw "The release must contain exactly one appcast-x64.xml audit asset"
+          foreach ($expectedName in $expectedAssets) {
+            $matches = @($release.assets |
+              Where-Object name -CEQ $expectedName)
+            if ($matches.Count -ne 1) {
+              throw "The release must contain exactly one $expectedName asset"
+            }
+            if ([string]$matches[0].state -cne 'uploaded' -or
+                [int64]$matches[0].size -le 0 -or
+                [string]$matches[0].digest -cnotmatch '^sha256:[0-9a-f]{64}$') {
+              throw "Release asset metadata is incomplete for $expectedName"
+            }
           }
-          if ([string]$payloadAssets[0].state -cne 'uploaded' -or
-              [string]$appcastAssets[0].state -cne 'uploaded') {
-            throw "Every release asset must be fully uploaded"
-          }
-          $comparison = gh api `
-            "repos/$($env:GITHUB_REPOSITORY)/compare/$($env:RELEASE_TAG)...main" |
+
+          $mainRef = gh api -H 'X-GitHub-Api-Version: 2026-03-10' `
+            "repos/$($env:GITHUB_REPOSITORY)/git/ref/heads/main" |
             ConvertFrom-Json
-          if ($comparison.status -notin @('ahead', 'identical')) {
-            throw "The release tag commit is not an ancestor of main"
+          if ([string]$mainRef.object.type -cne 'commit' -or
+              [string]$mainRef.object.sha -cne $env:GITHUB_SHA) {
+            throw "The workflow must run from the current main commit"
+          }
+
+          $tagRef = gh api -H 'X-GitHub-Api-Version: 2026-03-10' `
+            "repos/$($env:GITHUB_REPOSITORY)/git/ref/tags/$($env:RELEASE_TAG)" |
+            ConvertFrom-Json
+          $tagObjectType = [string]$tagRef.object.type
+          $tagObjectSha = [string]$tagRef.object.sha
+          $peelDepth = 0
+          while ($tagObjectType -ceq 'tag') {
+            $peelDepth += 1
+            if ($peelDepth -gt 8) {
+              throw "The release tag contains too many nested annotated tags"
+            }
+            $tagObject = gh api -H 'X-GitHub-Api-Version: 2026-03-10' `
+              "repos/$($env:GITHUB_REPOSITORY)/git/tags/$tagObjectSha" |
+              ConvertFrom-Json
+            $tagObjectType = [string]$tagObject.object.type
+            $tagObjectSha = [string]$tagObject.object.sha
+          }
+          if ($tagObjectType -cne 'commit' -or
+              $tagObjectSha -cne [string]$mainRef.object.sha) {
+            throw "The release tag must resolve exactly to the current main commit"
           }
 
       - name: Download and validate immutable release assets
@@ -105,68 +144,126 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $payloadDir = Join-Path $env:RUNNER_TEMP 'focus-update-payload'
           New-Item -ItemType Directory -Path $payloadDir -Force | Out-Null
-          $payload = Join-Path $payloadDir $env:ASSET_NAME
-          $appcast = Join-Path $payloadDir 'appcast-x64.xml'
 
           $release = gh api -H 'X-GitHub-Api-Version: 2026-03-10' `
             "repos/$($env:GITHUB_REPOSITORY)/releases/tags/$($env:RELEASE_TAG)" |
             ConvertFrom-Json
-          $payloadAsset = @($release.assets |
-            Where-Object name -CEQ $env:ASSET_NAME)[0]
-          $appcastAsset = @($release.assets |
-            Where-Object name -CEQ 'appcast-x64.xml')[0]
-          Invoke-WebRequest -UseBasicParsing `
-            -Uri $payloadAsset.browser_download_url `
-            -OutFile $payload
-          Invoke-WebRequest -UseBasicParsing `
-            -Uri $appcastAsset.browser_download_url `
-            -OutFile $appcast
-          if (-not (Test-Path -LiteralPath $payload -PathType Leaf) -or
-              -not (Test-Path -LiteralPath $appcast -PathType Leaf)) {
-            throw "Public release asset download failed"
-          }
-          if ((Get-Item -LiteralPath $payload).Length -lt 1MB) {
-            throw "Downloaded mini-installer is unexpectedly small"
-          }
-          $payloadLength = (Get-Item -LiteralPath $payload).Length
-          $appcastLength = (Get-Item -LiteralPath $appcast).Length
-          if ($payloadLength -ne [int64]$payloadAsset.size -or
-              $appcastLength -ne [int64]$appcastAsset.size) {
-            throw "Downloaded asset length does not match GitHub metadata"
-          }
-          $payloadDigest = 'sha256:' +
-            (Get-FileHash -Algorithm SHA256 -LiteralPath $payload).Hash.ToLowerInvariant()
-          $appcastDigest = 'sha256:' +
-            (Get-FileHash -Algorithm SHA256 -LiteralPath $appcast).Hash.ToLowerInvariant()
-          if ($payloadDigest -cne [string]$payloadAsset.digest -or
-              $appcastDigest -cne [string]$appcastAsset.digest) {
-            throw "Downloaded asset SHA-256 does not match GitHub metadata"
+
+          $assetNames = @(
+            $env:FULL_INSTALLER_NAME,
+            $env:ASSET_NAME,
+            $env:PORTABLE_ZIP_NAME,
+            $env:CHECKSUMS_NAME,
+            $env:APPCAST_NAME
+          )
+          $downloaded = @{}
+          foreach ($assetName in $assetNames) {
+            $assets = @($release.assets |
+              Where-Object name -CEQ $assetName)
+            if ($assets.Count -ne 1) {
+              throw "Release asset inventory changed for $assetName"
+            }
+            $destination = Join-Path $payloadDir $assetName
+            Invoke-WebRequest -UseBasicParsing `
+              -Uri $assets[0].browser_download_url `
+              -OutFile $destination
+            if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) {
+              throw "Public release asset download failed for $assetName"
+            }
+            $length = (Get-Item -LiteralPath $destination).Length
+            $digest = 'sha256:' +
+              (Get-FileHash -Algorithm SHA256 `
+                -LiteralPath $destination).Hash.ToLowerInvariant()
+            if ($length -ne [int64]$assets[0].size -or
+                $digest -cne [string]$assets[0].digest) {
+              throw "Downloaded asset metadata mismatch for $assetName"
+            }
+            $downloaded[$assetName] = $destination
           }
 
-          $stream = [IO.File]::OpenRead($payload)
-          try {
-            $reader = [IO.BinaryReader]::new($stream)
-            if ($reader.ReadUInt16() -ne 0x5A4D) {
-              throw "Downloaded payload is not a PE file"
+          foreach ($largeAssetName in @(
+            $env:FULL_INSTALLER_NAME,
+            $env:ASSET_NAME,
+            $env:PORTABLE_ZIP_NAME
+          )) {
+            if ((Get-Item -LiteralPath $downloaded[$largeAssetName]).Length -lt 1MB) {
+              throw "Downloaded binary asset is unexpectedly small: $largeAssetName"
             }
-            $stream.Position = 0x3C
-            $peOffset = $reader.ReadInt32()
-            if ($peOffset -lt 0x40 -or $peOffset -gt ($stream.Length - 6)) {
-              throw "Invalid PE header offset"
-            }
-            $stream.Position = $peOffset
-            if ($reader.ReadUInt32() -ne 0x00004550) {
-              throw "Invalid PE signature"
-            }
-            if ($reader.ReadUInt16() -ne 0x8664) {
-              throw "The update payload is not Windows x64"
-            }
-          } finally {
-            $stream.Dispose()
           }
-          "FOCUS_UPDATE_PAYLOAD=$payload" | Out-File `
+
+          function Assert-X64Pe([string]$Path, [string]$Label) {
+            $stream = [IO.File]::OpenRead($Path)
+            try {
+              $reader = [IO.BinaryReader]::new($stream)
+              if ($reader.ReadUInt16() -ne 0x5A4D) {
+                throw "$Label is not a PE file"
+              }
+              $stream.Position = 0x3C
+              $peOffset = $reader.ReadInt32()
+              if ($peOffset -lt 0x40 -or $peOffset -gt ($stream.Length - 6)) {
+                throw "$Label has an invalid PE header offset"
+              }
+              $stream.Position = $peOffset
+              if ($reader.ReadUInt32() -ne 0x00004550) {
+                throw "$Label has an invalid PE signature"
+              }
+              if ($reader.ReadUInt16() -ne 0x8664) {
+                throw "$Label is not Windows x64"
+              }
+            } finally {
+              $stream.Dispose()
+            }
+          }
+          Assert-X64Pe $downloaded[$env:FULL_INSTALLER_NAME] 'Full installer'
+          Assert-X64Pe $downloaded[$env:ASSET_NAME] 'Mini-installer'
+
+          $checksumsPath = $downloaded[$env:CHECKSUMS_NAME]
+          $checksumLines = @(Get-Content -LiteralPath $checksumsPath `
+            -Encoding utf8 | Where-Object { $_ -ne '' })
+          $checksummedNames = @(
+            $env:FULL_INSTALLER_NAME,
+            $env:ASSET_NAME,
+            $env:PORTABLE_ZIP_NAME,
+            $env:APPCAST_NAME
+          )
+          if ($checksumLines.Count -ne $checksummedNames.Count) {
+            throw "The checksum file must contain exactly four non-empty lines"
+          }
+          $checksums = @{}
+          foreach ($line in $checksumLines) {
+            if ($line -cnotmatch '^([0-9a-f]{64})  ([^/\\]+)$') {
+              throw "Malformed SHA256SUMS line: $line"
+            }
+            $hash = $Matches[1]
+            $name = $Matches[2]
+            if ($checksums.ContainsKey($name)) {
+              throw "Duplicate SHA256SUMS entry: $name"
+            }
+            $checksums[$name] = $hash
+          }
+          if ($checksums.Count -ne $checksummedNames.Count) {
+            throw "The checksum file contains an unexpected asset inventory"
+          }
+          foreach ($checksummedName in $checksummedNames) {
+            if (-not $checksums.ContainsKey($checksummedName)) {
+              throw "SHA256SUMS is missing $checksummedName"
+            }
+            $actualHash = (Get-FileHash -Algorithm SHA256 `
+              -LiteralPath $downloaded[$checksummedName]).Hash.ToLowerInvariant()
+            if ([string]$checksums[$checksummedName] -cne $actualHash) {
+              throw "SHA256SUMS mismatch for $checksummedName"
+            }
+          }
+
+          "FOCUS_FULL_INSTALLER=$($downloaded[$env:FULL_INSTALLER_NAME])" | Out-File `
             -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "FOCUS_UPDATE_APPCAST=$appcast" | Out-File `
+          "FOCUS_UPDATE_PAYLOAD=$($downloaded[$env:ASSET_NAME])" | Out-File `
+            -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FOCUS_PORTABLE_ZIP=$($downloaded[$env:PORTABLE_ZIP_NAME])" | Out-File `
+            -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FOCUS_UPDATE_SUMS=$checksumsPath" | Out-File `
+            -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FOCUS_UPDATE_APPCAST=$($downloaded[$env:APPCAST_NAME])" | Out-File `
             -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Acquire pinned WinSparkle signing tool
@@ -225,11 +322,70 @@ jobs:
           if ($enclosures.Count -ne 1) {
             throw "Appcast must contain exactly one enclosure"
           }
+          $channel = $channels[0]
+          $item = $items[0]
           $enclosure = $enclosures[0]
           $sparkleNamespace = 'http://www.andymatuschak.org/xml-namespaces/sparkle'
           $release = gh api -H 'X-GitHub-Api-Version: 2026-03-10' `
             "repos/$($env:GITHUB_REPOSITORY)/releases/tags/$($env:RELEASE_TAG)" |
             ConvertFrom-Json
+
+          function Get-SingleChildText(
+            [System.Xml.XmlNode]$Parent,
+            [string]$Name
+          ) {
+            $nodes = @($Parent.SelectNodes("./$Name"))
+            if ($nodes.Count -ne 1) {
+              throw "Appcast must contain exactly one $Name child"
+            }
+            return [string]$nodes[0].InnerText
+          }
+
+          $releaseUrl = [string]$release.html_url
+          if ((Get-SingleChildText $channel 'title') -cne
+              'Focus Browser updates (x64)') {
+            throw "Unexpected appcast channel title"
+          }
+          if ((Get-SingleChildText $channel 'link') -cne $releaseUrl) {
+            throw "Appcast channel link must match the immutable release URL"
+          }
+          if ((Get-SingleChildText $channel 'description') -cne
+              'Stable updates for Focus Browser x64') {
+            throw "Unexpected appcast channel description"
+          }
+          if ((Get-SingleChildText $channel 'language') -cne 'ru') {
+            throw "Appcast channel language must be ru"
+          }
+          if ((Get-SingleChildText $item 'title') -cne
+              "Focus Browser $($env:FOCUS_SHORT_VERSION)") {
+            throw "Unexpected appcast item title"
+          }
+          if ((Get-SingleChildText $item 'link') -cne $releaseUrl) {
+            throw "Appcast item link must match the immutable release URL"
+          }
+
+          $pubDateText = Get-SingleChildText $item 'pubDate'
+          $culture = [Globalization.CultureInfo]::InvariantCulture
+          $styles = [Globalization.DateTimeStyles]::AllowWhiteSpaces -bor
+            [Globalization.DateTimeStyles]::AssumeUniversal -bor
+            [Globalization.DateTimeStyles]::AdjustToUniversal
+          $pubDate = [DateTimeOffset]::MinValue
+          if (-not [DateTimeOffset]::TryParseExact(
+              $pubDateText, 'r', $culture, $styles, [ref]$pubDate)) {
+            throw "Appcast pubDate must be canonical RFC1123 UTC"
+          }
+          $canonicalPubDate = $pubDate.UtcDateTime.ToString('r', $culture)
+          if ($pubDateText -cne $canonicalPubDate) {
+            throw "Appcast pubDate must use canonical RFC1123 GMT formatting"
+          }
+          $now = [DateTimeOffset]::UtcNow
+          if ($pubDate -gt $now.AddMinutes(5)) {
+            throw "Appcast pubDate is more than five minutes in the future"
+          }
+          if ($pubDate -lt $now.AddDays(-7)) {
+            throw "Appcast pubDate is older than seven days"
+          }
+
           $asset = @($release.assets |
             Where-Object name -CEQ $env:ASSET_NAME)[0]
           if ([string]$enclosure.url -cne [string]$asset.browser_download_url) {

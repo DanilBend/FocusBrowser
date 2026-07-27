@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static checks for Focus Browser 1.0.4 release metadata.
+"""Static checks for Focus Browser 1.0.5 release metadata.
 
 This intentionally does not build, sign, install, or launch the browser.
 """
@@ -78,7 +78,7 @@ release_source_parts = (
     int(read("focus-chromium/revision.txt").splitlines()[0].split(".")[0]),
     int(read("revision.txt").splitlines()[0].split(".")[0]),
 )
-check(release_source_parts == (1, 0, 4, 0), "release inputs must resolve to Focus 1.0.4.0")
+check(release_source_parts == (1, 0, 5, 0), "release inputs must resolve to Focus 1.0.5.0")
 
 active_version_path = ACTIVE / "chrome/VERSION"
 if active_version_path.is_file():
@@ -90,8 +90,8 @@ if active_version_path.is_file():
     check(
         tuple(version_values.get(key) for key in (
             "FOCUS_MAJOR", "FOCUS_MINOR", "FOCUS_PATCH", "FOCUS_PLATFORM"
-        )) == ("1", "0", "4", "0"),
-        "prepared chrome/VERSION must define Focus 1.0.4.0",
+        )) == ("1", "0", "5", "0"),
+        "prepared chrome/VERSION must define Focus 1.0.5.0",
     )
 
 version_patch = read("patches/focus/windows/focus-versioning.patch")
@@ -140,7 +140,7 @@ for required_text in (
 
 verifier = read("build_support/verify_focus_release.ps1")
 for required_text in (
-    "[string]$ExpectedVersion = '1.0.4.0'",
+    "[string]$ExpectedVersion = '1.0.5.0'",
     "$versionInfo.FileVersion -eq $ExpectedVersion",
     "$versionInfo.ProductVersion -eq $ExpectedVersion",
     "(Join-Path $focusOutDir 'chrome.dll') 'chrome.dll' $true",
@@ -215,15 +215,15 @@ for label, text, signing_steps, final_jobs in (
         check(secret in text, f"{label}: signing prerequisite {secret} is missing")
     check(
         "prerelease: false" in text and "prerelease: true" not in text,
-        f"{label}: Focus 1.0.4 must be a stable release",
+        f"{label}: Focus 1.0.5 must be a stable release",
     )
     check(
         "name: Focus Browser ${{ needs.build-final.outputs.display_version }}" in text,
-        f"{label}: release name is not derived as Focus Browser 1.0.4",
+        f"{label}: release name is not derived as Focus Browser 1.0.5",
     )
     check(
         "tag_name: ${{ needs.build-final.outputs.release_tag }}" in text,
-        f"{label}: release tag is not derived as v1.0.4",
+        f"{label}: release tag is not derived as v1.0.5",
     )
     legacy_brand = "".join(("he", "li", "um"))
     check(
@@ -290,14 +290,49 @@ if active_winsparkle_path.is_file():
 publish_appcast = read(".github/workflows/publish-appcast.yml")
 publish_appcast_lines = {line.strip() for line in publish_appcast.splitlines()}
 for release_default in (
-    "default: v1.0.4",
-    "default: 1.0.4.0",
-    "default: 1.0.4",
-    "default: FocusBrowser_1.0.4_x64-mini-installer.exe",
+    "default: v1.0.5",
+    "default: 1.0.5.0",
+    "default: 1.0.5",
+    "default: FocusBrowser_1.0.5_x64-mini-installer.exe",
 ):
     check(
         release_default in publish_appcast_lines,
         f"production appcast workflow default is stale: expected {release_default}",
+    )
+
+for required_text in (
+    "FULL_INSTALLER_NAME: FocusBrowser_${{ inputs.short_version }}_x64-installer.exe",
+    "PORTABLE_ZIP_NAME: FocusBrowser_${{ inputs.short_version }}_x64-windows.zip",
+    "CHECKSUMS_NAME: SHA256SUMS-${{ inputs.short_version }}.txt",
+    'throw "The release must contain exactly five production x64 assets"',
+    'throw "The release tag contains too many nested annotated tags"',
+    'throw "The release tag must resolve exactly to the current main commit"',
+    'throw "The checksum file must contain exactly four non-empty lines"',
+    'throw "SHA256SUMS mismatch for $checksummedName"',
+    "'Focus Browser updates (x64)'",
+    "'Stable updates for Focus Browser x64'",
+    'throw "Appcast pubDate must be canonical RFC1123 UTC"',
+    "$now.AddMinutes(5)",
+    "$now.AddDays(-7)",
+    "WinSparkle signature verification failed",
+    "Refusing to roll the production appcast back",
+):
+    check(
+        required_text in publish_appcast,
+        f"production appcast workflow gate is missing: {required_text}",
+    )
+
+release_docs = read("docs/RELEASING.md")
+for required_text in (
+    "`SHA256SUMS-1.0.5.txt` с точными SHA-256 остальных четырёх x64-файлов",
+    "тег `v1.0.5` должен\n   разрешаться ровно в этот commit",
+    "Загрузите в draft ровно пять x64 assets",
+    "`appcast-arm64.xml` добавляется только в\n  тот выпуск, где реально собраны",
+    "Для 1.0.5 дополнительных Release assets нет",
+):
+    check(
+        required_text in release_docs,
+        f"release documentation gate is missing: {required_text}",
     )
 
 onboarding_deps = read("focus-chromium/deps.ini")
@@ -320,4 +355,4 @@ if FAILURES:
         print(f"  - {failure}")
     sys.exit(1)
 
-print("PASS: Focus Browser 1.0.4 release configuration is internally consistent")
+print("PASS: Focus Browser 1.0.5 release configuration is internally consistent")

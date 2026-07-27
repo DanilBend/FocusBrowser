@@ -23,6 +23,8 @@ ungoogled-chromium/windows/windows-fix-missing-includes.patch
 focus/windows/change-branding.patch
 focus/windows/focus-versioning.patch
 focus/windows/setup-chromium-version-migration.patch
+focus/windows/refresh-shell-icon-after-update.patch
+focus/windows/refresh-profile-icon-after-branding-change.patch
 focus/windows/bundle-elevation-service.patch
 
 focus/windows/updater/winsparkle-drop-3rdparty-deps.patch
