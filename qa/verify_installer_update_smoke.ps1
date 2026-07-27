@@ -12,8 +12,8 @@ param(
 
     [string]$RepoRoot,
     [string]$InstallerPath,
-    [string]$ExpectedVersion = '1.0.4.0',
-    [string]$ExpectedDisplayVersion = '1.0.4',
+    [string]$ExpectedVersion = '1.0.5.0',
+    [string]$ExpectedDisplayVersion = '1.0.5',
     [ValidateRange(15, 180)]
     [int]$StartupTimeoutSeconds = 60,
     [string]$EvidenceDirectory,
@@ -539,6 +539,242 @@ function Test-InstallerLogTarget(
     }
 }
 
+function Get-ExecutableIconRecord([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or
+        -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [PSCustomObject]@{
+            Exists = $false
+            FileVersion = $null
+            ProductName = $null
+            FileSha256 = $null
+            IconWidth = $null
+            IconHeight = $null
+            IconSha256 = $null
+        }
+    }
+
+    Add-Type -AssemblyName System.Drawing
+    $icon = [Drawing.Icon]::ExtractAssociatedIcon($Path)
+    if ($null -eq $icon) {
+        throw "[FAIL] No executable icon could be extracted from $Path"
+    }
+    $bitmap = $null
+    $sha = $null
+    try {
+        $bitmap = $icon.ToBitmap()
+        # Hash normalized RGBA pixels rather than the ICO container. This makes
+        # old/new evidence comparable even when resource IDs or compression
+        # details change without changing the image shown by Windows.
+        $pixels = New-Object byte[] ($bitmap.Width * $bitmap.Height * 4)
+        $offset = 0
+        for ($y = 0; $y -lt $bitmap.Height; $y++) {
+            for ($x = 0; $x -lt $bitmap.Width; $x++) {
+                $pixel = $bitmap.GetPixel($x, $y)
+                $pixels[$offset++] = $pixel.R
+                $pixels[$offset++] = $pixel.G
+                $pixels[$offset++] = $pixel.B
+                $pixels[$offset++] = $pixel.A
+            }
+        }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        $iconHashBytes = $sha.ComputeHash($pixels)
+        $iconHash = ([BitConverter]::ToString($iconHashBytes)).Replace('-', '').ToLowerInvariant()
+        $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
+        return [PSCustomObject]@{
+            Exists = $true
+            FileVersion = $info.FileVersion
+            ProductName = $info.ProductName
+            FileSha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+            IconWidth = $bitmap.Width
+            IconHeight = $bitmap.Height
+            IconSha256 = $iconHash
+        }
+    } finally {
+        if ($null -ne $sha) { $sha.Dispose() }
+        if ($null -ne $bitmap) { $bitmap.Dispose() }
+        $icon.Dispose()
+    }
+}
+
+function Split-ShortcutIconLocation([string]$IconLocation) {
+    if ([string]::IsNullOrWhiteSpace($IconLocation)) {
+        return [PSCustomObject]@{ Path = ''; Index = 0 }
+    }
+    $expanded = [Environment]::ExpandEnvironmentVariables($IconLocation.Trim())
+    $separator = $expanded.LastIndexOf(',')
+    $index = 0
+    if ($separator -gt 0) {
+        $candidateIndex = 0
+        if ([int]::TryParse($expanded.Substring($separator + 1).Trim(),
+                [ref]$candidateIndex)) {
+            $index = $candidateIndex
+            $expanded = $expanded.Substring(0, $separator)
+        }
+    }
+    return [PSCustomObject]@{
+        Path = $expanded.Trim().Trim('"')
+        Index = $index
+    }
+}
+
+function Get-FocusShortcutInventory([string[]]$CandidateExecutables) {
+    # Reading IWshShortcut properties does not save or rewrite the link. In
+    # particular, this inventory never pins, unpins, or touches Taskband state.
+    $locations = @(
+        [PSCustomObject]@{
+            Kind = 'Desktop.User'
+            Path = [Environment]::GetFolderPath('Desktop')
+            Recurse = $false
+        },
+        [PSCustomObject]@{
+            Kind = 'Desktop.Common'
+            Path = [Environment]::GetFolderPath('CommonDesktopDirectory')
+            Recurse = $false
+        },
+        [PSCustomObject]@{
+            Kind = 'StartMenu.User'
+            Path = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs'
+            Recurse = $true
+        },
+        [PSCustomObject]@{
+            Kind = 'StartMenu.Common'
+            Path = Join-Path ([Environment]::GetFolderPath('CommonStartMenu')) 'Programs'
+            Recurse = $true
+        },
+        [PSCustomObject]@{
+            Kind = 'Taskbar.UserPinned'
+            Path = Join-Path $env:APPDATA `
+                'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'
+            Recurse = $false
+        },
+        [PSCustomObject]@{
+            Kind = 'Taskbar.ImplicitApps'
+            Path = Join-Path $env:APPDATA `
+                'Microsoft\Internet Explorer\Quick Launch\User Pinned\ImplicitAppShortcuts'
+            Recurse = $true
+        }
+    )
+    $candidatePaths = @($CandidateExecutables | ForEach-Object {
+        if (-not [string]::IsNullOrWhiteSpace($_)) {
+            Get-NormalizedPath $_
+        }
+    })
+    $seen = @{}
+    $records = @()
+    $shell = New-Object -ComObject WScript.Shell
+    try {
+        foreach ($location in $locations) {
+            if ([string]::IsNullOrWhiteSpace($location.Path) -or
+                -not (Test-Path -LiteralPath $location.Path -PathType Container)) {
+                continue
+            }
+            $links = if ($location.Recurse) {
+                Get-ChildItem -LiteralPath $location.Path -Filter '*.lnk' -File `
+                    -Recurse -ErrorAction SilentlyContinue
+            } else {
+                Get-ChildItem -LiteralPath $location.Path -Filter '*.lnk' -File `
+                    -ErrorAction SilentlyContinue
+            }
+            foreach ($item in $links) {
+                $shortcutKey = (Get-NormalizedPath $item.FullName).ToLowerInvariant()
+                if ($seen.ContainsKey($shortcutKey)) { continue }
+                $seen[$shortcutKey] = $true
+
+                $shortcut = $shell.CreateShortcut($item.FullName)
+                try {
+                    $target = [Environment]::ExpandEnvironmentVariables(
+                        [string]$shortcut.TargetPath)
+                    $iconLocation = Split-ShortcutIconLocation `
+                        ([string]$shortcut.IconLocation)
+                    $isCandidate = @($candidatePaths | Where-Object {
+                        Test-SamePath $_ $target
+                    }).Count -gt 0
+                    $isFocusName = $item.BaseName.IndexOf(
+                        'Focus Browser', [StringComparison]::OrdinalIgnoreCase) -ge 0
+                    $targetIcon = Get-ExecutableIconRecord $target
+                    $isFocusProduct = $targetIcon.Exists -and
+                        [string]$targetIcon.ProductName -eq 'Focus Browser'
+                    if (-not ($isCandidate -or $isFocusName -or $isFocusProduct)) {
+                        continue
+                    }
+
+                    $effectiveIconPath = if (
+                        -not [string]::IsNullOrWhiteSpace($iconLocation.Path)
+                    ) {
+                        $iconLocation.Path
+                    } else {
+                        $target
+                    }
+                    $effectiveIcon = Get-ExecutableIconRecord $effectiveIconPath
+                    $records += [PSCustomObject]@{
+                        Kind = $location.Kind
+                        ShortcutPath = $item.FullName
+                        ShortcutModifiedUtc = $item.LastWriteTimeUtc.ToString('o')
+                        TargetPath = $target
+                        Arguments = [string]$shortcut.Arguments
+                        IconLocation = [string]$shortcut.IconLocation
+                        EffectiveIconPath = $effectiveIconPath
+                        IconIndex = $iconLocation.Index
+                        TargetExists = $targetIcon.Exists
+                        TargetProductName = $targetIcon.ProductName
+                        TargetFileVersion = $targetIcon.FileVersion
+                        TargetFileSha256 = $targetIcon.FileSha256
+                        TargetIconWidth = $targetIcon.IconWidth
+                        TargetIconHeight = $targetIcon.IconHeight
+                        TargetIconSha256 = $targetIcon.IconSha256
+                        EffectiveIconExists = $effectiveIcon.Exists
+                        EffectiveIconProductName = $effectiveIcon.ProductName
+                        EffectiveIconFileVersion = $effectiveIcon.FileVersion
+                        EffectiveIconSha256 = $effectiveIcon.IconSha256
+                    }
+                } finally {
+                    if ($null -ne $shortcut) {
+                        $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut)
+                    }
+                }
+            }
+        }
+    } finally {
+        if ($null -ne $shell) {
+            $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+        }
+    }
+    return @($records | Sort-Object Kind, ShortcutPath)
+}
+
+function Get-ShortcutIconTransitions($Before, $After) {
+    $beforeByPath = @{}
+    foreach ($record in @($Before)) {
+        $beforeByPath[(Get-NormalizedPath $record.ShortcutPath).ToLowerInvariant()] = $record
+    }
+    $transitions = @()
+    foreach ($record in @($After)) {
+        $key = (Get-NormalizedPath $record.ShortcutPath).ToLowerInvariant()
+        $old = if ($beforeByPath.ContainsKey($key)) { $beforeByPath[$key] } else { $null }
+        $transitions += [PSCustomObject]@{
+            Kind = $record.Kind
+            ShortcutPath = $record.ShortcutPath
+            BeforeTargetPath = if ($null -ne $old) { $old.TargetPath } else { $null }
+            AfterTargetPath = $record.TargetPath
+            BeforeTargetVersion = if ($null -ne $old) { $old.TargetFileVersion } else { $null }
+            AfterTargetVersion = $record.TargetFileVersion
+            BeforeTargetIconSha256 = if ($null -ne $old) { $old.TargetIconSha256 } else { $null }
+            AfterTargetIconSha256 = $record.TargetIconSha256
+            BeforeEffectiveIconSha256 = if ($null -ne $old) { $old.EffectiveIconSha256 } else { $null }
+            AfterEffectiveIconSha256 = $record.EffectiveIconSha256
+        }
+    }
+    return @($transitions)
+}
+
+function Test-IsOlderVersion([string]$Actual, [string]$Expected) {
+    try {
+        return ([version]$Actual -lt [version]$Expected)
+    } catch {
+        return $false
+    }
+}
+
 function Invoke-SilentInstall(
     [int]$Pass,
     [string]$LogPath,
@@ -641,6 +877,11 @@ function Invoke-InstallSmoke {
         Get-InstalledCandidateRecord 'system' $systemChrome
     )
     $script:Result.InstallCandidatesBefore = $candidateRecordsBefore
+    $targetBefore = $candidateRecordsBefore | Where-Object {
+        $_.Scope -eq $installLevel
+    } | Select-Object -First 1
+    $script:Result.UpgradeObserved = $targetBefore.Exists -and
+        (Test-IsOlderVersion $targetBefore.FileVersion $ExpectedVersion)
     $script:Result.DualInstallDetected = @(
         $candidateRecordsBefore | Where-Object { $_.Exists }
     ).Count -gt 1
@@ -657,6 +898,25 @@ function Invoke-InstallSmoke {
     $script:InstalledChromeForRuntime = $installedChrome
     $script:Result.InstallLevel = $installLevel
     $script:Result.InstalledChrome = $installedChrome
+
+    $builtChrome = Join-Path $script:OutDir 'chrome.exe'
+    $builtBrowserIcon = Get-ExecutableIconRecord $builtChrome
+    Assert-Qa $builtBrowserIcon.Exists `
+        "Built browser icon source exists: $builtChrome"
+    Assert-Qa (-not [string]::IsNullOrWhiteSpace($builtBrowserIcon.IconSha256)) `
+        'Built browser exposes an extractable shell icon'
+    $script:Result.BuiltBrowserIcon = $builtBrowserIcon
+
+    $shortcutInventoryBefore = @(
+        Get-FocusShortcutInventory $installedCandidates
+    )
+    $script:Result.ShortcutInventoryBefore = $shortcutInventoryBefore
+    $shortcutBeforePath = Join-Path $script:EvidenceDir `
+        'shortcut-icons-before.json'
+    ConvertTo-Json -InputObject @($shortcutInventoryBefore) -Depth 5 |
+        Set-Content -LiteralPath $shortcutBeforePath -Encoding UTF8
+    Assert-Qa (Test-Path -LiteralPath $shortcutBeforePath -PathType Leaf) `
+        'Pre-install desktop/Start/exposed-taskbar shortcut icon evidence was written as JSON'
 
     $crashesBefore = @(Get-CrashInventory)
     $payloadsBefore = @(Get-NsisPayloadInventory)
@@ -714,6 +974,72 @@ function Invoke-InstallSmoke {
     } | Select-Object -First 1
     Assert-CandidateUnchanged $nonTargetBefore $nonTargetAfter `
         "Non-target $($nonTargetBefore.Scope)-level"
+
+    $installedBrowserIcon = Get-ExecutableIconRecord $installedChrome
+    Assert-Qa $installedBrowserIcon.Exists `
+        'Installed browser exposes an extractable shell icon'
+    Assert-Qa ($installedBrowserIcon.IconSha256 -eq $builtBrowserIcon.IconSha256) `
+        'Installed browser shell icon pixels match the built release icon'
+    $script:Result.InstalledBrowserIcon = $installedBrowserIcon
+
+    $shortcutInventoryAfter = @(
+        Get-FocusShortcutInventory $installedCandidates
+    )
+    $shortcutTransitions = @(
+        Get-ShortcutIconTransitions $shortcutInventoryBefore $shortcutInventoryAfter
+    )
+    $script:Result.ShortcutInventoryAfter = $shortcutInventoryAfter
+    $script:Result.ShortcutIconTransitions = $shortcutTransitions
+    $script:Result.ExposedTaskbarShortcutCount = @(
+        $shortcutInventoryAfter | Where-Object { $_.Kind -like 'Taskbar.*' }
+    ).Count
+
+    $shortcutAfterPath = Join-Path $script:EvidenceDir `
+        'shortcut-icons-after.json'
+    $shortcutTransitionPath = Join-Path $script:EvidenceDir `
+        'shortcut-icon-transitions.json'
+    ConvertTo-Json -InputObject @($shortcutInventoryAfter) -Depth 5 |
+        Set-Content -LiteralPath $shortcutAfterPath -Encoding UTF8
+    ConvertTo-Json -InputObject @($shortcutTransitions) -Depth 5 |
+        Set-Content -LiteralPath $shortcutTransitionPath -Encoding UTF8
+    Assert-Qa (Test-Path -LiteralPath $shortcutAfterPath -PathType Leaf) `
+        'Post-install desktop/Start/exposed-taskbar shortcut icon evidence was written as JSON'
+    Assert-Qa (Test-Path -LiteralPath $shortcutTransitionPath -PathType Leaf) `
+        'Before/after shortcut icon transition evidence was written as JSON'
+
+    foreach ($shortcutRecord in $shortcutInventoryAfter) {
+        $isInstalledTarget = Test-SamePath `
+            $shortcutRecord.TargetPath $installedChrome
+        if ($isInstalledTarget) {
+            Assert-Qa $shortcutRecord.TargetExists `
+                "Shortcut target exists: $($shortcutRecord.ShortcutPath)"
+            Assert-Qa ($shortcutRecord.TargetFileVersion -eq $ExpectedVersion) `
+                "Shortcut targets release $ExpectedVersion`: $($shortcutRecord.ShortcutPath)"
+            Assert-Qa ($shortcutRecord.TargetIconSha256 -eq $builtBrowserIcon.IconSha256) `
+                "Shortcut target exposes the built release icon: $($shortcutRecord.ShortcutPath)"
+        }
+
+        $isInstalledIconSource = Test-SamePath `
+            $shortcutRecord.EffectiveIconPath $installedChrome
+        if ($isInstalledIconSource) {
+            Assert-Qa $shortcutRecord.EffectiveIconExists `
+                "Shortcut icon source exists: $($shortcutRecord.ShortcutPath)"
+            Assert-Qa ($shortcutRecord.EffectiveIconSha256 -eq $builtBrowserIcon.IconSha256) `
+                "Shortcut icon source exposes the built release icon: $($shortcutRecord.ShortcutPath)"
+        }
+
+        $targetsOlderFocus = $shortcutRecord.TargetExists -and
+            $shortcutRecord.TargetProductName -eq 'Focus Browser' -and
+            (Test-IsOlderVersion $shortcutRecord.TargetFileVersion $ExpectedVersion)
+        Assert-Qa (-not $targetsOlderFocus) `
+            "Shortcut does not target an older coexisting Focus Browser: $($shortcutRecord.ShortcutPath)"
+
+        $usesOlderFocusIcon = $shortcutRecord.EffectiveIconExists -and
+            $shortcutRecord.EffectiveIconProductName -eq 'Focus Browser' -and
+            (Test-IsOlderVersion $shortcutRecord.EffectiveIconFileVersion $ExpectedVersion)
+        Assert-Qa (-not $usesOlderFocusIcon) `
+            "Shortcut does not source its icon from an older coexisting Focus Browser: $($shortcutRecord.ShortcutPath)"
+    }
 
     Invoke-ReleaseVerifier 'Compare' `
         (Join-Path $script:EvidenceDir 'preservation-compare.log') @(
@@ -788,9 +1114,17 @@ $script:Result = [ordered]@{
     ExpectedVersion = $ExpectedVersion
     InstallLevel = $null
     InstalledChrome = $null
+    UpgradeObserved = $false
     DualInstallDetected = $false
     InstallCandidatesBefore = @()
     InstallCandidatesAfter = @()
+    BuiltBrowserIcon = $null
+    InstalledBrowserIcon = $null
+    ShortcutInventoryBefore = @()
+    ShortcutInventoryAfter = @()
+    ShortcutIconTransitions = @()
+    ExposedTaskbarShortcutCount = 0
+    TaskbarCoverageNote = 'Reads exposed TaskBar and ImplicitAppShortcuts .lnk files only; Windows internal Taskband pin state is intentionally not modified or claimed as covered.'
     SetupTargets = @()
     ArtifactHashes = @()
     InstallerExitCodes = @()

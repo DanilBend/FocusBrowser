@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/chrome/browser/win/winsparkle_glue.cc
-@@ -0,0 +1,939 @@
+@@ -0,0 +1,1367 @@
 +// Copyright 2026 The Focus Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -10,9 +10,11 @@
 +#include <windows.h>
 +
 +#include <shellapi.h>
++#include <shlobj.h>
 +
 +#include <algorithm>
 +#include <atomic>
++#include <cstdint>
 +#include <memory>
 +#include <string>
 +#include <string_view>
@@ -38,10 +40,12 @@
 +#include "base/strings/utf_string_conversions.h"
 +#include "base/task/thread_pool.h"
 +#include "base/time/time.h"
++#include "base/timer/timer.h"
 +#include "base/version.h"
 +#include "base/version_info/version_info.h"
 +#include "chrome/browser/browser_process.h"
 +#include "chrome/browser/buildflags.h"
++#include "chrome/browser/lifetime/termination_notification.h"
 +#include "chrome/browser/profiles/profile.h"
 +#include "chrome/browser/profiles/profile_manager.h"
 +#include "chrome/browser/profiles/profile_manager_observer.h"
@@ -83,6 +87,21 @@
 +namespace {
 +
 +std::atomic<bool> g_nearly_updated{false};
++std::atomic<bool> g_updater_callbacks_enabled{false};
++std::atomic<uint64_t> g_updater_callback_generation{0};
++
++bool UpdaterCallbacksEnabled() {
++  return g_updater_callbacks_enabled.load(std::memory_order_acquire);
++}
++
++uint64_t CurrentUpdaterCallbackGeneration() {
++  return g_updater_callback_generation.load(std::memory_order_acquire);
++}
++
++bool UpdaterCallbacksEnabledForGeneration(uint64_t generation) {
++  return generation != 0 && UpdaterCallbacksEnabled() &&
++         CurrentUpdaterCallbackGeneration() == generation;
++}
 +
 +const GURL& ConfiguredAppcastUrl() {
 +  static const base::NoDestructor<GURL> appcast_url(
@@ -278,8 +297,9 @@
 +  base::OnceClosure widget_zombie_callback_;
 +};
 +
-+void PostDiscoveredUpdateVersion(std::string version);
-+void PostNoUpdateAvailable();
++void PostDiscoveredUpdateVersion(std::string version, uint64_t generation);
++void PostNoUpdateAvailable(uint64_t generation);
++void PostUpdateError(std::u16string message, uint64_t generation);
 +
 +void MarkSystemUpdatePending() {
 +  const base::FilePath path = SystemUpdateMarkerPath();
@@ -346,54 +366,87 @@
 +
 +void PostStatus(VersionUpdater::Status status,
 +                int progress = 0,
-+                const std::u16string& message = std::u16string()) {
++                const std::u16string& message = std::u16string(),
++                bool require_active_callbacks = false,
++                uint64_t callback_generation = 0) {
++  if (require_active_callbacks && callback_generation == 0) {
++    callback_generation = CurrentUpdaterCallbackGeneration();
++  }
 +  content::GetUIThreadTaskRunner({})->PostTask(
 +      FROM_HERE,
 +      base::BindOnce(
-+          &WinSparkleStatusBroadcaster::Notify,
-+          base::Unretained(&WinSparkleStatusBroadcaster::GetInstance()), status,
-+          progress, message));
++          [](bool require_active, VersionUpdater::Status posted_status,
++             int posted_progress, std::u16string posted_message,
++             uint64_t posted_generation) {
++            if (require_active &&
++                !UpdaterCallbacksEnabledForGeneration(posted_generation)) {
++              return;
++            }
++            WinSparkleStatusBroadcaster::GetInstance().Notify(
++                posted_status, posted_progress, posted_message);
++          },
++          require_active_callbacks, status, progress, message,
++          callback_generation));
 +}
 +
 +// WinSparkle C callbacks
 +void __cdecl OnDidFindUpdate() {
++  const uint64_t generation = CurrentUpdaterCallbackGeneration();
++  if (!UpdaterCallbacksEnabledForGeneration(generation)) {
++    return;
++  }
 +  char version[128] = {};
 +  if (win_sparkle_get_pending_update_version(version, sizeof(version)) > 0) {
-+    PostDiscoveredUpdateVersion(version);
++    PostDiscoveredUpdateVersion(version, generation);
++    return;
 +  }
-+  PostStatus(VersionUpdater::UPDATING);
++  PostUpdateError(u"The update service returned an invalid version.",
++                  generation);
 +}
 +
 +void __cdecl OnDidNotFindUpdate() {
-+  PostNoUpdateAvailable();
-+  PostStatus(VersionUpdater::UPDATED);
++  const uint64_t generation = CurrentUpdaterCallbackGeneration();
++  if (!UpdaterCallbacksEnabledForGeneration(generation)) {
++    return;
++  }
++  PostNoUpdateAvailable(generation);
 +}
 +
 +void __cdecl OnUpdateError() {
++  const uint64_t generation = CurrentUpdaterCallbackGeneration();
++  if (!UpdaterCallbacksEnabledForGeneration(generation)) {
++    return;
++  }
 +  char buf[512] = {};
 +  win_sparkle_get_last_error_message(buf, sizeof(buf));
 +  const std::string message(buf);
 +  LOG(ERROR) << "WinSparkle update error: "
 +             << (message.empty() ? "(no detail)" : message.c_str());
-+  if (message.empty()) {
-+    PostStatus(VersionUpdater::FAILED);
-+  } else {
-+    PostStatus(VersionUpdater::FAILED, /*progress=*/0,
-+               base::UTF8ToUTF16(message));
-+  }
++  PostUpdateError(message.empty() ? std::u16string()
++                                  : base::UTF8ToUTF16(message),
++                  generation);
 +}
 +
 +void __cdecl OnDownloadProgress(size_t downloaded, size_t total) {
++  const uint64_t generation = CurrentUpdaterCallbackGeneration();
++  if (!UpdaterCallbacksEnabledForGeneration(generation)) {
++    return;
++  }
 +  size_t percent = 0;
 +  if (total > 0) {
 +    percent = std::clamp<size_t>(downloaded * 100 / total, 0, 100);
 +  }
-+  PostStatus(VersionUpdater::UPDATING, static_cast<int>(percent));
++  PostStatus(VersionUpdater::UPDATING, static_cast<int>(percent),
++             std::u16string(), /*require_active_callbacks=*/true, generation);
 +}
 +
-+void StorePendingSystemUpdate(const std::wstring& payload,
++void StorePendingSystemUpdate(uint64_t generation,
++                              const std::wstring& payload,
 +                              const std::wstring& signature) {
 +  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  if (!UpdaterCallbacksEnabledForGeneration(generation)) {
++    return;
++  }
 +  PendingSystemPayload() = payload;
 +  PendingSystemSignature() = signature;
 +  g_nearly_updated.store(true, std::memory_order_release);
@@ -405,6 +458,10 @@
 +// Returning 1 tells WinSparkle we handled installation and it must not relaunch
 +// the app; the new version is applied on the next relaunch.
 +int __cdecl OnRunInstaller(const wchar_t* file_path) {
++  const uint64_t generation = CurrentUpdaterCallbackGeneration();
++  if (!UpdaterCallbacksEnabledForGeneration(generation)) {
++    return WINSPARKLE_RETURN_ERROR;
++  }
 +  if (install_static::IsSystemInstall()) {
 +    // System installs need elevation. We do not elevate now, instead record
 +    // the verified payload and apply it only when the user clicks Relaunch.
@@ -414,19 +471,22 @@
 +    MarkSystemUpdatePending();
 +    content::GetUIThreadTaskRunner({})->PostTask(
 +        FROM_HERE,
-+        base::BindOnce(&StorePendingSystemUpdate, std::wstring(file_path),
++        base::BindOnce(&StorePendingSystemUpdate, generation,
++                       std::wstring(file_path),
 +                       base::UTF8ToWide(std::string(sig))));
 +    return 1;
 +  }
 +
 +  // Per-user: no elevation needed. Stage the update silently now.
 +  if (!RunPerUserInstallerWait(file_path) || !HasPendingUpdateSwap()) {
-+    PostStatus(VersionUpdater::FAILED);
++    PostStatus(VersionUpdater::FAILED, /*progress=*/0, std::u16string(),
++               /*require_active_callbacks=*/true, generation);
 +    return WINSPARKLE_RETURN_ERROR;
 +  }
 +
 +  g_nearly_updated.store(true, std::memory_order_release);
-+  PostStatus(VersionUpdater::NEARLY_UPDATED);
++  PostStatus(VersionUpdater::NEARLY_UPDATED, /*progress=*/0,
++             std::u16string(), /*require_active_callbacks=*/true, generation);
 +  return 1;
 +}
 +
@@ -446,6 +506,12 @@
 +class WinSparkleController : public ProfileObserver,
 +                             public ProfileManagerObserver,
 +                             public BrowserCollectionObserver {
++  enum class CheckState {
++    kIdle,
++    kBackground,
++    kInteractive,
++  };
++
 + public:
 +  static WinSparkleController& GetInstance() {
 +    static base::NoDestructor<WinSparkleController> instance;
@@ -457,6 +523,10 @@
 +      return;
 +    }
 +    started_ = true;
++    app_terminating_subscription_ =
++        browser_shutdown::AddAppTerminatingCallback(base::BindOnce(
++            &WinSparkleController::OnAppTerminating,
++            base::Unretained(this)));
 +    base::ThreadPool::PostTask(
 +        FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT},
 +        base::BindOnce(&ClearStaleSystemUpdateMarker));
@@ -471,32 +541,142 @@
 +    AcquireProfile(initial_profile, /*exclude=*/nullptr);
 +    if (GlobalBrowserCollection* browsers =
 +            GlobalBrowserCollection::GetInstance()) {
-+      if (BrowserWindowInterface* active = browsers->GetActiveBrowser()) {
-+        MaybeShowUpdatePrompt(active);
++      if (BrowserWindowInterface* browser = browsers->GetLastActiveBrowser()) {
++        MaybeShowUpdatePrompt(browser);
++        MaybeStartStartupCheck(browser);
 +      }
++    }
++    ScheduleStartupUiRetry();
++  }
++
++  void RequestInteractiveCheckFromAbout() {
++    RequestInteractiveCheck(/*dismiss_custom_prompt=*/true);
++  }
++
++  void RequestInteractiveCheck(bool dismiss_custom_prompt) {
++    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++    if (shutdown_started_ || !initialized_ || !profile_ ||
++        !ProfileCanUpdate(profile_)) {
++      PostStatus(VersionUpdater::DISABLED);
++      return;
++    }
++
++    if (dismiss_custom_prompt && prompt_visible_ && update_prompt_widget_) {
++      update_prompt_widget_->Close();
++    }
++
++    if (check_state_ == CheckState::kInteractive) {
++      return;
++    }
++    if (check_state_ == CheckState::kBackground) {
++      interactive_check_pending_ = true;
++      return;
++    }
++    StartInteractiveCheck();
++  }
++
++  void OnUpdateFound(const std::string& version, uint64_t generation) {
++    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++    if (!RuntimeAcceptsCallback(generation) ||
++        check_state_ == CheckState::kIdle) {
++      return;
++    }
++    if (check_state_ == CheckState::kInteractive) {
++      if (!RecordDiscoveredVersion(version, /*offer_immediately=*/false)) {
++        FinishUpdateCheckWithError(
++            u"The update service returned an invalid version.");
++        return;
++      }
++      PostStatus(VersionUpdater::UPDATING, /*progress=*/0, std::u16string(),
++                 /*require_active_callbacks=*/true, generation);
++      return;
++    }
++
++    const bool run_interactive = interactive_check_pending_;
++    if (!RecordDiscoveredVersion(version,
++                                 /*offer_immediately=*/!run_interactive)) {
++      FinishUpdateCheckWithError(
++          u"The update service returned an invalid version.");
++      return;
++    }
++    interactive_check_pending_ = false;
++    check_state_ = CheckState::kIdle;
++    if (run_interactive) {
++      QueueInteractiveCheckAfterWorkerExit();
++      return;
 +    }
 +  }
 +
-+  void RecordDiscoveredVersion(const std::string& version) {
++  void OnNoUpdateAvailable(uint64_t generation) {
++    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++    if (!RuntimeAcceptsCallback(generation) ||
++        check_state_ == CheckState::kIdle) {
++      return;
++    }
++    interactive_check_pending_ = false;
++    check_state_ = CheckState::kIdle;
++    current_feed_discovery_succeeded_ = false;
++    ClearDiscoveredVersion();
++    PostStatus(VersionUpdater::UPDATED, /*progress=*/0, std::u16string(),
++               /*require_active_callbacks=*/true, generation);
++  }
++
++  void OnUpdateError(const std::u16string& message, uint64_t generation) {
++    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++    if (!RuntimeAcceptsCallback(generation) ||
++        check_state_ == CheckState::kIdle) {
++      return;
++    }
++    FinishUpdateCheckWithError(message);
++  }
++
++  void FinishUpdateCheckWithError(const std::u16string& message) {
++    const bool run_interactive =
++        check_state_ == CheckState::kBackground && interactive_check_pending_;
++    interactive_check_pending_ = false;
++    check_state_ = CheckState::kIdle;
++    current_feed_discovery_succeeded_ = false;
++    if (run_interactive) {
++      QueueInteractiveCheckAfterWorkerExit();
++      return;
++    }
++    PostStatus(VersionUpdater::FAILED, /*progress=*/0, message,
++               /*require_active_callbacks=*/true, callback_generation_);
++  }
++
++  bool RecordDiscoveredVersion(const std::string& version,
++                               bool offer_immediately) {
 +    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 +    PrefService* local_state = GetUpdaterLocalState();
 +    if (!local_state || !IsAvailableVersionNewerThanCurrent(version)) {
-+      return;
++      return false;
 +    }
++    current_feed_discovery_succeeded_ = true;
 +
 +    const std::string stored =
 +        local_state->GetString(prefs::kFocusUpdaterAvailableVersion);
-+    if (!IsNewUpdateDiscovery(stored, version)) {
-+      return;
++    if (IsNewUpdateDiscovery(stored, version)) {
++      local_state->SetString(prefs::kFocusUpdaterAvailableVersion, version);
++      if (offer_immediately) {
++        local_state->ClearPref(prefs::kFocusUpdaterSuppressedSession);
++      }
++      if (local_state->GetString(prefs::kFocusUpdaterSkippedVersion) !=
++          version) {
++        local_state->ClearPref(prefs::kFocusUpdaterSkippedVersion);
++      }
 +    }
 +
-+    local_state->SetString(prefs::kFocusUpdaterAvailableVersion, version);
-+    local_state->SetString(prefs::kFocusUpdaterSuppressedSession,
-+                           SessionToken());
-+    if (local_state->GetString(prefs::kFocusUpdaterSkippedVersion) !=
-+        version) {
-+      local_state->ClearPref(prefs::kFocusUpdaterSkippedVersion);
++    if (!offer_immediately) {
++      local_state->SetString(prefs::kFocusUpdaterSuppressedSession,
++                             SessionToken());
++      return true;
 +    }
++
++    if (GlobalBrowserCollection* browsers =
++            GlobalBrowserCollection::GetInstance()) {
++      MaybeShowUpdatePrompt(browsers->GetLastActiveBrowser());
++    }
++    return true;
 +  }
 +
 +  void ClearDiscoveredVersion() {
@@ -505,24 +685,27 @@
 +    if (!local_state) {
 +      return;
 +    }
-+    const std::string available =
-+        local_state->GetString(prefs::kFocusUpdaterAvailableVersion);
 +    local_state->ClearPref(prefs::kFocusUpdaterAvailableVersion);
 +    local_state->ClearPref(prefs::kFocusUpdaterSuppressedSession);
-+    if (!available.empty() &&
-+        local_state->GetString(prefs::kFocusUpdaterSkippedVersion) ==
-+            available) {
-+      local_state->ClearPref(prefs::kFocusUpdaterSkippedVersion);
-+    }
 +  }
 +
 +  // BrowserCollectionObserver:
++  void OnBrowserCreated(BrowserWindowInterface* browser) override {
++    MaybeShowUpdatePrompt(browser);
++    MaybeStartStartupCheck(browser);
++    ScheduleStartupUiRetry();
++  }
++
 +  void OnBrowserActivated(BrowserWindowInterface* browser) override {
 +    MaybeShowUpdatePrompt(browser);
++    MaybeStartStartupCheck(browser);
 +  }
 +
 +  // ProfileManagerObserver:
 +  void OnProfileAdded(Profile* new_profile) override {
++    if (shutdown_started_) {
++      return;
++    }
 +    if (!profile_) {
 +      AcquireProfile(new_profile, /*exclude=*/nullptr);
 +    } else if (!ProfileCanUpdate(profile_) && ProfileCanUpdate(new_profile) &&
@@ -542,7 +725,9 @@
 +  void OnProfileWillBeDestroyed(Profile* profile) override {
 +    DCHECK_EQ(profile, profile_);
 +    Unbind();
-+    AcquireProfile(/*preferred=*/nullptr, /*exclude=*/profile);
++    if (!shutdown_started_) {
++      AcquireProfile(/*preferred=*/nullptr, /*exclude=*/profile);
++    }
 +  }
 +
 + private:
@@ -560,6 +745,12 @@
 +
 +  static bool ProfileCanUpdate(Profile* profile) {
 +    return profile && focus::WinSparkleEnabled(profile->GetPrefs());
++  }
++
++  bool RuntimeAcceptsCallback(uint64_t generation) const {
++    return !shutdown_started_ && initialized_ &&
++           callback_generation_ == generation &&
++           UpdaterCallbacksEnabledForGeneration(generation);
 +  }
 +
 +  void DiscardObsoleteStoredUpdate() {
@@ -582,31 +773,55 @@
 +
 +  void MaybeShowUpdatePrompt(BrowserWindowInterface* browser) {
 +    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-+    if (prompt_visible_ || !browser ||
-+        browser->GetType() != BrowserWindowInterface::TYPE_NORMAL ||
++    if (shutdown_started_ || !initialized_ ||
++        !current_feed_discovery_succeeded_) {
++      return;
++    }
++    if (prompt_visible_) {
++      VLOG(1) << "Focus updater: startup prompt already visible";
++      return;
++    }
++    if (!browser) {
++      VLOG(1) << "Focus updater: startup prompt waiting for a browser";
++      return;
++    }
++    if (browser->GetType() != BrowserWindowInterface::TYPE_NORMAL ||
 +        !browser->GetProfile() ||
-+        !browser->GetProfile()->IsRegularProfile() ||
-+        !ProfileCanUpdate(browser->GetProfile())) {
++        !browser->GetProfile()->IsRegularProfile()) {
++      VLOG(1) << "Focus updater: startup prompt skipped for a non-regular "
++                 "browser";
++      return;
++    }
++    if (!ProfileCanUpdate(browser->GetProfile())) {
++      VLOG(1) << "Focus updater: startup prompt disabled by profile consent";
 +      return;
 +    }
 +
 +    PrefService* local_state = GetUpdaterLocalState();
 +    if (!local_state) {
++      VLOG(1) << "Focus updater: startup prompt waiting for Local State";
 +      return;
 +    }
 +    const std::string available =
 +        local_state->GetString(prefs::kFocusUpdaterAvailableVersion);
-+    if (!IsAvailableVersionNewerThanCurrent(available) ||
-+        !ShouldOfferStoredUpdate(
++    if (!IsAvailableVersionNewerThanCurrent(available)) {
++      VLOG(1) << "Focus updater: no newer stored version to offer; stored='"
++              << available << "' current='"
++              << version_info::GetFocusVersionNumber() << "'";
++      return;
++    }
++    if (!ShouldOfferStoredUpdate(
 +            available,
 +            local_state->GetString(prefs::kFocusUpdaterSkippedVersion),
 +            local_state->GetString(prefs::kFocusUpdaterSuppressedSession),
 +            SessionToken())) {
++      VLOG(1) << "Focus updater: stored version is skipped or suppressed";
 +      return;
 +    }
 +
 +    Browser* legacy_browser = browser->GetBrowserForMigrationOnly();
 +    if (!legacy_browser || !legacy_browser->window()) {
++      VLOG(1) << "Focus updater: startup prompt waiting for a native window";
 +      return;
 +    }
 +
@@ -632,15 +847,74 @@
 +        &WinSparkleController::OnUpdatePromptCloseRequested,
 +        base::Unretained(this)));
 +    update_prompt_widget_->Show();
++    VLOG(1) << "Focus updater: startup prompt shown";
++  }
++
++  void MaybeStartStartupCheck(BrowserWindowInterface* browser) {
++    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++    Browser* legacy_browser =
++        browser ? browser->GetBrowserForMigrationOnly() : nullptr;
++    if (shutdown_started_ || startup_check_started_ || prompt_visible_ ||
++        !initialized_ || !browser ||
++        browser->GetType() != BrowserWindowInterface::TYPE_NORMAL ||
++        !browser->GetProfile() || !browser->GetProfile()->IsRegularProfile() ||
++        !legacy_browser || !legacy_browser->window() ||
++        !ProfileCanUpdate(browser->GetProfile()) ||
++        !BUILDFLAG(WINSPARKLE_AUTOMATIC_CHECKS)) {
++      return;
++    }
++
++    startup_check_started_ = RequestBackgroundCheck();
++    if (startup_check_started_) {
++      startup_ui_retry_timer_.Stop();
++    }
++  }
++
++  void ScheduleStartupUiRetry() {
++    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++    if (shutdown_started_ || !initialized_ || startup_check_started_ ||
++        prompt_visible_ ||
++        startup_ui_retry_timer_.IsRunning()) {
++      return;
++    }
++    startup_ui_retry_count_ = 0;
++    startup_ui_retry_timer_.Start(
++        FROM_HERE, base::Milliseconds(100),
++        base::BindRepeating(&WinSparkleController::RetryStartupUi,
++                            base::Unretained(this)));
++  }
++
++  void RetryStartupUi() {
++    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++    if (shutdown_started_ || !initialized_ || !profile_ ||
++        !ProfileCanUpdate(profile_) ||
++        !BUILDFLAG(WINSPARKLE_AUTOMATIC_CHECKS) ||
++        startup_ui_retry_count_++ >= 50) {
++      startup_ui_retry_timer_.Stop();
++      return;
++    }
++    if (GlobalBrowserCollection* browsers =
++            GlobalBrowserCollection::GetInstance()) {
++      if (BrowserWindowInterface* browser = browsers->GetLastActiveBrowser()) {
++        MaybeShowUpdatePrompt(browser);
++        MaybeStartStartupCheck(browser);
++      }
++    }
++    if (prompt_visible_ || startup_check_started_) {
++      startup_ui_retry_timer_.Stop();
++    }
 +  }
 +
 +  void OnUpdatePromptResult(UpdatePromptResult result,
 +                            const std::string& version) {
 +    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++    if (shutdown_started_ || !initialized_) {
++      return;
++    }
 +    switch (result) {
 +      case UpdatePromptResult::kUpdateNow:
 +        // This is the only prompt action that starts an update download.
-+        win_sparkle_check_update_with_ui_and_install();
++        RequestInteractiveCheck(/*dismiss_custom_prompt=*/false);
 +        return;
 +      case UpdatePromptResult::kRemindLater:
 +        return;
@@ -667,6 +941,9 @@
 +
 +  void ScheduleUpdatePromptDestruction() {
 +    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++    if (shutdown_started_ || !initialized_) {
++      return;
++    }
 +    if (update_prompt_) {
 +      update_prompt_->ResolveIfPending(UpdatePromptResult::kRemindLater);
 +    }
@@ -677,7 +954,7 @@
 +    content::GetUIThreadTaskRunner({})->PostTask(
 +        FROM_HERE,
 +        base::BindOnce(&WinSparkleController::DestroyUpdatePrompt,
-+                       base::Unretained(this)));
++                       weak_factory_.GetWeakPtr()));
 +  }
 +
 +  void DestroyUpdatePrompt() {
@@ -691,7 +968,7 @@
 +  // Adopts a profile to drive updates if none is active. No-op if one
 +  // is already active or none qualifies.
 +  void AcquireProfile(Profile* preferred, Profile* exclude) {
-+    if (profile_) {
++    if (shutdown_started_ || profile_) {
 +      return;
 +    }
 +
@@ -725,6 +1002,9 @@
 +
 +  void Bind(Profile* profile) {
 +    DCHECK(!profile_);
++    if (shutdown_started_) {
++      return;
++    }
 +    profile_ = profile;
 +    profile_observation_.Observe(profile);
 +    registrar_.Init(profile->GetPrefs());
@@ -736,24 +1016,131 @@
 +  }
 +
 +  void Unbind() {
++    StopUpdaterRuntime();
 +    registrar_.RemoveAll();
 +    profile_observation_.Reset();
 +    profile_ = nullptr;
++  }
++
++  void OnAppTerminating() {
++    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++    if (shutdown_started_) {
++      return;
++    }
++    shutdown_started_ = true;
++    StopUpdaterRuntime();
++    registrar_.RemoveAll();
++    profile_observation_.Reset();
++    profile_ = nullptr;
++    browser_collection_observation_.Reset();
++    profile_manager_observation_.Reset();
++  }
++
++  void StopUpdaterRuntime() {
++    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++    const bool was_initialized = initialized_;
++
++    // Invalidate native callbacks and already-posted UI work before releasing
++    // WinSparkle state. Bump the generation so a late callback from an old
++    // one-shot worker cannot be accepted after consent is enabled again.
++    g_updater_callbacks_enabled.store(false, std::memory_order_release);
++    g_updater_callback_generation.fetch_add(1, std::memory_order_acq_rel);
++    callback_generation_ = 0;
++    initialized_ = false;
++    current_feed_discovery_succeeded_ = false;
++    check_state_ = CheckState::kIdle;
++    interactive_check_pending_ = false;
++    startup_check_started_ = false;
++    startup_ui_retry_count_ = 0;
++    periodic_check_timer_.Stop();
++    queued_interactive_check_timer_.Stop();
++    startup_ui_retry_timer_.Stop();
++    weak_factory_.InvalidateWeakPtrs();
++
++    if (update_prompt_) {
++      update_prompt_->ResolveIfPending(UpdatePromptResult::kRemindLater);
++    }
++    update_prompt_widget_.reset();
++    update_prompt_.reset();
++    prompt_visible_ = false;
++    prompt_destruction_scheduled_ = false;
++
++    if (!was_initialized) {
++      return;
++    }
 +    win_sparkle_set_automatic_check_for_updates(0);
++    win_sparkle_cleanup();
++  }
++
++  bool RequestBackgroundCheck() {
++    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++    if (shutdown_started_ || check_state_ != CheckState::kIdle ||
++        !initialized_ || !profile_ ||
++        !ProfileCanUpdate(profile_) ||
++        !BUILDFLAG(WINSPARKLE_AUTOMATIC_CHECKS)) {
++      return false;
++    }
++    current_feed_discovery_succeeded_ = false;
++    check_state_ = CheckState::kBackground;
++    win_sparkle_check_update_without_ui();
++    return true;
++  }
++
++  void RequestPeriodicBackgroundCheck() {
++    RequestBackgroundCheck();
++  }
++
++  void RunQueuedInteractiveCheck() {
++    if (shutdown_started_ || !initialized_) {
++      return;
++    }
++    RequestInteractiveCheck(/*dismiss_custom_prompt=*/false);
++  }
++
++  void QueueInteractiveCheckAfterWorkerExit() {
++    // WinSparkle invokes the result callback at the end of its one-shot worker.
++    // Defer starting the requested interactive worker until that callback has
++    // returned and the self-owned background worker has fully unwound.
++    queued_interactive_check_timer_.Start(
++        FROM_HERE, base::Milliseconds(100),
++        base::BindOnce(&WinSparkleController::RunQueuedInteractiveCheck,
++                       base::Unretained(this)));
++  }
++
++  void StartInteractiveCheck() {
++    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++    current_feed_discovery_succeeded_ = false;
++    check_state_ = CheckState::kInteractive;
++    win_sparkle_check_update_with_ui_and_install();
++  }
++
++  void StartPeriodicCheckTimer() {
++    if (shutdown_started_ || !initialized_ ||
++        !BUILDFLAG(WINSPARKLE_AUTOMATIC_CHECKS) ||
++        periodic_check_timer_.IsRunning()) {
++      return;
++    }
++    periodic_check_timer_.Start(
++        FROM_HERE, base::Seconds(BUILDFLAG(WINSPARKLE_CHECK_INTERVAL)),
++        base::BindRepeating(
++            &WinSparkleController::RequestPeriodicBackgroundCheck,
++            base::Unretained(this)));
 +  }
 +
 +  void ApplyUpdaterState() {
-+    if (!profile_) {
++    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++    if (shutdown_started_ || !profile_) {
 +      return;
 +    }
 +    PrefService* prefs = profile_->GetPrefs();
 +    const bool enabled = focus::WinSparkleEnabled(prefs);
 +
++    if (!enabled) {
++      StopUpdaterRuntime();
++      return;
++    }
++
 +    if (!initialized_) {
-+      if (!enabled) {
-+        return;
-+      }
-+      initialized_ = true;
 +
 +      base::FilePath module_dir;
 +      if (base::PathService::Get(base::DIR_MODULE, &module_dir)) {
@@ -771,47 +1158,88 @@
 +      RegisterWinSparkleCallbacks();
 +      win_sparkle_set_update_check_interval(
 +          BUILDFLAG(WINSPARKLE_CHECK_INTERVAL));
-+      win_sparkle_set_automatic_check_for_updates(
-+          BUILDFLAG(WINSPARKLE_AUTOMATIC_CHECKS));
++      // Focus owns scheduling so startup, periodic, and About-page checks are
++      // serialized through this controller instead of racing WinSparkle's
++      // internal periodic worker.
++      win_sparkle_set_automatic_check_for_updates(0);
 +
 +      ApplyAppcastUrl();
++      callback_generation_ =
++          g_updater_callback_generation.fetch_add(
++              1, std::memory_order_acq_rel) +
++          1;
++      g_updater_callbacks_enabled.store(true, std::memory_order_release);
++      initialized_ = true;
 +      win_sparkle_init();
++      StartPeriodicCheckTimer();
++      if (GlobalBrowserCollection* browsers =
++              GlobalBrowserCollection::GetInstance()) {
++        MaybeStartStartupCheck(browsers->GetLastActiveBrowser());
++      }
++      ScheduleStartupUiRetry();
 +      return;
 +    }
 +
-+    // Already running: reflect the current consent live (no re-init).
-+    win_sparkle_set_automatic_check_for_updates(
-+        enabled ? BUILDFLAG(WINSPARKLE_AUTOMATIC_CHECKS) : 0);
++    // Already running: keep scheduling in this controller without starting a
++    // second native scheduler.
++    win_sparkle_set_automatic_check_for_updates(0);
++    StartPeriodicCheckTimer();
++    if (GlobalBrowserCollection* browsers =
++            GlobalBrowserCollection::GetInstance()) {
++      MaybeStartStartupCheck(browsers->GetLastActiveBrowser());
++    }
++    ScheduleStartupUiRetry();
 +  }
 +
 +  raw_ptr<Profile> profile_ = nullptr;
 +  bool initialized_ = false;
 +  bool started_ = false;
++  bool shutdown_started_ = false;
++  bool startup_check_started_ = false;
++  int startup_ui_retry_count_ = 0;
++  bool interactive_check_pending_ = false;
++  bool current_feed_discovery_succeeded_ = false;
 +  bool prompt_visible_ = false;
 +  bool prompt_destruction_scheduled_ = false;
 +  std::unique_ptr<FocusUpdatePrompt> update_prompt_;
 +  std::unique_ptr<views::Widget> update_prompt_widget_;
 +  PrefChangeRegistrar registrar_;
++  CheckState check_state_ = CheckState::kIdle;
++  uint64_t callback_generation_ = 0;
++  base::CallbackListSubscription app_terminating_subscription_;
++  base::RepeatingTimer periodic_check_timer_;
++  base::OneShotTimer queued_interactive_check_timer_;
++  base::RepeatingTimer startup_ui_retry_timer_;
 +  base::ScopedObservation<Profile, ProfileObserver> profile_observation_{this};
 +  base::ScopedObservation<ProfileManager, ProfileManagerObserver>
 +      profile_manager_observation_{this};
 +  base::ScopedObservation<GlobalBrowserCollection, BrowserCollectionObserver>
 +      browser_collection_observation_{this};
++  base::WeakPtrFactory<WinSparkleController> weak_factory_{this};
 +};
 +
-+void PostDiscoveredUpdateVersion(std::string version) {
++void PostDiscoveredUpdateVersion(std::string version, uint64_t generation) {
 +  content::GetUIThreadTaskRunner({})->PostTask(
 +      FROM_HERE,
-+      base::BindOnce(&WinSparkleController::RecordDiscoveredVersion,
-+                     base::Unretained(&WinSparkleController::GetInstance()),
-+                     std::move(version)));
++      base::BindOnce(&WinSparkleController::OnUpdateFound,
++                      base::Unretained(&WinSparkleController::GetInstance()),
++                      std::move(version), generation));
 +}
 +
-+void PostNoUpdateAvailable() {
++void PostNoUpdateAvailable(uint64_t generation) {
 +  content::GetUIThreadTaskRunner({})->PostTask(
 +      FROM_HERE,
-+      base::BindOnce(&WinSparkleController::ClearDiscoveredVersion,
-+                     base::Unretained(&WinSparkleController::GetInstance())));
++      base::BindOnce(&WinSparkleController::OnNoUpdateAvailable,
++                     base::Unretained(&WinSparkleController::GetInstance()),
++                     generation));
++}
++
++void PostUpdateError(std::u16string message, uint64_t generation) {
++  content::GetUIThreadTaskRunner({})->PostTask(
++      FROM_HERE,
++      base::BindOnce(&WinSparkleController::OnUpdateError,
++                      base::Unretained(&WinSparkleController::GetInstance()),
++                      std::move(message), generation));
 +}
 +
 +class VersionUpdaterWinSparkle : public VersionUpdater {
@@ -843,7 +1271,7 @@
 +    }
 +
 +    RunStatus(CHECKING);
-+    win_sparkle_check_update_with_ui_and_install();
++    WinSparkleController::GetInstance().RequestInteractiveCheckFromAbout();
 +  }
 +
 + private:

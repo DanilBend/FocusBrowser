@@ -10,7 +10,7 @@ param(
 
     [string]$BrowserPath,
     [string]$InstallerPath,
-    [string]$ExpectedVersion = '1.0.4.0',
+    [string]$ExpectedVersion = '1.0.5.0',
 
     [ValidateSet('all', 'user', 'system')]
     [string]$RegistryScope = 'all',

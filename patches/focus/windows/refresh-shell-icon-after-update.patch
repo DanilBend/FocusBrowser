@@ -1,0 +1,39 @@
+--- a/chrome/installer/setup/setup_main.cc
++++ b/chrome/installer/setup/setup_main.cc
+@@ -597,6 +597,14 @@ installer::InstallStatus RenameChromeExecutables(
+ 
+   installer::InstallStatus ret = installer::RENAME_SUCCESSFUL;
+   if (install_list->Do()) {
++    // The in-use update path rewrites shortcuts while chrome.exe still points
++    // at the running, old binary. Invalidate the Shell's cached image only
++    // after new_chrome.exe has actually replaced chrome.exe.
++    ::SHChangeNotify(SHCNE_UPDATEITEM,
++                     SHCNF_PATHW | SHCNF_FLUSHNOWAIT,
++                     chrome_exe.value().c_str(), nullptr);
++    ::SHChangeNotify(SHCNE_ASSOCCHANGED,
++                     SHCNF_IDLIST | SHCNF_FLUSHNOWAIT, nullptr, nullptr);
+     installer::LaunchDeleteOldVersionsProcess(setup_exe, *installer_state);
+   } else {
+     LOG(ERROR) << "Renaming of executables failed. Rolling back any changes.";
+--- a/chrome/installer/setup/install.cc
++++ b/chrome/installer/setup/install.cc
+@@ -493,6 +493,19 @@ InstallStatus InstallOrUpdateProduct(const InstallParams& install_params,
+               .Append(setup_path.BaseName());
+       LaunchDeleteOldVersionsProcess(new_version_setup_path, installer_state);
+     }
++
++    if (!is_in_use) {
++      // chrome.exe already contains the newly installed icon. Tell Explorer to
++      // discard shortcut, taskbar, and file-association images cached for the
++      // stable executable path.
++      const base::FilePath chrome_exe =
++          installer_state.target_path().Append(kChromeExe);
++      ::SHChangeNotify(SHCNE_UPDATEITEM,
++                       SHCNF_PATHW | SHCNF_FLUSHNOWAIT,
++                       chrome_exe.value().c_str(), nullptr);
++      ::SHChangeNotify(SHCNE_ASSOCCHANGED,
++                       SHCNF_IDLIST | SHCNF_FLUSHNOWAIT, nullptr, nullptr);
++    }
+   }
+ 
+   return result;

@@ -1,4 +1,4 @@
-# Focus Browser 1.0.4 — Windows release QA
+# Focus Browser 1.0.5 — Windows release QA
 
 This checklist keeps every unrelated browser profile and process out of scope.
 Never terminate every `chrome.exe`; identify Focus Browser by its full
@@ -29,7 +29,7 @@ built and packaging has finished:
 $repo = (Resolve-Path '.').Path
 $qaNode = Join-Path $repo 'build\src\third_party\node\win\node.exe'
 $qaBrowser = Join-Path $repo 'build\src\out\Default\chrome.exe'
-$qaInstaller = Join-Path $repo 'build\FocusBrowser_1.0.4_x64-installer.exe'
+$qaInstaller = Join-Path $repo 'build\FocusBrowser_1.0.5_x64-installer.exe'
 $qaVerifier = Join-Path $repo 'build_support\verify_focus_release.ps1'
 $qaPowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 
@@ -48,7 +48,7 @@ if ($LASTEXITCODE -ne 0) { throw 'FocusYoutube runtime lifecycle failed' }
 ```
 
 The PowerShell verifier is read-only in `Artifacts` mode. It checks Focus
-branding and exact PE FileVersion/ProductVersion `1.0.4.0` for `chrome.exe`,
+branding and exact PE FileVersion/ProductVersion `1.0.5.0` for `chrome.exe`,
 `chrome.dll`, `setup.exe`, and `mini_installer.exe`, plus packaging payloads,
 SHA-256 hashes, monochrome embedded icon, signature state, and static
 browser-owned component integration. It also scans the final compiled locale
@@ -63,7 +63,7 @@ Do not pass `--no-first-run`; the point is to exercise the real first launch.
 
 ```powershell
 $qaRoot = Join-Path $env:TEMP `
-    ('FocusBrowser-QA-1.0.4-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    ('FocusBrowser-QA-1.0.5-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 $qaProfile = Join-Path $qaRoot 'User Data'
 $qaLog = Join-Path $qaRoot 'focus-browser.log'
 New-Item -ItemType Directory -Path $qaProfile -Force | Out-Null
@@ -209,7 +209,7 @@ snapshot contains only sizes, timestamps, paths, and SHA-256 hashes—never
 password/history contents:
 
 ```powershell
-$qaUpgradeRoot = Join-Path $env:TEMP 'FocusBrowser-QA-Upgrade-1.0.4'
+$qaUpgradeRoot = Join-Path $env:TEMP 'FocusBrowser-QA-Upgrade-1.0.5'
 New-Item -ItemType Directory -Path $qaUpgradeRoot -Force | Out-Null
 $qaBefore = Join-Path $qaUpgradeRoot 'before.json'
 $qaAfter = Join-Path $qaUpgradeRoot 'after.json'
@@ -260,7 +260,7 @@ Installer checks:
   0 and behaves as repair/up-to-date, not as an error.
 - [ ] Installed executable is in `%LOCALAPPDATA%` for a current-user install or
   `%ProgramW6432%` for a system install, and its FileVersion and ProductVersion
-  are exactly `1.0.4.0`.
+  are exactly `1.0.5.0`.
 - [ ] `RegisteredApplications`, `StartMenuInternet`, `FocusHTM*`, and
   `FocusPDF*` registry entries in the selected installation scope point to that
   executable.
@@ -281,15 +281,22 @@ Default-browser crash regression:
   requested. If manually selected, HTTPS/HTTP UserChoice should resolve to a
   `FocusHTM*` ProgID.
 
-## 6. Next-launch update prompt
+## 6. Startup update prompt
 
 Use a disposable profile and a staging appcast signed by the same Ed25519 key
 as the test build. This checklist does not imply that the production Pages feed
 has already been published.
 
-- [ ] Discovery records an available version without interrupting the current
-  session. After a normal exit, the next browser launch shows one native Focus
-  prompt.
+- [ ] A normal cold start performs one background check as soon as the first
+  regular browser window is ready. The check must not wait for the native
+  hourly `LastCheckTime` gate and must not require opening Settings or About.
+- [ ] When that startup check discovers a newer signed version, the same
+  browser session shows exactly one native Focus prompt. Opening About while
+  the background check is running must not leave a second prompt or start two
+  downloads.
+- [ ] Seed `focus.updater.available_version` with a version newer than the test
+  build in a disposable `Local State`, then cold-start the browser. The prompt
+  must appear without navigating to any settings URL.
 - [ ] **Обновить сейчас** starts download only for an enclosure with a valid
   signature; an unsigned or missing enclosure is never offered.
 - [ ] **Напомнить позже** and closing the dialog suppress it for the current
@@ -298,6 +305,10 @@ has already been published.
   supersedes the skip.
 - [ ] An unavailable or empty feed produces no prompt, startup crash, or stale
   offer.
+- [ ] Upgrade an installed older build while its taskbar shortcut is pinned.
+  After the successful executable swap, the taskbar, desktop, and Start-menu
+  shortcuts show the icon embedded in the new `chrome.exe` without restarting
+  Explorer, deleting the global icon cache, or re-pinning the shortcut.
 
 ## 7. Cleanup and evidence
 

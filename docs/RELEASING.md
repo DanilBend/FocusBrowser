@@ -1,7 +1,7 @@
 # Релизы Focus Browser для Windows
 
 Этот документ — runbook для текущего открытого репозитория
-`DanilBend/FocusBrowser` и выпуска версии 1.0.4. Он ничего не публикует и не
+`DanilBend/FocusBrowser` и выпуска версии 1.0.5. Он ничего не публикует и не
 содержит рабочих ключей.
 
 > Важно: текущий `.github/workflows/main.yml` нельзя включать для production-
@@ -102,7 +102,7 @@ variable, исходники, артефакт сборки, кэш или ло�
 
 ### 2.4. Неизменяемые релизы
 
-До публикации 1.0.4 откройте repository `Settings`, прокрутите страницу до
+До публикации 1.0.5 откройте repository `Settings`, прокрутите страницу до
 раздела `Releases` и включите `Enable release immutability`. Настройка действует
 только на будущие релизы. После публикации GitHub запрещает перемещение тега и
 изменение/удаление assets и автоматически создаёт release attestation.
@@ -188,18 +188,18 @@ GitHub secret, исходники, workflow или release asset. Текущий
   обновлениям с новым ключом. Компрометация ключа требует немедленной остановки
   feed и ручного перехода на новый доверенный ключ.
 
-## 4. Версия 1.0.4 и имена артефактов
+## 4. Версия 1.0.5 и имена артефактов
 
 Внутренняя версия должна монотонно увеличиваться. Для текущего стабильного
-релиза используйте техническую версию `1.0.4.0` и тег `v1.0.4`.
+релиза используйте техническую версию `1.0.5.0` и тег `v1.0.5`.
 
-Короткая строка `1.0.4` относится только к presentation-слою упаковки:
+Короткая строка `1.0.5` относится только к presentation-слою упаковки:
 `package.py` использует её в именах assets, а NSIS — в тексте мастера и
 строковых version-resource полях wrapper. Установленная версия, каталог версии
 в `Application`, Windows uninstall `Version`/`DisplayVersion`, страница About,
 `--product-version` и сравнение версий WinSparkle используют полную строку
-`1.0.4.0`. Поэтому в appcast обязательно ставьте
-`sparkle:version="1.0.4.0"`; `sparkle:shortVersionString="1.0.4"` — только подпись
+`1.0.5.0`. Поэтому в appcast обязательно ставьте
+`sparkle:version="1.0.5.0"`; `sparkle:shortVersionString="1.0.5"` — только подпись
 для пользователя. Не переиспользуйте технический номер или тег после
 публикации.
 
@@ -207,15 +207,19 @@ GitHub secret, исходники, workflow или release asset. Текущий
 
 | Архитектура | Ручная установка | Payload автообновления | Архив |
 | --- | --- | --- | --- |
-| x64 | `FocusBrowser_1.0.4_x64-installer.exe` | `FocusBrowser_1.0.4_x64-mini-installer.exe` | `FocusBrowser_1.0.4_x64-windows.zip` |
-| ARM64 | `FocusBrowser_1.0.4_arm64-installer.exe` | `FocusBrowser_1.0.4_arm64-mini-installer.exe` | `FocusBrowser_1.0.4_arm64-windows.zip` |
+| x64 | `FocusBrowser_1.0.5_x64-installer.exe` | `FocusBrowser_1.0.5_x64-mini-installer.exe` | `FocusBrowser_1.0.5_x64-windows.zip` |
+| ARM64 | `FocusBrowser_1.0.5_arm64-installer.exe` | `FocusBrowser_1.0.5_arm64-mini-installer.exe` | `FocusBrowser_1.0.5_arm64-windows.zip` |
 
 В Release также приложите:
 
-- `SHA256SUMS.txt` со всеми публичными файлами;
-- `appcast-x64.xml` и `appcast-arm64.xml` как аудит-копии;
-- release notes;
-- при готовности — SBOM и provenance/attestation.
+- `SHA256SUMS-1.0.5.txt` с точными SHA-256 остальных четырёх x64-файлов;
+- `appcast-x64.xml` как аудит-копию; `appcast-arm64.xml` добавляется только в
+  тот выпуск, где реально собраны, протестированы и публикуются ARM64-артефакты;
+- release notes как тело GitHub Release.
+
+Для 1.0.5 дополнительных Release assets нет: после публикации immutable release
+GitHub автоматически создаёт release attestation. SBOM можно добавить только в
+будущем выпуске вместе с согласованным изменением строгого asset-инвентаря.
 
 Appcast должен указывать на `mini-installer.exe`, потому что это payload
 встроенного updater. Если реализация позже перейдёт на другой installer,
@@ -249,7 +253,7 @@ pre-release каналы имеют разные правила. При policy �
 однозначно соответствовать архитектуре. Feed публикуется только после того, как
 неизменяемые assets уже доступны.
 
-Минимальный `appcast-x64.xml` для 1.0.4:
+Минимальный `appcast-x64.xml` для 1.0.5:
 
 ```xml
 <?xml version="1.0" encoding="utf-8"?>
@@ -257,17 +261,17 @@ pre-release каналы имеют разные правила. При policy �
      xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
   <channel>
     <title>Focus Browser updates (x64)</title>
-    <link>https://github.com/DanilBend/FocusBrowser/releases</link>
+    <link>https://github.com/DanilBend/FocusBrowser/releases/tag/v1.0.5</link>
     <description>Stable updates for Focus Browser x64</description>
     <language>ru</language>
     <item>
-      <title>Focus Browser 1.0.4</title>
-      <pubDate>Sun, 26 Jul 2026 12:00:00 +0000</pubDate>
-      <link>https://github.com/DanilBend/FocusBrowser/releases/tag/v1.0.4</link>
+      <title>Focus Browser 1.0.5</title>
+      <pubDate>Mon, 27 Jul 2026 HH:MM:SS GMT</pubDate>
+      <link>https://github.com/DanilBend/FocusBrowser/releases/tag/v1.0.5</link>
       <enclosure
-        url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.4/FocusBrowser_1.0.4_x64-mini-installer.exe"
-        sparkle:version="1.0.4.0"
-        sparkle:shortVersionString="1.0.4"
+        url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.5/FocusBrowser_1.0.5_x64-mini-installer.exe"
+        sparkle:version="1.0.5.0"
+        sparkle:shortVersionString="1.0.5"
         sparkle:os="windows-x64"
         sparkle:edSignature="&lt;BASE64_ED25519_SIGNATURE&gt;"
         length="&lt;BYTE_LENGTH&gt;"
@@ -283,14 +287,14 @@ pre-release каналы имеют разные правила. При policy �
 enclosure с разными URL, подписями, размерами и точными OS-маркерами:
 
 ```xml
-<sparkle:version>1.0.4.0</sparkle:version>
-<sparkle:shortVersionString>1.0.4</sparkle:shortVersionString>
-<enclosure url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.4/FocusBrowser_1.0.4_x64-mini-installer.exe"
+<sparkle:version>1.0.5.0</sparkle:version>
+<sparkle:shortVersionString>1.0.5</sparkle:shortVersionString>
+<enclosure url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.5/FocusBrowser_1.0.5_x64-mini-installer.exe"
            sparkle:os="windows-x64"
            sparkle:edSignature="&lt;X64_BASE64_ED25519_SIGNATURE&gt;"
            length="&lt;X64_BYTE_LENGTH&gt;"
            type="application/octet-stream" />
-<enclosure url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.4/FocusBrowser_1.0.4_arm64-mini-installer.exe"
+<enclosure url="https://github.com/DanilBend/FocusBrowser/releases/download/v1.0.5/FocusBrowser_1.0.5_arm64-mini-installer.exe"
            sparkle:os="windows-arm64"
            sparkle:edSignature="&lt;ARM64_BASE64_ED25519_SIGNATURE&gt;"
            length="&lt;ARM64_BYTE_LENGTH&gt;"
@@ -310,7 +314,7 @@ code и формат stdout, затем переносите оба значен
 файл которого был подписан:
 
 ```powershell
-$payload = (Resolve-Path .\FocusBrowser_1.0.4_x64-mini-installer.exe).Path
+$payload = (Resolve-Path .\FocusBrowser_1.0.5_x64-mini-installer.exe).Path
 $fragment = ((& $tool sign --verbose `
   --private-key-file .\winsparkle-private.key $payload) | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or
@@ -333,11 +337,11 @@ if ($signedLength -ne (Get-Item -LiteralPath $payload).Length) {
   -ToolPath $tool `
   -PrivateKeyPath 'D:\offline\winsparkle-private.key' `
   -PublicKey $env:WINSPARKLE_ED_KEY `
-  -PayloadPath .\build\FocusBrowser_1.0.4_x64-mini-installer.exe `
+  -PayloadPath .\build\FocusBrowser_1.0.5_x64-mini-installer.exe `
   -OutputPath .\build\appcast-x64.xml `
-  -Version 1.0.4.0 `
-  -ShortVersion 1.0.4 `
-  -ReleaseTag v1.0.4
+  -Version 1.0.5.0 `
+  -ShortVersion 1.0.5 `
+  -ReleaseTag v1.0.5
 ```
 
 Локальная проверка до публикации:
@@ -346,7 +350,7 @@ if ($signedLength -ne (Get-Item -LiteralPath $payload).Length) {
 & $tool verify `
   --public-key '<BASE64_ED25519_PUBLIC_KEY>' `
   --signature '<BASE64_ED25519_SIGNATURE>' `
-  .\FocusBrowser_1.0.4_x64-mini-installer.exe
+  .\FocusBrowser_1.0.5_x64-mini-installer.exe
 ```
 
 Угловые скобки — placeholders; их нельзя оставлять в production XML. Проверьте
@@ -355,7 +359,9 @@ XML-парсером, скачайте каждый enclosure по опубли�
 
 ## 6. Неизменяемый release: правильный порядок
 
-1. Зафиксируйте commit, версии зависимостей и номер `1.0.4.0`.
+1. Зафиксируйте commit, версии зависимостей и номер `1.0.5.0`. После merge
+   release-изменений запишите точный SHA текущего `main`; тег `v1.0.5` должен
+   разрешаться ровно в этот commit, а не только быть его предком.
 2. Соберите x64 с production public key и
    `https://danilbend.github.io/FocusBrowser/appcast-x64.xml`. ARM64 выпускается
    позже отдельным бинарником и отдельным feed, а не универсальным enclosure.
@@ -369,17 +375,24 @@ XML-парсером, скачайте каждый enclosure по опубли�
 6. Вычислите SHA-256 и точный размер каждого финального asset.
 7. Сгенерируйте `appcast-x64.xml` локальным helper-скриптом и повторно проверьте
    Ed25519-подпись.
-8. Создайте GitHub Release `v1.0.4` как draft.
-9. Загрузите в draft x64 assets, checksums, точную аудит-копию
-   `appcast-x64.xml` и release notes. Скачайте их обратно и сравните SHA-256.
+8. Создайте аннотированный тег `v1.0.5` на зафиксированном commit `main`,
+   проверьте peel тега до commit и только затем создайте GitHub Release как
+   draft для уже существующего тега.
+9. Загрузите в draft ровно пять x64 assets:
+   `FocusBrowser_1.0.5_x64-installer.exe`,
+   `FocusBrowser_1.0.5_x64-mini-installer.exe`,
+   `FocusBrowser_1.0.5_x64-windows.zip`, `SHA256SUMS-1.0.5.txt` и
+   `appcast-x64.xml`. Release notes задайте телом Release. Скачайте все пять
+   файлов обратно, сравните size и GitHub asset digest, затем проверьте, что
+   versioned checksum-файл содержит точные SHA-256 остальных четырёх файлов.
 10. Опубликуйте draft. Включённая immutable releases policy блокирует изменение
     тега и assets и создаёт release attestation.
 11. Запустите `publish-appcast.yml` из `main`. Он без приватного ключа публично
     скачает immutable mini-installer и аудит-копию appcast, сверит metadata,
     SHA-256, PE x64, XML и Ed25519, запретит rollback и только затем развернёт
     точные проверенные байты на GitHub Pages.
-12. На чистой машине с установленной `1.0.3.0` (release display `1.0.3`)
-    выполните ручную проверку обновления до `1.0.4.0`. Для следующих выпусков
+12. На чистой машине с установленной `1.0.4.0` (release display `1.0.4`)
+    выполните ручную проверку обновления до `1.0.5.0`. Для следующих выпусков
     также всегда проверяйте обновление с предыдущей stable-версии.
 
 Если после публикации найдена ошибка, не заменяйте asset. Выпустите новую
@@ -511,14 +524,14 @@ SignPath принимает заявки open-source проектов на бе�
 Уберите/заморозьте feed до готовности assets, затем повторите полный download и
 signature smoke-test. Клиентам нельзя предлагать URL, который ещё не доступен.
 
-## 11. Финальный чек-лист 1.0.4
+## 11. Финальный чек-лист 1.0.5
 
 - [ ] В исходниках, артефактах, metadata и UI используется только актуальное имя.
 - [ ] Production private key существует только в зашифрованных offline-копиях.
 - [ ] Окружение `github-pages` разрешает deployment только из `main`.
 - [ ] Pinned `winsparkle-tool` archive совпал с зафиксированным SHA-256.
-- [ ] About/installed/WinSparkle и `sparkle:version` используют `1.0.4.0`;
-      `1.0.4` осталась только presentation-версией упаковки.
+- [ ] About/installed/WinSparkle и `sparkle:version` используют `1.0.5.0`;
+      `1.0.5` осталась только presentation-версией упаковки.
 - [ ] x64 собран с правильным appcast URL; будущий ARM64 получит отдельный feed.
 - [ ] Enclosure помечен `windows-x64`, а не generic `windows`.
 - [ ] WinSparkle registry identity осталась
@@ -529,7 +542,9 @@ signature smoke-test. Клиентам нельзя предлагать URL, к
 - [ ] Upgrade сохраняет профиль, пароли, расширения и сессию.
 - [ ] Финальные payload подписаны Ed25519 после последнего изменения байтов.
 - [ ] SHA-256, размеры и Ed25519 проверены после обратного скачивания.
-- [ ] Release создан как draft и содержит все assets до публикации.
+- [ ] Тег `v1.0.5` после peel разрешается ровно в текущий commit `main`.
+- [ ] Release создан как draft и содержит ровно пять x64 assets; versioned
+      checksum-файл точно описывает остальные четыре файла.
 - [ ] Immutable releases включены.
 - [ ] Appcast опубликован после Release и проверен установленным клиентом.
 - [ ] Ограничение SmartScreen честно описано в release notes/download page.
