@@ -1,0 +1,24 @@
+# Focus Browser native macOS release profile (Apple Silicon).
+# Common privacy/product flags are loaded first from focus-chromium/flags.gn.
+
+target_os="mac"
+target_cpu="arm64"
+
+is_clang=true
+is_component_build=false
+is_debug=false
+is_official_build=true
+dcheck_always_on=false
+
+enable_rust=true
+enable_swiftshader=false
+# Local build configuration only. Redistribution remains blocked until codec
+# patent/licensing rights and the selected FFmpeg configuration are reviewed.
+ffmpeg_branding="Chrome"
+proprietary_codecs=true
+enable_mse_mpeg2ts_stream_parser=true
+
+blink_symbol_level=0
+v8_symbol_level=0
+symbol_level=0
+use_thin_lto=false
