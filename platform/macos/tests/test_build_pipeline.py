@@ -219,7 +219,7 @@ class BuildPipelineTests(unittest.TestCase):
         return self.write_json(
             self.source / build_pipeline.PREPARATION_RECEIPT,
             {
-                "schema": 1,
+                "schema": build_pipeline.prepare_source.PREPARATION_RECEIPT_SCHEMA,
                 "chromium_version": build_pipeline.focus_macos.PINNED_CHROMIUM_VERSION,
                 "offline": True,
                 "network_operations": 0,
@@ -239,6 +239,9 @@ class BuildPipelineTests(unittest.TestCase):
                     "common_full_body_sha256": build_pipeline.focus_macos.EXPECTED_FULL_PATCH_BODY_SHA256,
                     "platform": build_pipeline.focus_macos.validate_platform_patch_series(),
                 },
+                "preparation_execution": (
+                    build_pipeline.prepare_source.fresh_preparation_execution_report()
+                ),
                 "dependency_contract": {
                     "manifest_sha256": build_pipeline.prepare_source.DEPS_INI_SHA256,
                     "archives": {

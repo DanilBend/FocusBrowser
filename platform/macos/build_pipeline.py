@@ -469,7 +469,7 @@ def preparation_contract(source, allow_reclaimed_arm=False):
     )
     receipt = load_json(receipt_path, "preparation receipt")
     if (
-        receipt.get("schema") != 1
+        receipt.get("schema") != prepare_source.PREPARATION_RECEIPT_SCHEMA
         or receipt.get("chromium_version") != focus_macos.PINNED_CHROMIUM_VERSION
     ):
         raise PipelineError("preparation Chromium version mismatch")
@@ -505,6 +505,12 @@ def preparation_contract(source, allow_reclaimed_arm=False):
     }
     if patch_contract != expected_patch:
         raise PipelineError("preparation patch contract mismatch")
+    try:
+        prepare_source.validate_preparation_execution_report(
+            receipt.get("preparation_execution")
+        )
+    except prepare_source.PreparationError as exc:
+        raise PipelineError(str(exc)) from exc
     dependency = receipt.get("dependency_contract")
     expected_archives = {
         name: contract["sha256"]

@@ -579,14 +579,14 @@ index f012bcb..fbbfd27 100644
      case IDC_OPEN_SAFETY_HUB:
        ShowSettingsSubPage(browser_->GetBrowserForOpeningWebUi(),
                            chrome::kSafetyHubSubPage);
-@@ -1966,6 +1969,7 @@ void BrowserCommandController::InitCommandState() {
+@@ -1870,6 +1873,7 @@ void BrowserCommandController::InitCommandState() {
    // These are always enabled; the menu determines their menu item visibility.
    command_updater_.UpdateCommandEnabled(IDC_UPGRADE_DIALOG, true);
    command_updater_.UpdateCommandEnabled(IDC_FOCUS_SERVICES_OPEN, true);
 +  command_updater_.UpdateCommandEnabled(IDC_OPEN_MEDITATION, true);
-   command_updater_.UpdateCommandEnabled(IDC_TOGGLE_ZEN_MODE_TOP_CHROME_PIN,
-                                         false);
    command_updater_.UpdateCommandEnabled(IDC_SET_BROWSER_AS_DEFAULT, true);
+ 
+   // Safety Hub commands.
 diff --git a/chrome/browser/ui/chrome_pages.cc b/chrome/browser/ui/chrome_pages.cc
 index 4e8642e..45ca87c 100644
 --- a/chrome/browser/ui/chrome_pages.cc
@@ -619,9 +619,9 @@ diff --git a/chrome/browser/ui/toolbar/app_menu_model.cc b/chrome/browser/ui/too
 index 0f7f03b..76ac930 100644
 --- a/chrome/browser/ui/toolbar/app_menu_model.cc
 +++ b/chrome/browser/ui/toolbar/app_menu_model.cc
-@@ -1951,6 +1951,13 @@ void AppMenuModel::Build() {
-           ? vector_icons::kChromeExtensionIcon
-           : vector_icons::kExtensionChromeRefreshOldIcon);
+@@ -2080,6 +2080,13 @@ void AppMenuModel::Build() {
+                            kExtensionsMenuItem);
+   }
  
 +  AddItemWithIcon(
 +      IDC_OPEN_MEDITATION, u"Медитация",

@@ -41,6 +41,7 @@ import focus_macos  # pylint: disable=wrong-import-position
 
 
 SYSTEM_PATCH = Path("/usr/bin/patch")
+SYSTEM_GIT = Path("/usr/bin/git")
 DEPS_INI = REPO_ROOT / "focus-chromium" / "deps.ini"
 DEPS_INI_SHA256 = "158806c990d70174a6f401ae488d03246d867e0272b753bfbcb7c1757633b9ea"
 DOMAIN_REGEX_SHA256 = "cf128b0f182692dbf90553aaedd0d3ebc1982076dd94ad94f344bb3677455d2c"
@@ -256,6 +257,12 @@ ONBOARDING_NODE_SHA256_BY_HOST = {
     "arm64": "90ee1d271eec831fd38d16c78c19cc36809548ac5cd034a6e0c10c4389c881ef",
     "x86_64": "cdd4fee89f17b91fb473a03d50ebbdef4f955740a79f8a9d8382db432198b0b7",
 }
+RESUME_PATCH_FAILURE_APPLIED = 98
+RESUME_PATCH_FAILURE_STATUS_COUNT = 4673
+RESUME_PATCH_FAILURE_STATUS_SHA256 = (
+    "5619bcc2e95f36fd8177f6f23c9bc0784812bd94bf784af7f92bf540867568bb"
+)
+PREPARATION_RECEIPT_SCHEMA = 2
 
 
 class PreparationError(RuntimeError):
@@ -307,6 +314,124 @@ def sha256_file(path):
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def fixed_git_environment():
+    """Return a minimal locale-stable environment for read-only system Git."""
+    return {
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    }
+
+
+def run_read_only_git(source_root, arguments):
+    """Run fixed system Git without optional locks or user/system configuration."""
+    source_root = require_real_directory(source_root, "Chromium source")
+    if (
+        SYSTEM_GIT.is_symlink()
+        or not SYSTEM_GIT.is_file()
+        or not os.access(SYSTEM_GIT, os.X_OK)
+    ):
+        raise PreparationError("fixed system Git is unavailable")
+    result = subprocess.run(
+        [str(SYSTEM_GIT), "--no-optional-locks", *arguments],
+        cwd=source_root,
+        env=fixed_git_environment(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()[-2000:]
+        raise PreparationError("read-only Git command failed: {}".format(detail))
+    return result.stdout
+
+
+def validate_pinned_git_head(source_root):
+    """Bind a mutated worktree to the exact pinned Chromium commit."""
+    source_root = require_real_directory(source_root, "Chromium source")
+    top = run_read_only_git(source_root, ["rev-parse", "--show-toplevel"])
+    try:
+        observed_top = Path(top.decode("utf-8").strip()).resolve(strict=True)
+    except (UnicodeDecodeError, FileNotFoundError) as exc:
+        raise PreparationError("Chromium Git top-level is invalid") from exc
+    if observed_top != source_root:
+        raise PreparationError("Chromium source is not the Git top-level")
+    head = run_read_only_git(source_root, ["rev-parse", "HEAD"])
+    try:
+        observed_head = head.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise PreparationError("Chromium Git HEAD is not ASCII") from exc
+    if observed_head != ACQUISITION_CHROMIUM_COMMIT:
+        raise PreparationError(
+            "Chromium Git HEAD mismatch: expected {}, got {}".format(
+                ACQUISITION_CHROMIUM_COMMIT, observed_head
+            )
+        )
+    return observed_head
+
+
+def working_tree_inventory(source_root):
+    """Hash every changed/deleted/untracked path in a canonical Git inventory."""
+    source_root = require_real_directory(source_root, "Chromium source")
+    raw = run_read_only_git(
+        source_root,
+        ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )
+    fields = raw.split(b"\0")
+    if not fields or fields[-1] != b"":
+        raise PreparationError("Git status did not end with a NUL terminator")
+    records = []
+    status_counts = OrderedDict()
+    for field in fields[:-1]:
+        if len(field) < 4 or field[2:3] != b" ":
+            raise PreparationError("unsupported Git status record")
+        try:
+            status_value = field[:2].decode("ascii")
+            relative = field[3:].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise PreparationError("Git status contains a non-UTF-8 path") from exc
+        if any(value in "RC" for value in status_value):
+            raise PreparationError("rename/copy Git status is forbidden during resume")
+        if any(ord(character) < 0x20 for character in relative):
+            raise PreparationError("Git status path contains a control character")
+        relative = safe_relative(relative, "Git status")
+        target = reject_symlink_ancestors(source_root, relative)
+        if target.is_symlink():
+            raise PreparationError("Git status path is a symlink: {}".format(target))
+        if target.is_file():
+            metadata = target.stat()
+            if not stat.S_ISREG(metadata.st_mode):
+                raise PreparationError(
+                    "Git status path is not a regular file: {}".format(target)
+                )
+            line = "{}\t{}\t{:04o}\t{}\t{}\n".format(
+                status_value,
+                relative,
+                stat.S_IMODE(metadata.st_mode),
+                metadata.st_size,
+                sha256_file(target),
+            )
+        elif not target.exists():
+            line = "{}\t{}\tABSENT\n".format(status_value, relative)
+        else:
+            raise PreparationError(
+                "Git status path is not a regular file or absence: {}".format(target)
+            )
+        records.append((relative, line))
+        status_counts[status_value] = status_counts.get(status_value, 0) + 1
+    if len(records) != len({relative for relative, _ in records}):
+        raise PreparationError("Git status contains a duplicate path")
+    body = "".join(line for _, line in sorted(records)).encode("utf-8")
+    return {
+        "records": len(records),
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "status_counts": dict(status_counts),
+    }
 
 
 def safe_relative(value, label):
@@ -1063,6 +1188,46 @@ def installed_dependency_tree(source_root, contracts=None):
     return _dependency_inventory_report(roots, directories, files)
 
 
+def expected_dependency_install_report():
+    """Return the exact immutable report produced by the ten-archive merge."""
+    return {
+        "ownership_roots": list(DEPENDENCY_OWNERSHIP_ROOTS),
+        "regular_files": DEPENDENCY_INSTALL_REGULAR_FILES,
+        "logical_bytes": DEPENDENCY_INSTALL_LOGICAL_BYTES,
+        "sha256": DEPENDENCY_INSTALL_SHA256,
+        "installed_symlinks": 0,
+        "installed_special_files": 0,
+        "files_copied": DEPENDENCY_INSTALL_REGULAR_FILES,
+        "components": list(DEPENDENCY_CONTRACTS),
+        "omitted_symlinks": {
+            "onboarding": {
+                "count": SHARED_DEPENDENCY_CONTRACTS["onboarding"][
+                    "omitted_symlink_count"
+                ],
+                "sha256": SHARED_DEPENDENCY_CONTRACTS["onboarding"][
+                    "omitted_symlink_sha256"
+                ],
+            }
+        },
+    }
+
+
+def expected_installed_dependency_tree_report():
+    """Return the immutable six-root tree report without merge-only metadata."""
+    install = expected_dependency_install_report()
+    return {
+        key: install[key]
+        for key in (
+            "ownership_roots",
+            "regular_files",
+            "logical_bytes",
+            "sha256",
+            "installed_symlinks",
+            "installed_special_files",
+        )
+    }
+
+
 def merge_staged_dependencies(source_root, stage_root, contracts):
     """Install a deterministic archive tree into initially empty owned roots."""
     source_root = require_real_directory(source_root, "Chromium source")
@@ -1474,6 +1639,36 @@ def apply_prune_plan(source_root, plan, expected_absent_paths=None):
     }
 
 
+def validate_completed_pruning(source_root):
+    """Prove every pinned pruning target is already absent after the failed run."""
+    manifest = Path(PRUNING_LIST)
+    if manifest.is_symlink() or not manifest.is_file():
+        raise PreparationError("pruning manifest is not a regular file: {}".format(manifest))
+    if sha256_file(manifest) != PRUNING_LIST_SHA256:
+        raise PreparationError("pruning.list hash mismatch during resume")
+    entries = []
+    for number, line in enumerate(manifest.read_text(encoding="utf-8").splitlines(), 1):
+        if not line or line != line.strip() or line.startswith("#"):
+            raise PreparationError(
+                "invalid pruning entry at {}:{}: {!r}".format(manifest, number, line)
+            )
+        entries.append(safe_relative(line, "pruning entry {}".format(number)))
+    if len(entries) != PRUNING_ENTRY_COUNT or len(entries) != len(set(entries)):
+        raise PreparationError("pruning inventory changed during resume")
+    plan = build_prune_plan(source_root, expected_absent_paths=tuple(entries))
+    if len(plan) != PRUNING_ENTRY_COUNT or any(
+        not item.get("already_absent") or item.get("future_archive_file") for item in plan
+    ):
+        raise PreparationError("not every pruning target is absent during resume")
+    return {
+        "manifest_sha256": PRUNING_LIST_SHA256,
+        "listed_files": PRUNING_ENTRY_COUNT,
+        "all_targets_absent": True,
+        "absent_files": PRUNING_ENTRY_COUNT,
+        "symlink_targets": 0,
+    }
+
+
 def build_patch_plan():
     """Return the validated filtered common order followed by three Mac patches."""
     focus_macos.validate_repository_contract()
@@ -1537,12 +1732,94 @@ def patch_command(patch_bin, patch_path, source_root, check_only):
     return command
 
 
-def apply_patch_plan(source_root, patch_plan, patch_bin=SYSTEM_PATCH, runner=subprocess.run):
+def check_patch_boundary(
+    source_root,
+    patch_path,
+    reverse=False,
+    patch_bin=SYSTEM_PATCH,
+    runner=subprocess.run,
+):
+    """Check one exact forward/reverse patch boundary without modifying source."""
+    source_root = require_real_directory(source_root, "Chromium source")
+    patch_bin = validate_patch_tool(patch_bin)
+    patch_path = Path(patch_path)
+    if patch_path.is_symlink() or not patch_path.is_file():
+        raise PreparationError("patch is not a regular file: {}".format(patch_path))
+    command = patch_command(patch_bin, patch_path, source_root, True)
+    if reverse:
+        command.insert(2, "-R")
+    result = runner(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        direction = "reverse" if reverse else "forward"
+        detail = (result.stderr or result.stdout).strip()[-2000:]
+        raise PreparationError(
+            "patch boundary {} check failed for {}: {}".format(
+                direction, patch_path, detail
+            )
+        )
+    return {
+        "path": str(patch_path),
+        "sha256": sha256_file(patch_path),
+        "direction": "reverse" if reverse else "forward",
+        "applicable": True,
+    }
+
+
+def patch_slice_inventory(patch_plan, start, stop):
+    """Hash an exact ordered half-open slice of the validated patch plan."""
+    if type(start) is not int or type(stop) is not int or not (0 <= start <= stop):
+        raise PreparationError("invalid patch inventory slice")
+    selected = list(patch_plan[start:stop])
+    if len(selected) != stop - start:
+        raise PreparationError("patch inventory slice exceeds the complete plan")
+    records = []
+    for position, path in enumerate(selected, start + 1):
+        path = Path(path)
+        if path.is_symlink() or not path.is_file():
+            raise PreparationError("patch is not a regular file: {}".format(path))
+        try:
+            relative = path.resolve().relative_to(REPO_ROOT).as_posix()
+        except ValueError as exc:
+            raise PreparationError("patch escaped the Focus repository") from exc
+        records.append(
+            "{}\t{}\t{}\n".format(position, relative, sha256_file(path))
+        )
+    body = "".join(records).encode("utf-8")
+    return {
+        "first_position": start + 1 if selected else None,
+        "last_position": stop if selected else None,
+        "count": len(selected),
+        "sha256": hashlib.sha256(body).hexdigest(),
+    }
+
+
+def apply_patch_plan(
+    source_root,
+    patch_plan,
+    patch_bin=SYSTEM_PATCH,
+    runner=subprocess.run,
+    base_position=0,
+    total_patches=None,
+):
     """Check then apply every patch in order with system patch and fuzz=0."""
     source_root = require_real_directory(source_root, "Chromium source")
     patch_bin = validate_patch_tool(patch_bin)
+    if type(base_position) is not int or base_position < 0:
+        raise PreparationError("patch base position must be a nonnegative integer")
+    total_patches = total_patches if total_patches is not None else len(patch_plan)
+    if (
+        type(total_patches) is not int
+        or total_patches < base_position + len(patch_plan)
+    ):
+        raise PreparationError("patch total is smaller than the numbered batch")
     applied = []
-    for position, patch_path in enumerate(patch_plan, 1):
+    for batch_position, patch_path in enumerate(patch_plan, 1):
+        position = base_position + batch_position
         patch_path = Path(patch_path)
         if patch_path.is_symlink() or not patch_path.is_file():
             raise PreparationError("patch is not a regular file: {}".format(patch_path))
@@ -1558,7 +1835,7 @@ def apply_patch_plan(source_root, patch_plan, patch_bin=SYSTEM_PATCH, runner=sub
                 detail = (result.stderr or result.stdout).strip()[-2000:]
                 raise PreparationError(
                     "patch {} failed during {} ({}/{}): {}".format(
-                        patch_path, phase, position, len(patch_plan), detail
+                        patch_path, phase, position, total_patches, detail
                     )
                 )
         applied.append(str(patch_path))
@@ -1829,7 +2106,7 @@ def validate_icon_destination(source_root, require_upstream_hash=False):
 
 def validate_upstream_source_contracts(source_root):
     """Pin all four upstream Mac files before any source mutation."""
-    mac_contract = focus_macos.validate_chromium_macos_build_contract(source_root)
+    focus_macos.validate_chromium_macos_build_contract(source_root)
     validate_icon_destination(source_root, require_upstream_hash=True)
     installer = require_regular_in_tree(
         source_root, INSTALLER_MAC_BUILD_GN, "Chromium macOS installer BUILD.gn"
@@ -1841,17 +2118,22 @@ def validate_upstream_source_contracts(source_root):
                 INSTALLER_MAC_BUILD_GN_SHA256, installer_hash
             )
         )
+    return expected_upstream_source_contracts()
+
+
+def expected_upstream_source_contracts():
+    """Return immutable upstream hashes recorded before source mutation."""
     return OrderedDict(
         (
             ("chrome/BUILD.gn", CHROME_BUILD_GN_SHA256),
             (INSTALLER_MAC_BUILD_GN, INSTALLER_MAC_BUILD_GN_SHA256),
             (
                 focus_macos.CHROMIUM_MAC_SDK_GNI,
-                mac_contract["pinned_files"][focus_macos.CHROMIUM_MAC_SDK_GNI],
+                focus_macos.PINNED_CHROMIUM_MAC_SDK_GNI_SHA256,
             ),
             (
                 focus_macos.CHROMIUM_UNIVERSALIZER,
-                mac_contract["pinned_files"][focus_macos.CHROMIUM_UNIVERSALIZER],
+                focus_macos.PINNED_CHROMIUM_UNIVERSALIZER_SHA256,
             ),
         )
     )
@@ -1910,6 +2192,99 @@ def write_args_gn(source_root, plan=None):
     return {architecture: str(destination) for architecture, destination, _ in destinations}
 
 
+def fresh_preparation_execution_report(total_patches=324):
+    """Describe a normal preparation that starts from the pristine source."""
+    return {
+        "mode": "fresh",
+        "initial_applied_patch_count": 0,
+        "patches_applied_this_run": total_patches,
+        "total_patches": total_patches,
+        "resume_checkpoint": None,
+    }
+
+
+def validate_preparation_execution_report(report):
+    """Validate honest fresh or exact-prefix preparation provenance."""
+    required = {
+        "mode",
+        "initial_applied_patch_count",
+        "patches_applied_this_run",
+        "total_patches",
+        "resume_checkpoint",
+    }
+    if not isinstance(report, dict) or set(report) != required:
+        raise PreparationError("preparation execution report schema mismatch")
+    if report["total_patches"] != 324 or (
+        report["initial_applied_patch_count"] + report["patches_applied_this_run"]
+        != report["total_patches"]
+    ):
+        raise PreparationError("preparation execution patch counts mismatch")
+    if report["mode"] == "fresh":
+        if report != fresh_preparation_execution_report():
+            raise PreparationError("fresh preparation execution report mismatch")
+        return report
+    if (
+        report["mode"] != "resume_exact_prefix"
+        or report["initial_applied_patch_count"] != RESUME_PATCH_FAILURE_APPLIED
+        or report["patches_applied_this_run"]
+        != 324 - RESUME_PATCH_FAILURE_APPLIED
+    ):
+        raise PreparationError("resume preparation execution report mismatch")
+    checkpoint = report["resume_checkpoint"]
+    if not isinstance(checkpoint, dict) or set(checkpoint) != {
+        "git_head",
+        "working_tree",
+        "dependency_tree",
+        "pruning",
+        "applied_prefix",
+        "last_applied_patch",
+        "next_patch",
+    }:
+        raise PreparationError("resume checkpoint schema mismatch")
+    if checkpoint["git_head"] != ACQUISITION_CHROMIUM_COMMIT:
+        raise PreparationError("resume checkpoint Git HEAD mismatch")
+    working_tree = checkpoint["working_tree"]
+    if (
+        not isinstance(working_tree, dict)
+        or working_tree.get("records") != RESUME_PATCH_FAILURE_STATUS_COUNT
+        or working_tree.get("sha256") != RESUME_PATCH_FAILURE_STATUS_SHA256
+    ):
+        raise PreparationError("resume checkpoint working-tree mismatch")
+    expected_tree = expected_installed_dependency_tree_report()
+    if checkpoint["dependency_tree"] != expected_tree:
+        raise PreparationError("resume checkpoint dependency tree mismatch")
+    if checkpoint["pruning"] != {
+        "manifest_sha256": PRUNING_LIST_SHA256,
+        "listed_files": PRUNING_ENTRY_COUNT,
+        "all_targets_absent": True,
+        "absent_files": PRUNING_ENTRY_COUNT,
+        "symlink_targets": 0,
+    }:
+        raise PreparationError("resume checkpoint pruning mismatch")
+    patch_plan = build_patch_plan()
+    if checkpoint["applied_prefix"] != patch_slice_inventory(
+        patch_plan, 0, RESUME_PATCH_FAILURE_APPLIED
+    ):
+        raise PreparationError("resume checkpoint patch-prefix mismatch")
+    expected_last = {
+        "position": RESUME_PATCH_FAILURE_APPLIED,
+        "path": str(patch_plan[RESUME_PATCH_FAILURE_APPLIED - 1]),
+        "sha256": sha256_file(patch_plan[RESUME_PATCH_FAILURE_APPLIED - 1]),
+        "reverse_applicable": True,
+    }
+    expected_next = {
+        "position": RESUME_PATCH_FAILURE_APPLIED + 1,
+        "path": str(patch_plan[RESUME_PATCH_FAILURE_APPLIED]),
+        "sha256": sha256_file(patch_plan[RESUME_PATCH_FAILURE_APPLIED]),
+        "forward_applicable": True,
+    }
+    if checkpoint["last_applied_patch"] != expected_last:
+        raise PreparationError("resume checkpoint last patch mismatch")
+    if checkpoint["next_patch"] != expected_next:
+        raise PreparationError("resume checkpoint next patch mismatch")
+    return report
+
+
 def write_preparation_receipt(
     source_root,
     preflight_report,
@@ -1917,9 +2292,12 @@ def write_preparation_receipt(
     pruning_report,
     dependency_report,
     localized_strings_report,
+    execution_report=None,
 ):
     """Write the deterministic post-preparation provenance receipt once."""
     source_root = require_real_directory(source_root, "Chromium source")
+    execution_report = execution_report or fresh_preparation_execution_report()
+    validate_preparation_execution_report(execution_report)
     expected_pruning = {
         "files_removed": PRUNING_EXPECTED_REMOVAL_COUNT,
         "already_absent_files": PRUNING_ALREADY_ABSENT_COUNT,
@@ -1931,26 +2309,7 @@ def write_preparation_receipt(
         key: pruning_report.get(key) for key in expected_pruning
     } != expected_pruning:
         raise PreparationError("pruning result does not match the pinned Mac inventory")
-    expected_dependency_install = {
-        "ownership_roots": list(DEPENDENCY_OWNERSHIP_ROOTS),
-        "regular_files": DEPENDENCY_INSTALL_REGULAR_FILES,
-        "logical_bytes": DEPENDENCY_INSTALL_LOGICAL_BYTES,
-        "sha256": DEPENDENCY_INSTALL_SHA256,
-        "installed_symlinks": 0,
-        "installed_special_files": 0,
-        "files_copied": DEPENDENCY_INSTALL_REGULAR_FILES,
-        "components": list(DEPENDENCY_CONTRACTS),
-        "omitted_symlinks": {
-            "onboarding": {
-                "count": SHARED_DEPENDENCY_CONTRACTS["onboarding"][
-                    "omitted_symlink_count"
-                ],
-                "sha256": SHARED_DEPENDENCY_CONTRACTS["onboarding"][
-                    "omitted_symlink_sha256"
-                ],
-            }
-        },
-    }
+    expected_dependency_install = expected_dependency_install_report()
     if dependency_report != expected_dependency_install:
         raise PreparationError("dependency install result does not match pinned inventory")
     if not isinstance(localized_strings_report, dict) or set(localized_strings_report) != {
@@ -2039,7 +2398,7 @@ def write_preparation_receipt(
     )
     receipt = OrderedDict(
         (
-            ("schema", 1),
+            ("schema", PREPARATION_RECEIPT_SCHEMA),
             ("chromium_version", focus_macos.PINNED_CHROMIUM_VERSION),
             ("offline", True),
             ("network_operations", 0),
@@ -2055,6 +2414,7 @@ def write_preparation_receipt(
                     "platform": platform_patches,
                 },
             ),
+            ("preparation_execution", execution_report),
             (
                 "dependency_contract",
                 {
@@ -2122,6 +2482,11 @@ def write_preparation_receipt(
         stream.write(serialized)
         stream.flush()
         os.fsync(stream.fileno())
+    directory_fd = os.open(receipt_path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
     return {
         "path": str(receipt_path),
         "sha256": sha256_file(receipt_path),
@@ -2216,6 +2581,219 @@ def preflight(source_root, cache_root):
     }
 
 
+def resume_preflight_98(source_root, cache_root, applied_patches):
+    """Prove the one known patch-98 failure checkpoint without mutating source."""
+    if type(applied_patches) is not int or applied_patches != RESUME_PATCH_FAILURE_APPLIED:
+        raise PreparationError(
+            "resume accepts only the pinned {}-patch checkpoint".format(
+                RESUME_PATCH_FAILURE_APPLIED
+            )
+        )
+    source_input = Path(source_root).expanduser()
+    if source_input.is_symlink():
+        raise PreparationError("Chromium source argument must not be a symlink")
+    source, version = focus_macos.resolve_source_root(str(source_input))
+    acquisition = validate_acquisition_marker(source)
+    tool_bootstrap = validate_tool_bootstrap_marker(source, acquisition)
+    git_head = validate_pinned_git_head(source)
+    repository = focus_macos.validate_repository_contract()
+    contracts = validate_dependency_manifest()
+    cache, cache_report = validate_offline_cache(cache_root, contracts)
+    dependency_cache_marker = validate_dependency_cache_marker(cache, contracts)
+
+    receipt_path = reject_symlink_ancestors(
+        source, safe_relative(PREPARATION_RECEIPT, "preparation receipt")
+    )
+    if receipt_path.exists() or receipt_path.is_symlink():
+        raise PreparationError("preparation receipt already exists during resume")
+    for _, (out_dir, _) in args_gn_plan().items():
+        relative = PurePosixPath(safe_relative(out_dir, "GN output"), "args.gn").as_posix()
+        path = reject_symlink_ancestors(source, relative)
+        if path.exists() or path.is_symlink():
+            raise PreparationError("args.gn already exists during resume: {}".format(path))
+    strings_path = reject_symlink_ancestors(source, ONBOARDING_STRINGS_OUTPUT)
+    if strings_path.exists() or strings_path.is_symlink():
+        raise PreparationError("onboarding strings already exist during resume")
+    focus_version.check_existing_version(
+        require_regular_in_tree(source, "chrome/VERSION", "Chromium VERSION")
+    )
+
+    dependency_tree = installed_dependency_tree(source, contracts)
+    expected_tree = expected_installed_dependency_tree_report()
+    if dependency_tree != expected_tree:
+        raise PreparationError("installed dependency tree changed before resume")
+    pruning_checkpoint = validate_completed_pruning(source)
+    working_tree = working_tree_inventory(source)
+    if (
+        working_tree["records"] != RESUME_PATCH_FAILURE_STATUS_COUNT
+        or working_tree["sha256"] != RESUME_PATCH_FAILURE_STATUS_SHA256
+    ):
+        raise PreparationError(
+            "resume working-tree checkpoint mismatch: expected {}/{}, got {}/{}".format(
+                RESUME_PATCH_FAILURE_STATUS_COUNT,
+                RESUME_PATCH_FAILURE_STATUS_SHA256,
+                working_tree["records"],
+                working_tree["sha256"],
+            )
+        )
+
+    patch_plan = build_patch_plan()
+    validate_patch_tool()
+    last_path = patch_plan[RESUME_PATCH_FAILURE_APPLIED - 1]
+    next_path = patch_plan[RESUME_PATCH_FAILURE_APPLIED]
+    check_patch_boundary(source, last_path, reverse=True)
+    check_patch_boundary(source, next_path, reverse=False)
+    checkpoint = {
+        "git_head": git_head,
+        "working_tree": working_tree,
+        "dependency_tree": dependency_tree,
+        "pruning": pruning_checkpoint,
+        "applied_prefix": patch_slice_inventory(
+            patch_plan, 0, RESUME_PATCH_FAILURE_APPLIED
+        ),
+        "last_applied_patch": {
+            "position": RESUME_PATCH_FAILURE_APPLIED,
+            "path": str(last_path),
+            "sha256": sha256_file(last_path),
+            "reverse_applicable": True,
+        },
+        "next_patch": {
+            "position": RESUME_PATCH_FAILURE_APPLIED + 1,
+            "path": str(next_path),
+            "sha256": sha256_file(next_path),
+            "forward_applicable": True,
+        },
+    }
+    execution = {
+        "mode": "resume_exact_prefix",
+        "initial_applied_patch_count": RESUME_PATCH_FAILURE_APPLIED,
+        "patches_applied_this_run": len(patch_plan) - RESUME_PATCH_FAILURE_APPLIED,
+        "total_patches": len(patch_plan),
+        "resume_checkpoint": checkpoint,
+    }
+    validate_preparation_execution_report(execution)
+    overlay_files, cleanup_paths, _ = build_overlay_plan()
+    resource_plan = parse_resource_plan()
+    focus_macos.validate_icns_asset()
+    return {
+        "source_root": str(source),
+        "chromium_version": version,
+        "acquisition": acquisition,
+        "tool_bootstrap": tool_bootstrap,
+        "offline": True,
+        "network_operations": 0,
+        "upstream_baseline_sha256": expected_upstream_source_contracts(),
+        "dependencies": cache_report,
+        "dependency_cache_marker": dependency_cache_marker,
+        "dependency_checkpoint": dependency_tree,
+        "dependency_install": expected_dependency_install_report(),
+        "pruning_checkpoint": pruning_checkpoint,
+        "pruning": {
+            "manifest_sha256": PRUNING_LIST_SHA256,
+            "listed_files": PRUNING_ENTRY_COUNT,
+            "files_removed": PRUNING_EXPECTED_REMOVAL_COUNT,
+            "already_absent_files": PRUNING_ALREADY_ABSENT_COUNT,
+            "already_absent_sha256": PRUNING_ALREADY_ABSENT_SHA256,
+            "contingent_paths_pruned": False,
+            "directory_pruning_executed": False,
+        },
+        "patches": {
+            "common_filtered": repository["shared_series"]["planned_entries"],
+            "platform": len(repository["platform_patches"]),
+            "total": len(patch_plan),
+            "initially_applied": RESUME_PATCH_FAILURE_APPLIED,
+            "remaining": len(patch_plan) - RESUME_PATCH_FAILURE_APPLIED,
+        },
+        "preparation_execution": execution,
+        "overlay_files": len(overlay_files),
+        "cleanup_paths": len(cleanup_paths),
+        "resources": len(resource_plan),
+        "icon_destination": MAC_ICON_DESTINATION,
+        "args_gn": {
+            key: value[0] + "/args.gn" for key, value in args_gn_plan().items()
+        },
+        "resume_ready": True,
+    }
+
+
+def resume_patch_failure(source_root, cache_root, applied_patches, workers=None):
+    """Continue only the exact, fully audited patch-98 preparation failure."""
+    report = resume_preflight_98(source_root, cache_root, applied_patches)
+    source = Path(report["source_root"])
+    cache = require_real_directory(cache_root, "offline cache")
+    watched_filesystems = (source, cache)
+    disk_gates = []
+
+    def gate(phase):
+        measurement = require_disk_floor(watched_filesystems, phase)
+        disk_gates.append(measurement)
+
+    gate("resume checkpoint revalidation")
+    patch_plan = build_patch_plan()
+    current_inventory = working_tree_inventory(source)
+    if current_inventory != report["preparation_execution"]["resume_checkpoint"][
+        "working_tree"
+    ]:
+        raise PreparationError("working tree changed after resume preflight")
+    check_patch_boundary(
+        source, patch_plan[RESUME_PATCH_FAILURE_APPLIED], reverse=False
+    )
+    gate("remaining 226-patch batch")
+    applied = apply_patch_plan(
+        source,
+        patch_plan[RESUME_PATCH_FAILURE_APPLIED:],
+        base_position=RESUME_PATCH_FAILURE_APPLIED,
+        total_patches=len(patch_plan),
+    )
+    gate("domain/name/i18n transformations")
+    transformations = apply_common_transformations(source, workers=workers)
+    overlay_files, cleanup_paths, _ = build_overlay_plan()
+    gate("filtered overlay and cleanup")
+    overlay_report = apply_overlay(source, overlay_files, cleanup_paths)
+    gate("Focus version append")
+    version = append_focus_version_once(source)
+    resource_plan = parse_resource_plan()
+    gate("common resource copy")
+    resource_count = copy_common_resources(source, resource_plan)
+    gate("pinned ICNS install")
+    icon = install_focus_icns(source)
+    gate("arm64/x64 args.gn write")
+    args_paths = write_args_gn(source)
+    gate("deterministic onboarding strings generation")
+    localized_strings = generate_onboarding_strings(source)
+    gate("preparation completion")
+    receipt = write_preparation_receipt(
+        source,
+        report,
+        args_paths,
+        report["pruning"],
+        report["dependency_install"],
+        localized_strings,
+        execution_report=report["preparation_execution"],
+    )
+    report.update(
+        {
+            "prepared": True,
+            "patches_applied": len(patch_plan),
+            "patches_applied_this_run": len(applied),
+            "transformations": transformations,
+            "overlay": overlay_report,
+            "focus_version": version,
+            "resources_copied": resource_count,
+            "icns_installed": icon,
+            "args_gn_written": args_paths,
+            "localized_strings": localized_strings,
+            "preparation_receipt": receipt,
+            "disk_gates": disk_gates,
+            "hard_disk_floor_gib": HARD_DISK_FLOOR_GIB,
+            "build_executed": False,
+            "signing_executed": False,
+            "packaging_executed": False,
+        }
+    )
+    return report
+
+
 def prepare(source_root, cache_root, workers=None):
     """Execute the validated offline preparation pipeline (but never build)."""
     report = preflight(source_root, cache_root)
@@ -2267,7 +2845,7 @@ def prepare(source_root, cache_root, workers=None):
     args_paths = write_args_gn(source)
     gate("deterministic onboarding strings generation")
     localized_strings = generate_onboarding_strings(source)
-    gate("preparation receipt write")
+    gate("preparation completion")
     receipt = write_preparation_receipt(
         source,
         report,
@@ -2275,8 +2853,8 @@ def prepare(source_root, cache_root, workers=None):
         pruning_report,
         dependency_report,
         localized_strings,
+        execution_report=fresh_preparation_execution_report(len(patch_plan)),
     )
-    gate("post-preparation completion")
     report.update(
         {
             "prepared": True,
@@ -2304,18 +2882,30 @@ def prepare(source_root, cache_root, workers=None):
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("preflight", "prepare"):
+    for command in (
+        "preflight",
+        "prepare",
+        "resume-preflight",
+        "resume-patch-failure",
+    ):
         child = subparsers.add_parser(command)
         child.add_argument("--source-root", required=True)
         child.add_argument("--cache", required=True)
         child.add_argument("--json", action="store_true")
-        if command == "prepare":
+        if command in ("prepare", "resume-patch-failure"):
             child.add_argument(
                 "--confirm-source-mutation",
                 action="store_true",
                 help="required acknowledgement that the Chromium checkout will be modified",
             )
             child.add_argument("--workers", type=int)
+        if command in ("resume-preflight", "resume-patch-failure"):
+            child.add_argument(
+                "--applied-patches",
+                required=True,
+                type=int,
+                help="must equal the single audited patch-failure checkpoint",
+            )
     return parser
 
 
@@ -2323,12 +2913,26 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        if args.command == "prepare":
+        if args.command in ("prepare", "resume-patch-failure"):
             if not args.confirm_source_mutation:
-                raise PreparationError("prepare requires --confirm-source-mutation")
+                raise PreparationError(
+                    "{} requires --confirm-source-mutation".format(args.command)
+                )
             if args.workers is not None and args.workers < 1:
                 raise PreparationError("--workers must be positive")
-            report = prepare(args.source_root, args.cache, workers=args.workers)
+            if args.command == "resume-patch-failure":
+                report = resume_patch_failure(
+                    args.source_root,
+                    args.cache,
+                    args.applied_patches,
+                    workers=args.workers,
+                )
+            else:
+                report = prepare(args.source_root, args.cache, workers=args.workers)
+        elif args.command == "resume-preflight":
+            report = resume_preflight_98(
+                args.source_root, args.cache, args.applied_patches
+            )
         else:
             report = preflight(args.source_root, args.cache)
     except (PreparationError, focus_macos.ContractError, ValueError, OSError) as exc:

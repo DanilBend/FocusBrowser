@@ -216,10 +216,11 @@
      {ui::VKEY_R, ui::EF_PLATFORM_ACCELERATOR, IDC_RELOAD},
 --- a/chrome/browser/ui/browser_command_controller.cc
 +++ b/chrome/browser/ui/browser_command_controller.cc
-@@ -1948,6 +1948,8 @@ void BrowserCommandController::InitComma
+@@ -1948,7 +1948,9 @@ void BrowserCommandController::InitComma
    // These are always enabled; the menu determines their menu item visibility.
    command_updater_.UpdateCommandEnabled(IDC_UPGRADE_DIALOG, true);
    command_updater_.UpdateCommandEnabled(IDC_FOCUS_SERVICES_OPEN, true);
+   command_updater_.UpdateCommandEnabled(IDC_OPEN_MEDITATION, true);
 +  command_updater_.UpdateCommandEnabled(IDC_TOGGLE_ZEN_MODE_TOP_CHROME_PIN,
 +                                        false);
    command_updater_.UpdateCommandEnabled(IDC_SET_BROWSER_AS_DEFAULT, true);

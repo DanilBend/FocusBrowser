@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -1051,7 +1052,11 @@ class PrepareSourceTests(unittest.TestCase):
             )
         receipt = Path(report["path"])
         payload = json.loads(receipt.read_text(encoding="utf-8"))
-        self.assertEqual(1, payload["schema"])
+        self.assertEqual(prepare_source.PREPARATION_RECEIPT_SCHEMA, payload["schema"])
+        self.assertEqual(
+            prepare_source.fresh_preparation_execution_report(),
+            payload["preparation_execution"],
+        )
         self.assertTrue(payload["offline"])
         self.assertEqual(0, payload["network_operations"])
         self.assertFalse(payload["build_executed"])
@@ -1179,8 +1184,7 @@ class PrepareSourceTests(unittest.TestCase):
                 "pinned ICNS install",
                 "arm64/x64 args.gn write",
                 "deterministic onboarding strings generation",
-                "preparation receipt write",
-                "post-preparation completion",
+                "preparation completion",
             ],
             phases,
         )
@@ -1195,6 +1199,134 @@ class PrepareSourceTests(unittest.TestCase):
                 ["prepare", "--source-root", str(self.root), "--cache", str(self.root)]
             )
         self.assertEqual(2, context.exception.code)
+
+    def test_working_tree_inventory_hashes_mode_size_and_content(self):
+        source = self.root / "git-source"
+        subprocess.run(
+            [str(prepare_source.SYSTEM_GIT), "init", str(source)],
+            check=True,
+            capture_output=True,
+        )
+        (source / "modified.txt").write_bytes(b"original\n")
+        (source / "deleted.txt").write_bytes(b"delete me\n")
+        subprocess.run(
+            [str(prepare_source.SYSTEM_GIT), "-C", str(source), "add", "."],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                str(prepare_source.SYSTEM_GIT),
+                "-C",
+                str(source),
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        (source / "modified.txt").write_bytes(b"changed\n")
+        (source / "deleted.txt").unlink()
+        (source / "untracked.txt").write_bytes(b"new\n")
+        report = prepare_source.working_tree_inventory(source)
+        lines = []
+        for status_value, relative, payload in (
+            (" D", "deleted.txt", None),
+            (" M", "modified.txt", b"changed\n"),
+            ("??", "untracked.txt", b"new\n"),
+        ):
+            if payload is None:
+                lines.append("{}\t{}\tABSENT\n".format(status_value, relative))
+            else:
+                path = source / relative
+                lines.append(
+                    "{}\t{}\t{:04o}\t{}\t{}\n".format(
+                        status_value,
+                        relative,
+                        stat.S_IMODE(path.stat().st_mode),
+                        len(payload),
+                        hashlib.sha256(payload).hexdigest(),
+                    )
+                )
+        self.assertEqual(3, report["records"])
+        self.assertEqual(
+            hashlib.sha256("".join(lines).encode("utf-8")).hexdigest(),
+            report["sha256"],
+        )
+
+    def test_resume_accepts_only_the_single_audited_checkpoint(self):
+        for value in (0, 97, 99, 324):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                prepare_source.PreparationError, "only the pinned"
+            ):
+                prepare_source.resume_preflight_98(self.root, self.root, value)
+
+    def test_resume_preflight_cli_is_read_only_and_needs_exact_count(self):
+        report = {"resume_ready": True}
+        with mock.patch.object(
+            prepare_source, "resume_preflight_98", return_value=report
+        ) as preflight, mock.patch("sys.stdout", new=io.StringIO()):
+            self.assertEqual(
+                0,
+                prepare_source.main(
+                    [
+                        "resume-preflight",
+                        "--source-root",
+                        str(self.root),
+                        "--cache",
+                        str(self.root),
+                        "--applied-patches",
+                        "98",
+                        "--json",
+                    ]
+                ),
+            )
+        preflight.assert_called_once_with(str(self.root), str(self.root), 98)
+
+    def test_resume_mutation_cli_requires_explicit_confirmation(self):
+        with mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(
+            SystemExit
+        ) as context:
+            prepare_source.main(
+                [
+                    "resume-patch-failure",
+                    "--source-root",
+                    str(self.root),
+                    "--cache",
+                    str(self.root),
+                    "--applied-patches",
+                    "98",
+                ]
+            )
+        self.assertEqual(2, context.exception.code)
+
+    def test_patch_failure_reports_global_resume_position(self):
+        source = self.root / "patch-position"
+        source.mkdir()
+        target = source / "example.txt"
+        target.write_text("different\n", encoding="utf-8")
+        patch = self.root / "position.patch"
+        patch.write_text(
+            "--- a/example.txt\n+++ b/example.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(prepare_source.PreparationError, r"\(99/324\)"):
+            prepare_source.apply_patch_plan(
+                source, [patch], base_position=98, total_patches=324
+            )
+
+    def test_preparation_execution_report_rejects_count_drift(self):
+        report = prepare_source.fresh_preparation_execution_report()
+        prepare_source.validate_preparation_execution_report(report)
+        changed = dict(report)
+        changed["patches_applied_this_run"] = 323
+        with self.assertRaisesRegex(prepare_source.PreparationError, "counts"):
+            prepare_source.validate_preparation_execution_report(changed)
 
 
 if __name__ == "__main__":
