@@ -262,6 +262,18 @@ RESUME_PATCH_FAILURE_STATUS_COUNT = 4673
 RESUME_PATCH_FAILURE_STATUS_SHA256 = (
     "5619bcc2e95f36fd8177f6f23c9bc0784812bd94bf784af7f92bf540867568bb"
 )
+RESUME_PATCH_FAILURE_IGNORED_COUNT = 23138
+RESUME_PATCH_FAILURE_IGNORED_REGULAR_FILES = 23080
+RESUME_PATCH_FAILURE_IGNORED_SYMLINKS = 58
+RESUME_PATCH_FAILURE_IGNORED_LOGICAL_BYTES = 7424830215
+RESUME_PATCH_FAILURE_IGNORED_SYMLINK_TARGET_BYTES = 901
+RESUME_PATCH_FAILURE_IGNORED_PATH_LIST_BYTES = 2189663
+RESUME_PATCH_FAILURE_IGNORED_PATH_LIST_SHA256 = (
+    "06d548e12b44c52bd401fa39dbab91ae038d187c2d43a309f7120d4ad5599361"
+)
+RESUME_PATCH_FAILURE_IGNORED_SHA256 = (
+    "728c63f94903b4c4892fdfde6a097548dc2d4b360dce09137a599b495bbc4f92"
+)
 PREPARATION_RECEIPT_SCHEMA = 2
 
 
@@ -431,6 +443,136 @@ def working_tree_inventory(source_root):
         "records": len(records),
         "sha256": hashlib.sha256(body).hexdigest(),
         "status_counts": dict(status_counts),
+    }
+
+
+def ignored_working_tree_inventory(source_root):
+    """Hash every ignored regular file and symlink produced by pinned hooks."""
+    source_root = require_real_directory(source_root, "Chromium source")
+    raw = run_read_only_git(
+        source_root,
+        ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+    )
+    fields = raw.split(b"\0")
+    if not fields or fields[-1] != b"":
+        raise PreparationError("Git ignored inventory lacks a NUL terminator")
+    records = []
+    regular_files = 0
+    symlinks = 0
+    logical_bytes = 0
+    symlink_target_bytes = 0
+    for field in fields[:-1]:
+        raw_relative = field
+        try:
+            relative = raw_relative.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise PreparationError("Git ignored inventory has a non-UTF-8 path") from exc
+        if any(ord(character) < 0x20 for character in relative):
+            raise PreparationError("Git ignored path contains a control character")
+        relative = safe_relative(relative, "Git ignored")
+        target = reject_symlink_ancestors(
+            source_root, relative, include_leaf=False
+        )
+        try:
+            before = target.lstat()
+        except FileNotFoundError as exc:
+            raise PreparationError(
+                "Git ignored path disappeared during inventory: {}".format(target)
+            ) from exc
+        mode = stat.S_IMODE(before.st_mode)
+        if stat.S_ISREG(before.st_mode):
+            digest = sha256_file(target)
+            after = target.lstat()
+            identity_before = (
+                before.st_dev,
+                before.st_ino,
+                before.st_mode,
+                before.st_size,
+                before.st_mtime_ns,
+            )
+            identity_after = (
+                after.st_dev,
+                after.st_ino,
+                after.st_mode,
+                after.st_size,
+                after.st_mtime_ns,
+            )
+            if identity_before != identity_after:
+                raise PreparationError(
+                    "Git ignored file changed during inventory: {}".format(target)
+                )
+            regular_files += 1
+            logical_bytes += before.st_size
+            line = b"\0".join(
+                (
+                    b"REG",
+                    raw_relative,
+                    "{:04o}".format(mode).encode("ascii"),
+                    str(before.st_size).encode("ascii"),
+                    digest.encode("ascii"),
+                )
+            ) + b"\n"
+        elif stat.S_ISLNK(before.st_mode):
+            link_target = os.readlink(os.fsencode(target))
+            after = target.lstat()
+            if (
+                before.st_dev,
+                before.st_ino,
+                before.st_mode,
+                before.st_size,
+                before.st_mtime_ns,
+            ) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_mode,
+                after.st_size,
+                after.st_mtime_ns,
+            ):
+                raise PreparationError(
+                    "Git ignored symlink changed during inventory: {}".format(target)
+                )
+            symlinks += 1
+            symlink_target_bytes += len(link_target)
+            line = b"\0".join(
+                (
+                    b"SYMLINK",
+                    raw_relative,
+                    "{:04o}".format(mode).encode("ascii"),
+                    str(len(link_target)).encode("ascii"),
+                    link_target,
+                )
+            ) + b"\n"
+        else:
+            raise PreparationError(
+                "Git ignored path is special or a directory: {}".format(target)
+            )
+        records.append((raw_relative, line))
+    if len(records) != len({relative for relative, _ in records}):
+        raise PreparationError("Git ignored inventory contains a duplicate path")
+    body = b"".join(line for _, line in sorted(records))
+    return {
+        "records": len(records),
+        "regular_files": regular_files,
+        "symlinks": symlinks,
+        "logical_bytes": logical_bytes,
+        "symlink_target_bytes": symlink_target_bytes,
+        "path_list_bytes": len(raw),
+        "path_list_sha256": hashlib.sha256(raw).hexdigest(),
+        "sha256": hashlib.sha256(body).hexdigest(),
+    }
+
+
+def expected_ignored_working_tree_inventory():
+    """Return the exact ignored hook-output checkpoint accepted for recovery."""
+    return {
+        "records": RESUME_PATCH_FAILURE_IGNORED_COUNT,
+        "regular_files": RESUME_PATCH_FAILURE_IGNORED_REGULAR_FILES,
+        "symlinks": RESUME_PATCH_FAILURE_IGNORED_SYMLINKS,
+        "logical_bytes": RESUME_PATCH_FAILURE_IGNORED_LOGICAL_BYTES,
+        "symlink_target_bytes": RESUME_PATCH_FAILURE_IGNORED_SYMLINK_TARGET_BYTES,
+        "path_list_bytes": RESUME_PATCH_FAILURE_IGNORED_PATH_LIST_BYTES,
+        "path_list_sha256": RESUME_PATCH_FAILURE_IGNORED_PATH_LIST_SHA256,
+        "sha256": RESUME_PATCH_FAILURE_IGNORED_SHA256,
     }
 
 
@@ -1078,6 +1220,49 @@ def atomic_copy(source, destination):
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def atomic_publish_text(destination, text):
+    """Publish complete UTF-8 text once without overwriting the final path."""
+    destination = Path(destination)
+    if destination.is_symlink() or destination.exists():
+        raise PreparationError("refusing to overwrite published file: {}".format(destination))
+    parent = require_real_directory(destination.parent, "publication directory")
+    handle, temporary_name = tempfile.mkstemp(
+        prefix=".{}-".format(destination.name), suffix=".tmp", dir=str(parent)
+    )
+    temporary = Path(temporary_name)
+    published = False
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fchmod(stream.fileno(), 0o644)
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, destination)
+        except FileExistsError as exc:
+            raise PreparationError(
+                "refusing to overwrite published file: {}".format(destination)
+            ) from exc
+        published = True
+        directory_fd = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        temporary.unlink()
+        directory_fd = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    if not published or destination.is_symlink() or not destination.is_file():
+        raise PreparationError("atomic publication failed: {}".format(destination))
+    return destination
 
 
 def dependency_output_roots(contracts):
@@ -2234,6 +2419,7 @@ def validate_preparation_execution_report(report):
     if not isinstance(checkpoint, dict) or set(checkpoint) != {
         "git_head",
         "working_tree",
+        "ignored_tree",
         "dependency_tree",
         "pruning",
         "applied_prefix",
@@ -2250,6 +2436,8 @@ def validate_preparation_execution_report(report):
         or working_tree.get("sha256") != RESUME_PATCH_FAILURE_STATUS_SHA256
     ):
         raise PreparationError("resume checkpoint working-tree mismatch")
+    if checkpoint["ignored_tree"] != expected_ignored_working_tree_inventory():
+        raise PreparationError("resume checkpoint ignored-tree mismatch")
     expected_tree = expected_installed_dependency_tree_report()
     if checkpoint["dependency_tree"] != expected_tree:
         raise PreparationError("resume checkpoint dependency tree mismatch")
@@ -2478,15 +2666,7 @@ def write_preparation_receipt(
     serialized = json.dumps(
         receipt, ensure_ascii=False, indent=2, sort_keys=False
     ) + "\n"
-    with receipt_path.open("x", encoding="utf-8") as stream:
-        stream.write(serialized)
-        stream.flush()
-        os.fsync(stream.fileno())
-    directory_fd = os.open(receipt_path.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+    atomic_publish_text(receipt_path, serialized)
     return {
         "path": str(receipt_path),
         "sha256": sha256_file(receipt_path),
@@ -2637,6 +2817,18 @@ def resume_preflight_98(source_root, cache_root, applied_patches):
             )
         )
 
+    ignored_tree = ignored_working_tree_inventory(source)
+    expected_ignored_tree = expected_ignored_working_tree_inventory()
+    if ignored_tree != expected_ignored_tree:
+        raise PreparationError(
+            "resume ignored-tree checkpoint mismatch: expected {}/{}, got {}/{}".format(
+                expected_ignored_tree["records"],
+                expected_ignored_tree["sha256"],
+                ignored_tree["records"],
+                ignored_tree["sha256"],
+            )
+        )
+
     patch_plan = build_patch_plan()
     validate_patch_tool()
     last_path = patch_plan[RESUME_PATCH_FAILURE_APPLIED - 1]
@@ -2646,6 +2838,7 @@ def resume_preflight_98(source_root, cache_root, applied_patches):
     checkpoint = {
         "git_head": git_head,
         "working_tree": working_tree,
+        "ignored_tree": ignored_tree,
         "dependency_tree": dependency_tree,
         "pruning": pruning_checkpoint,
         "applied_prefix": patch_slice_inventory(
@@ -2735,6 +2928,11 @@ def resume_patch_failure(source_root, cache_root, applied_patches, workers=None)
         "working_tree"
     ]:
         raise PreparationError("working tree changed after resume preflight")
+    current_ignored = ignored_working_tree_inventory(source)
+    if current_ignored != report["preparation_execution"]["resume_checkpoint"][
+        "ignored_tree"
+    ]:
+        raise PreparationError("ignored tree changed after resume preflight")
     check_patch_boundary(
         source, patch_plan[RESUME_PATCH_FAILURE_APPLIED], reverse=False
     )

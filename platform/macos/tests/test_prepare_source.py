@@ -806,6 +806,23 @@ class PrepareSourceTests(unittest.TestCase):
             prepare_source.atomic_copy(source, destination)
         self.assertEqual("outside", outside.read_text(encoding="utf-8"))
 
+    def test_atomic_text_publication_never_leaves_partial_final_path(self):
+        directory = self.root / "publication"
+        directory.mkdir()
+        destination = directory / "receipt.json"
+        with mock.patch.object(
+            prepare_source.os, "fsync", side_effect=OSError("injected write failure")
+        ), self.assertRaises(OSError):
+            prepare_source.atomic_publish_text(destination, "complete\n")
+        self.assertFalse(destination.exists())
+        self.assertEqual([], list(directory.glob(".receipt.json-*.tmp")))
+
+        prepare_source.atomic_publish_text(destination, "complete\n")
+        self.assertEqual("complete\n", destination.read_text(encoding="utf-8"))
+        with self.assertRaisesRegex(prepare_source.PreparationError, "overwrite"):
+            prepare_source.atomic_publish_text(destination, "replacement\n")
+        self.assertEqual("complete\n", destination.read_text(encoding="utf-8"))
+
     def test_complete_patch_plan_is_321_common_then_3_platform(self):
         plan = prepare_source.build_patch_plan()
         self.assertEqual(324, len(plan))
@@ -1209,6 +1226,7 @@ class PrepareSourceTests(unittest.TestCase):
         )
         (source / "modified.txt").write_bytes(b"original\n")
         (source / "deleted.txt").write_bytes(b"delete me\n")
+        (source / ".gitignore").write_text("ignored*\n", encoding="utf-8")
         subprocess.run(
             [str(prepare_source.SYSTEM_GIT), "-C", str(source), "add", "."],
             check=True,
@@ -1233,6 +1251,8 @@ class PrepareSourceTests(unittest.TestCase):
         (source / "modified.txt").write_bytes(b"changed\n")
         (source / "deleted.txt").unlink()
         (source / "untracked.txt").write_bytes(b"new\n")
+        (source / "ignored.bin").write_bytes(b"ignored\n")
+        (source / "ignored-link").symlink_to("ignored.bin")
         report = prepare_source.working_tree_inventory(source)
         lines = []
         for status_value, relative, payload in (
@@ -1258,6 +1278,48 @@ class PrepareSourceTests(unittest.TestCase):
             hashlib.sha256("".join(lines).encode("utf-8")).hexdigest(),
             report["sha256"],
         )
+
+        ignored = prepare_source.ignored_working_tree_inventory(source)
+        ignored_path = source / "ignored.bin"
+        ignored_link = source / "ignored-link"
+        link_target = b"ignored.bin"
+        ignored_records = [
+            (
+                b"ignored-link",
+                b"\0".join(
+                    (
+                        b"SYMLINK",
+                        b"ignored-link",
+                        "{:04o}".format(
+                            stat.S_IMODE(ignored_link.lstat().st_mode)
+                        ).encode("ascii"),
+                        str(len(link_target)).encode("ascii"),
+                        link_target,
+                    )
+                )
+                + b"\n",
+            ),
+            (
+                b"ignored.bin",
+                b"\0".join(
+                    (
+                        b"REG",
+                        b"ignored.bin",
+                        "{:04o}".format(
+                            stat.S_IMODE(ignored_path.stat().st_mode)
+                        ).encode("ascii"),
+                        str(ignored_path.stat().st_size).encode("ascii"),
+                        hashlib.sha256(b"ignored\n").hexdigest().encode("ascii"),
+                    )
+                )
+                + b"\n",
+            ),
+        ]
+        ignored_body = b"".join(line for _, line in sorted(ignored_records))
+        self.assertEqual(2, ignored["records"])
+        self.assertEqual(1, ignored["regular_files"])
+        self.assertEqual(1, ignored["symlinks"])
+        self.assertEqual(hashlib.sha256(ignored_body).hexdigest(), ignored["sha256"])
 
     def test_resume_accepts_only_the_single_audited_checkpoint(self):
         for value in (0, 97, 99, 324):
