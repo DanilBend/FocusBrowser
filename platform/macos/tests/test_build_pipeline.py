@@ -242,6 +242,7 @@ class BuildPipelineTests(unittest.TestCase):
                 "preparation_execution": (
                     build_pipeline.prepare_source.fresh_preparation_execution_report()
                 ),
+                "recovery_checkpoint": None,
                 "dependency_contract": {
                     "manifest_sha256": build_pipeline.prepare_source.DEPS_INI_SHA256,
                     "archives": {
@@ -353,6 +354,16 @@ class BuildPipelineTests(unittest.TestCase):
         self.write_json(self.checkout / build_pipeline.TOOL_RECEIPT, receipt)
         with self.assertRaisesRegex(build_pipeline.PipelineError, "source_root"):
             build_pipeline.tool_receipt_contract(self.source)
+
+    def test_preparation_receipt_requires_recovery_provenance_field(self):
+        receipt_path = self.source / build_pipeline.PREPARATION_RECEIPT
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt.pop("recovery_checkpoint")
+        self.write_json(receipt_path, receipt)
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "lacks recovery provenance"
+        ):
+            build_pipeline.preparation_contract(self.source)
 
     def test_safe_environment_is_child_only_and_macos_only(self):
         inherited = {

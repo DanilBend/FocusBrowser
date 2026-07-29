@@ -506,8 +506,16 @@ def preparation_contract(source, allow_reclaimed_arm=False):
     if patch_contract != expected_patch:
         raise PipelineError("preparation patch contract mismatch")
     try:
-        prepare_source.validate_preparation_execution_report(
-            receipt.get("preparation_execution")
+        if "recovery_checkpoint" not in receipt:
+            raise prepare_source.PreparationError(
+                "preparation receipt lacks recovery provenance"
+            )
+        prepare_source.validate_recovery_execution_link(
+            receipt.get("preparation_execution"),
+            receipt.get("recovery_checkpoint"),
+        )
+        prepare_source.validate_recovery_checkpoint_report(
+            receipt.get("recovery_checkpoint"), source
         )
     except prepare_source.PreparationError as exc:
         raise PipelineError(str(exc)) from exc

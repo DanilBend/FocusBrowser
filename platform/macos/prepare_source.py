@@ -54,10 +54,10 @@ MACOS_DOMAIN_MISSING_MANIFEST_BYTES = 8222
 MACOS_DOMAIN_MISSING_MANIFEST_SHA256 = (
     "3fa3788f6857ea3a4dcdcad9585ef2cf1925c66de2de28e717be72f9210b999c"
 )
-RESOURCE_LIST_SHA256 = "e1d545a3dfd4e91f561a3800524f7e098665dfcf35f8619735e09412906c713a"
+RESOURCE_LIST_SHA256 = "551a013984b4491c2c039cec2d09792939c6d8696e4eda23b26fd85a7b342dbd"
 GENERATE_LIST_SHA256 = "02da891cb3b867e9bc806b9ab3b433fd3d8c01024fac41d5fa60c78d11b6aca9"
-RESOURCE_BODY_COUNT = 60
-RESOURCE_BODY_SHA256 = "9437baf40f66604ba984bd2cb4c8aba9180ca39dd6e12d8444b19af1ae096d7a"
+RESOURCE_BODY_COUNT = 58
+RESOURCE_BODY_SHA256 = "bdb150572f6d9f19ac5cdbd16172d311da68f063dbcda858679237f896404903"
 MAC_ICON_DESTINATION = "chrome/app/theme/chromium/mac/app.icns"
 MAC_ICON_BUILD_TOKEN = "app/theme/$branding_path_component/mac/app.icns"
 CHROME_BUILD_GN_SHA256 = "3851bd31f3f9bc123395dbd966557885d62911f4e1359bca47390bfc942653e4"
@@ -307,7 +307,41 @@ RESUME_PATCH_FAILURE_IGNORED_PATH_LIST_SHA256 = (
 RESUME_PATCH_FAILURE_IGNORED_SHA256 = (
     "728c63f94903b4c4892fdfde6a097548dc2d4b360dce09137a599b495bbc4f92"
 )
-PREPARATION_RECEIPT_SCHEMA = 2
+POST_VERSION_STATUS_COUNT = 16077
+POST_VERSION_STATUS_SHA256 = (
+    "14aab1de3e2f927acba39c388ac0870034473d92c567b5d5847610b26ada711a"
+)
+POST_VERSION_IGNORED_COUNT = 23143
+POST_VERSION_IGNORED_REGULAR_FILES = 23085
+POST_VERSION_IGNORED_SYMLINKS = 58
+POST_VERSION_IGNORED_LOGICAL_BYTES = 7424890959
+POST_VERSION_IGNORED_SYMLINK_TARGET_BYTES = 901
+POST_VERSION_IGNORED_PATH_LIST_BYTES = 2189900
+POST_VERSION_IGNORED_PATH_LIST_SHA256 = (
+    "a5c1f5655f70637a5451994e1db6219c0f57e48fe38c4c03621ca6dc9bb68635"
+)
+POST_VERSION_IGNORED_SHA256 = (
+    "278c39af67b4674790f9dafae8b02f752095c006aec1df0ea0639327fe002f18"
+)
+POST_VERSION_DEPENDENCY_REGULAR_FILES = 13274
+POST_VERSION_DEPENDENCY_LOGICAL_BYTES = 527681961
+POST_VERSION_DEPENDENCY_SHA256 = (
+    "43cc9cc434db94e24508c5801954e2ef3cd24fa78b3f45c5157fd36dca3f6930"
+)
+POST_VERSION_CHROME_VERSION_BYTES = 98
+POST_VERSION_CHROME_VERSION_SHA256 = (
+    "8536f0e864abdb194deb1145c6b496b4f194ba0072f6e47144939d4a0fda34c7"
+)
+POST_VERSION_RESOURCE_INVENTORY_COUNT = 58
+POST_VERSION_RESOURCE_INVENTORY_BYTES = 7568
+POST_VERSION_RESOURCE_INVENTORY_SHA256 = (
+    "e92041179473b41b20c4eb21c8adae2d5fd89bf4f561305ebf672358b3e43562"
+)
+POST_VERSION_UPSTREAM_ICNS_BYTES = 85977
+POST_VERSION_UPSTREAM_ICNS_SHA256 = (
+    "a1c2b17191234ee4ab1259d4fb5056ef340cc64345c1a7d2b504c632812ff062"
+)
+PREPARATION_RECEIPT_SCHEMA = 3
 
 
 class PreparationError(RuntimeError):
@@ -607,6 +641,131 @@ def expected_ignored_working_tree_inventory():
         "path_list_sha256": RESUME_PATCH_FAILURE_IGNORED_PATH_LIST_SHA256,
         "sha256": RESUME_PATCH_FAILURE_IGNORED_SHA256,
     }
+
+
+def expected_post_version_working_tree():
+    """Return the exact failed resource-phase working-tree checkpoint."""
+    return {
+        "records": POST_VERSION_STATUS_COUNT,
+        "sha256": POST_VERSION_STATUS_SHA256,
+        "status_counts": {" D": 3189, " M": 10991, "??": 1897},
+    }
+
+
+def expected_post_version_ignored_tree():
+    """Return ignored hook/dependency/overlay state at the failed phase."""
+    return {
+        "records": POST_VERSION_IGNORED_COUNT,
+        "regular_files": POST_VERSION_IGNORED_REGULAR_FILES,
+        "symlinks": POST_VERSION_IGNORED_SYMLINKS,
+        "logical_bytes": POST_VERSION_IGNORED_LOGICAL_BYTES,
+        "symlink_target_bytes": POST_VERSION_IGNORED_SYMLINK_TARGET_BYTES,
+        "path_list_bytes": POST_VERSION_IGNORED_PATH_LIST_BYTES,
+        "path_list_sha256": POST_VERSION_IGNORED_PATH_LIST_SHA256,
+        "sha256": POST_VERSION_IGNORED_SHA256,
+    }
+
+
+def expected_post_version_dependency_tree():
+    """Return exact dependency roots after transformations and overlay."""
+    return {
+        "ownership_roots": list(DEPENDENCY_OWNERSHIP_ROOTS),
+        "regular_files": POST_VERSION_DEPENDENCY_REGULAR_FILES,
+        "logical_bytes": POST_VERSION_DEPENDENCY_LOGICAL_BYTES,
+        "sha256": POST_VERSION_DEPENDENCY_SHA256,
+        "installed_symlinks": 0,
+        "installed_special_files": 0,
+    }
+
+
+def expected_post_version_resource_inventory():
+    """Return the exact pre-copy inventory for all 58 resource targets."""
+    return {
+        "manifest_entries": POST_VERSION_RESOURCE_INVENTORY_COUNT,
+        "copy_targets": POST_VERSION_RESOURCE_INVENTORY_COUNT,
+        "inventory_bytes": POST_VERSION_RESOURCE_INVENTORY_BYTES,
+        "inventory_sha256": POST_VERSION_RESOURCE_INVENTORY_SHA256,
+    }
+
+
+def validate_recovery_checkpoint_report(report, source_root=None):
+    """Validate explicit provenance for the one audited split recovery."""
+    if report is None:
+        return None
+    required = {
+        "phase",
+        "git_head",
+        "working_tree",
+        "ignored_tree",
+        "dependency_tree",
+        "pruning",
+        "overlay",
+        "artifacts",
+        "resources",
+    }
+    if not isinstance(report, dict) or set(report) != required:
+        raise PreparationError("recovery checkpoint schema mismatch")
+    if (
+        report["phase"] != "post_version_pre_resources"
+        or report["git_head"] != ACQUISITION_CHROMIUM_COMMIT
+        or report["working_tree"] != expected_post_version_working_tree()
+        or report["ignored_tree"] != expected_post_version_ignored_tree()
+        or report["dependency_tree"] != expected_post_version_dependency_tree()
+        or report["pruning"]
+        != {
+            "manifest_sha256": PRUNING_LIST_SHA256,
+            "listed_files": PRUNING_ENTRY_COUNT,
+            "all_targets_absent": True,
+            "absent_files": PRUNING_ENTRY_COUNT,
+            "symlink_targets": 0,
+        }
+        or report["overlay"]
+        != {
+            "overlay_files_matching": focus_macos.EXPECTED_FULL_OVERLAY_BODY_COUNT,
+            "cleanup_targets_absent": 20,
+        }
+        or report["resources"] != expected_post_version_resource_inventory()
+    ):
+        raise PreparationError("recovery checkpoint contract mismatch")
+    artifacts = report["artifacts"]
+    if not isinstance(artifacts, dict) or set(artifacts) != {
+        "chrome_version_sha256",
+        "focus_version",
+        "onboarding_baseline_sha256",
+        "upstream_icns_sha256",
+        "onboarding_node",
+        "args_gn_absent",
+        "receipt_absent",
+    }:
+        raise PreparationError("recovery artifact checkpoint schema mismatch")
+    if (
+        artifacts["chrome_version_sha256"] != POST_VERSION_CHROME_VERSION_SHA256
+        or artifacts["focus_version"] != "1.0.5.0"
+        or artifacts["onboarding_baseline_sha256"]
+        != ONBOARDING_STRINGS_BASELINE_SHA256
+        or artifacts["upstream_icns_sha256"] != POST_VERSION_UPSTREAM_ICNS_SHA256
+        or artifacts["args_gn_absent"] is not True
+        or artifacts["receipt_absent"] is not True
+    ):
+        raise PreparationError("recovery artifact checkpoint mismatch")
+    if source_root is not None and artifacts["onboarding_node"] != (
+        onboarding_node_contract(source_root)
+    ):
+        raise PreparationError("recovery onboarding Node checkpoint mismatch")
+    return report
+
+
+def validate_recovery_execution_link(execution_report, recovery_checkpoint):
+    """Bind the split recovery checkpoint to its exact patch-prefix history."""
+    validate_preparation_execution_report(execution_report)
+    validate_recovery_checkpoint_report(recovery_checkpoint)
+    if recovery_checkpoint is not None and execution_report != (
+        expected_resume_execution_report(RESUME_FULL_PATCH_SET_APPLIED)
+    ):
+        raise PreparationError(
+            "post-version recovery requires the exact full-prefix execution report"
+        )
+    return True
 
 
 def safe_relative(value, label):
@@ -2516,15 +2675,65 @@ def parse_resource_plan():
     return plan
 
 
-def copy_common_resources(source_root, resource_plan):
-    """Replace only declared existing Chromium resource files."""
+def validate_resource_destinations(source_root, resource_plan):
+    """Resolve every pinned resource to an existing regular destination."""
     source_root = require_real_directory(source_root, "Chromium source")
-    plan = []
+    copy_plan = []
     for source, relative in resource_plan:
-        destination = require_regular_in_tree(
-            source_root, relative, "Chromium resource destination"
+        target = reject_symlink_ancestors(
+            source_root, relative, include_leaf=False
         )
-        plan.append((source, destination))
+        try:
+            metadata = target.lstat()
+        except FileNotFoundError as exc:
+            raise PreparationError(
+                "missing regular Chromium resource destination: {}".format(
+                    target
+                )
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise PreparationError(
+                "Chromium resource destination is not a regular file: {}".format(
+                    target
+                )
+            )
+        copy_plan.append((source, target))
+    if len(copy_plan) != RESOURCE_BODY_COUNT:
+        raise PreparationError(
+            "resource destination count changed: expected {}, got {}".format(
+                RESOURCE_BODY_COUNT, len(copy_plan)
+            )
+        )
+    return copy_plan, {
+        "manifest_entries": len(resource_plan),
+        "copy_targets": len(copy_plan),
+    }
+
+
+def resource_destination_inventory(source_root, resource_plan):
+    """Hash all current Mac-applicable resource destinations in plan order."""
+    copy_plan, contract = validate_resource_destinations(source_root, resource_plan)
+    body = "".join(
+        "{}\0{}\0{}\n".format(
+            destination.relative_to(Path(source_root).resolve()).as_posix(),
+            destination.stat().st_size,
+            sha256_file(destination),
+        )
+        for _, destination in copy_plan
+    ).encode("utf-8")
+    report = dict(contract)
+    report.update(
+        {
+            "inventory_bytes": len(body),
+            "inventory_sha256": hashlib.sha256(body).hexdigest(),
+        }
+    )
+    return report
+
+
+def copy_common_resources(source_root, resource_plan):
+    """Replace only declared existing Chromium resources."""
+    plan, _ = validate_resource_destinations(source_root, resource_plan)
     for source, destination in plan:
         atomic_copy(source, destination)
     return len(plan)
@@ -2676,6 +2885,56 @@ def fresh_preparation_execution_report(total_patches=324):
     }
 
 
+def expected_resume_execution_report(applied_patches):
+    """Reconstruct one audited exact-prefix execution report from pins."""
+    patch_plan = build_patch_plan()
+    expected_resume_working_tree(applied_patches)
+    last_path = patch_plan[applied_patches - 1]
+    next_path = (
+        patch_plan[applied_patches]
+        if applied_patches < len(patch_plan)
+        else None
+    )
+    return {
+        "mode": "resume_exact_prefix",
+        "initial_applied_patch_count": applied_patches,
+        "patches_applied_this_run": len(patch_plan) - applied_patches,
+        "total_patches": len(patch_plan),
+        "resume_checkpoint": {
+            "git_head": ACQUISITION_CHROMIUM_COMMIT,
+            "working_tree": expected_resume_working_tree(applied_patches),
+            "ignored_tree": expected_ignored_working_tree_inventory(),
+            "dependency_tree": expected_resume_dependency_tree(applied_patches),
+            "pruning": {
+                "manifest_sha256": PRUNING_LIST_SHA256,
+                "listed_files": PRUNING_ENTRY_COUNT,
+                "all_targets_absent": True,
+                "absent_files": PRUNING_ENTRY_COUNT,
+                "symlink_targets": 0,
+            },
+            "applied_prefix": patch_slice_inventory(
+                patch_plan, 0, applied_patches
+            ),
+            "last_applied_patch": {
+                "position": applied_patches,
+                "path": str(last_path),
+                "sha256": sha256_file(last_path),
+                "reverse_applicable": True,
+            },
+            "next_patch": (
+                {
+                    "position": applied_patches + 1,
+                    "path": str(next_path),
+                    "sha256": sha256_file(next_path),
+                    "forward_applicable": True,
+                }
+                if next_path is not None
+                else None
+            ),
+        },
+    }
+
+
 def validate_preparation_execution_report(report):
     """Validate honest fresh or exact-prefix preparation provenance."""
     required = {
@@ -2767,11 +3026,13 @@ def write_preparation_receipt(
     dependency_report,
     localized_strings_report,
     execution_report=None,
+    recovery_checkpoint=None,
 ):
     """Write the deterministic post-preparation provenance receipt once."""
     source_root = require_real_directory(source_root, "Chromium source")
     execution_report = execution_report or fresh_preparation_execution_report()
-    validate_preparation_execution_report(execution_report)
+    validate_recovery_execution_link(execution_report, recovery_checkpoint)
+    validate_recovery_checkpoint_report(recovery_checkpoint, source_root)
     expected_pruning = {
         "files_removed": PRUNING_EXPECTED_REMOVAL_COUNT,
         "already_absent_files": PRUNING_ALREADY_ABSENT_COUNT,
@@ -2889,6 +3150,7 @@ def write_preparation_receipt(
                 },
             ),
             ("preparation_execution", execution_report),
+            ("recovery_checkpoint", recovery_checkpoint),
             (
                 "dependency_contract",
                 {
@@ -3002,6 +3264,7 @@ def preflight(source_root, cache_root):
     pruning_future = sum(entry["future_archive_file"] for entry in prune_plan)
     overlay_files, cleanup_paths, _ = build_overlay_plan()
     resource_plan = parse_resource_plan()
+    resource_destinations = resource_destination_inventory(source, resource_plan)
     gn_plan = args_gn_plan()
     for _, (out_dir, _) in gn_plan.items():
         args_path = source / Path(out_dir) / "args.gn"
@@ -3039,7 +3302,8 @@ def preflight(source_root, cache_root):
         },
         "overlay_files": len(overlay_files),
         "cleanup_paths": len(cleanup_paths),
-        "resources": len(resource_plan),
+        "resources": resource_destinations["copy_targets"],
+        "resource_contract": resource_destinations,
         "icon_destination": MAC_ICON_DESTINATION,
         "args_gn": {key: value[0] + "/args.gn" for key, value in gn_plan.items()},
         "archives": archives,
@@ -3156,6 +3420,7 @@ def resume_preflight_exact(source_root, cache_root, applied_patches):
     validate_preparation_execution_report(execution)
     overlay_files, cleanup_paths, _ = build_overlay_plan()
     resource_plan = parse_resource_plan()
+    resource_destinations = resource_destination_inventory(source, resource_plan)
     focus_macos.validate_icns_asset()
     return {
         "source_root": str(source),
@@ -3189,13 +3454,433 @@ def resume_preflight_exact(source_root, cache_root, applied_patches):
         "preparation_execution": execution,
         "overlay_files": len(overlay_files),
         "cleanup_paths": len(cleanup_paths),
-        "resources": len(resource_plan),
+        "resources": resource_destinations["copy_targets"],
+        "resource_contract": resource_destinations,
         "icon_destination": MAC_ICON_DESTINATION,
         "args_gn": {
             key: value[0] + "/args.gn" for key, value in args_gn_plan().items()
         },
         "resume_ready": True,
     }
+
+
+def validate_applied_overlay_checkpoint(source_root, overlay_files, cleanup_paths):
+    """Require every overlay byte applied and every cleanup target absent."""
+    source_root = require_real_directory(source_root, "Chromium source")
+    for source, relative in overlay_files:
+        destination = require_regular_in_tree(
+            source_root, relative, "applied overlay destination"
+        )
+        if (
+            destination.stat().st_size != source.stat().st_size
+            or sha256_file(destination) != sha256_file(source)
+        ):
+            raise PreparationError(
+                "applied overlay destination differs: {}".format(destination)
+            )
+    for relative in cleanup_paths:
+        target = reject_symlink_ancestors(
+            source_root, relative, include_leaf=False
+        )
+        if target.exists() or target.is_symlink():
+            raise PreparationError(
+                "overlay cleanup target is still present: {}".format(target)
+            )
+    return {
+        "overlay_files_matching": len(overlay_files),
+        "cleanup_targets_absent": len(cleanup_paths),
+    }
+
+
+def validate_post_version_artifacts(source_root):
+    """Prove that version/overlay completed and later phases never started."""
+    source_root = require_real_directory(source_root, "Chromium source")
+    version_path = require_regular_in_tree(
+        source_root, "chrome/VERSION", "post-version Chromium VERSION"
+    )
+    if (
+        version_path.stat().st_size != POST_VERSION_CHROME_VERSION_BYTES
+        or sha256_file(version_path) != POST_VERSION_CHROME_VERSION_SHA256
+    ):
+        raise PreparationError("post-version Chromium VERSION checkpoint mismatch")
+    version_text = version_path.read_text(encoding="utf-8")
+    expected_focus_lines = (
+        "FOCUS_MAJOR=1",
+        "FOCUS_MINOR=0",
+        "FOCUS_PATCH=5",
+        "FOCUS_PLATFORM=0",
+    )
+    if any(version_text.splitlines().count(line) != 1 for line in expected_focus_lines):
+        raise PreparationError("post-version Focus version lines mismatch")
+
+    strings = require_regular_in_tree(
+        source_root,
+        ONBOARDING_STRINGS_OUTPUT,
+        "post-overlay onboarding strings baseline",
+    )
+    if (
+        strings.stat().st_size != ONBOARDING_STRINGS_BASELINE_BYTES
+        or sha256_file(strings) != ONBOARDING_STRINGS_BASELINE_SHA256
+    ):
+        raise PreparationError("post-overlay onboarding strings baseline mismatch")
+    generator = require_regular_in_tree(
+        source_root, ONBOARDING_GENERATOR, "onboarding i18n generator"
+    )
+    if sha256_file(generator) != ONBOARDING_GENERATOR_SHA256:
+        raise PreparationError("onboarding i18n generator hash mismatch")
+    node = onboarding_node_contract(source_root)
+
+    icon = validate_icon_destination(source_root)
+    if (
+        icon.stat().st_size != POST_VERSION_UPSTREAM_ICNS_BYTES
+        or sha256_file(icon) != POST_VERSION_UPSTREAM_ICNS_SHA256
+    ):
+        raise PreparationError("Focus ICNS phase already started or icon changed")
+    focus_macos.validate_icns_asset()
+
+    branding = require_regular_in_tree(
+        source_root, "chrome/app/theme/chromium/BRANDING", "Focus Chromium branding"
+    ).read_text(encoding="utf-8")
+    for line in (
+        "PRODUCT_FULLNAME=Focus Browser",
+        "PRODUCT_SHORTNAME=Focus Browser",
+        "MAC_BUNDLE_ID={}".format(focus_macos.BUNDLE_ID),
+    ):
+        if branding.splitlines().count(line) != 1:
+            raise PreparationError(
+                "post-overlay Chromium branding is missing {!r}".format(line)
+            )
+
+    for _, (out_dir, _) in args_gn_plan().items():
+        args_path = reject_symlink_ancestors(
+            source_root,
+            PurePosixPath(out_dir, "args.gn").as_posix(),
+            include_leaf=False,
+        )
+        if args_path.exists() or args_path.is_symlink():
+            raise PreparationError("args.gn phase already started: {}".format(args_path))
+    receipt = reject_symlink_ancestors(
+        source_root, PREPARATION_RECEIPT, include_leaf=False
+    )
+    if receipt.exists() or receipt.is_symlink():
+        raise PreparationError("preparation receipt already exists: {}".format(receipt))
+    return {
+        "chrome_version_sha256": POST_VERSION_CHROME_VERSION_SHA256,
+        "focus_version": "1.0.5.0",
+        "onboarding_baseline_sha256": ONBOARDING_STRINGS_BASELINE_SHA256,
+        "upstream_icns_sha256": POST_VERSION_UPSTREAM_ICNS_SHA256,
+        "onboarding_node": node,
+        "args_gn_absent": True,
+        "receipt_absent": True,
+    }
+
+
+def resume_post_version_preflight(source_root, cache_root):
+    """Prove the exact post-version/pre-resource failure without mutation."""
+    source_input = Path(source_root).expanduser()
+    if source_input.is_symlink():
+        raise PreparationError("Chromium source argument must not be a symlink")
+    source, version = focus_macos.resolve_source_root(str(source_input))
+    acquisition = validate_acquisition_marker(source)
+    tool_bootstrap = validate_tool_bootstrap_marker(source, acquisition)
+    git_head = validate_pinned_git_head(source)
+    repository = focus_macos.validate_repository_contract()
+    contracts = validate_dependency_manifest()
+    cache, cache_report = validate_offline_cache(cache_root, contracts)
+    dependency_cache_marker = validate_dependency_cache_marker(cache, contracts)
+
+    working_tree = working_tree_inventory(source)
+    if working_tree != expected_post_version_working_tree():
+        raise PreparationError("post-version working-tree checkpoint mismatch")
+    ignored_tree = ignored_working_tree_inventory(source)
+    if ignored_tree != expected_post_version_ignored_tree():
+        raise PreparationError("post-version ignored-tree checkpoint mismatch")
+    dependency_tree = installed_dependency_tree(source, contracts)
+    if dependency_tree != expected_post_version_dependency_tree():
+        raise PreparationError("post-version dependency-tree checkpoint mismatch")
+    pruning_checkpoint = validate_completed_pruning(source)
+
+    patch_plan = build_patch_plan()
+    validate_patch_tool()
+    check_patch_boundary(source, patch_plan[-1], reverse=True)
+    execution = expected_resume_execution_report(RESUME_FULL_PATCH_SET_APPLIED)
+    validate_preparation_execution_report(execution)
+
+    overlay_files, cleanup_paths, _ = build_overlay_plan()
+    overlay_checkpoint = validate_applied_overlay_checkpoint(
+        source, overlay_files, cleanup_paths
+    )
+    artifacts = validate_post_version_artifacts(source)
+    resource_plan = parse_resource_plan()
+    resources = resource_destination_inventory(source, resource_plan)
+    if resources != expected_post_version_resource_inventory():
+        raise PreparationError("post-version resource inventory mismatch")
+
+    return {
+        "source_root": str(source),
+        "chromium_version": version,
+        "acquisition": acquisition,
+        "tool_bootstrap": tool_bootstrap,
+        "offline": True,
+        "network_operations": 0,
+        "upstream_baseline_sha256": expected_upstream_source_contracts(),
+        "dependencies": cache_report,
+        "dependency_cache_marker": dependency_cache_marker,
+        "dependency_checkpoint": dependency_tree,
+        "dependency_install": expected_dependency_install_report(),
+        "pruning_checkpoint": pruning_checkpoint,
+        "pruning": {
+            "manifest_sha256": PRUNING_LIST_SHA256,
+            "listed_files": PRUNING_ENTRY_COUNT,
+            "files_removed": PRUNING_EXPECTED_REMOVAL_COUNT,
+            "already_absent_files": PRUNING_ALREADY_ABSENT_COUNT,
+            "already_absent_sha256": PRUNING_ALREADY_ABSENT_SHA256,
+            "contingent_paths_pruned": False,
+            "directory_pruning_executed": False,
+        },
+        "patches": {
+            "common_filtered": repository["shared_series"]["planned_entries"],
+            "platform": len(repository["platform_patches"]),
+            "total": len(patch_plan),
+            "initially_applied": RESUME_FULL_PATCH_SET_APPLIED,
+            "remaining": 0,
+        },
+        "preparation_execution": execution,
+        "recovery_checkpoint": {
+            "phase": "post_version_pre_resources",
+            "git_head": git_head,
+            "working_tree": working_tree,
+            "ignored_tree": ignored_tree,
+            "dependency_tree": dependency_tree,
+            "pruning": pruning_checkpoint,
+            "overlay": overlay_checkpoint,
+            "artifacts": artifacts,
+            "resources": resources,
+        },
+        "resources": resources["copy_targets"],
+        "resource_contract": resources,
+        "icon_destination": MAC_ICON_DESTINATION,
+        "args_gn": {
+            key: value[0] + "/args.gn" for key, value in args_gn_plan().items()
+        },
+        "resume_ready": True,
+    }
+
+
+def create_finalizer_rollback_snapshot(source_root, resource_plan, snapshot_root):
+    """Snapshot every existing file touched by the recovery finalizer."""
+    source_root = require_real_directory(source_root, "Chromium source")
+    snapshot_root = require_real_directory(snapshot_root, "finalizer rollback snapshot")
+    copy_plan, _ = validate_resource_destinations(source_root, resource_plan)
+    icon = validate_icon_destination(source_root)
+    strings = require_regular_in_tree(
+        source_root, ONBOARDING_STRINGS_OUTPUT, "onboarding strings rollback input"
+    )
+    targets = [destination for _, destination in copy_plan] + [icon, strings]
+    relative_targets = [target.relative_to(source_root).as_posix() for target in targets]
+    if len(relative_targets) != len(set(relative_targets)):
+        raise PreparationError("finalizer rollback targets overlap")
+
+    files = []
+    for position, target in enumerate(targets, 1):
+        backup = snapshot_root / "{:03d}.backup".format(position)
+        atomic_copy(target, backup)
+        expected_hash = sha256_file(target)
+        if (
+            backup.stat().st_size != target.stat().st_size
+            or sha256_file(backup) != expected_hash
+        ):
+            raise PreparationError("finalizer rollback snapshot mismatch")
+        files.append(
+            {
+                "relative": target.relative_to(source_root).as_posix(),
+                "backup": str(backup),
+                "bytes": target.stat().st_size,
+                "sha256": expected_hash,
+                "mode": stat.S_IMODE(target.stat().st_mode),
+            }
+        )
+
+    args = []
+    for architecture, (out_dir, _) in args_gn_plan().items():
+        relative = PurePosixPath(out_dir, "args.gn").as_posix()
+        path = reject_symlink_ancestors(
+            source_root, relative, include_leaf=False
+        )
+        if path.exists() or path.is_symlink():
+            raise PreparationError("args.gn appeared before finalizer snapshot")
+        args.append(
+            {
+                "architecture": architecture,
+                "relative": relative,
+                "parent_existed": path.parent.exists(),
+            }
+        )
+    receipt = reject_symlink_ancestors(
+        source_root, PREPARATION_RECEIPT, include_leaf=False
+    )
+    if receipt.exists() or receipt.is_symlink():
+        raise PreparationError("receipt appeared before finalizer snapshot")
+    return {
+        "files": files,
+        "args": args,
+        "receipt": PREPARATION_RECEIPT,
+    }
+
+
+def restore_finalizer_rollback_snapshot(source_root, resource_plan, snapshot):
+    """Restore the exact retryable checkpoint after any finalizer exception."""
+    source_root = require_real_directory(source_root, "Chromium source")
+    receipt = reject_symlink_ancestors(
+        source_root, snapshot["receipt"], include_leaf=False
+    )
+    if receipt.is_symlink() or (receipt.exists() and not receipt.is_file()):
+        raise PreparationError("cannot safely remove failed finalizer receipt")
+    if receipt.is_file():
+        receipt.unlink()
+
+    for entry in snapshot["args"]:
+        path = reject_symlink_ancestors(
+            source_root, entry["relative"], include_leaf=False
+        )
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise PreparationError("cannot safely remove failed finalizer args.gn")
+        if path.is_file():
+            path.unlink()
+
+    for entry in snapshot["files"]:
+        target = reject_symlink_ancestors(
+            source_root, entry["relative"], include_leaf=False
+        )
+        backup = Path(entry["backup"])
+        if target.is_symlink() or not target.is_file():
+            raise PreparationError("finalizer rollback target became unsafe")
+        if backup.is_symlink() or not backup.is_file():
+            raise PreparationError("finalizer rollback backup became unsafe")
+        atomic_copy(backup, target)
+        if (
+            target.stat().st_size != entry["bytes"]
+            or stat.S_IMODE(target.stat().st_mode) != entry["mode"]
+            or sha256_file(target) != entry["sha256"]
+        ):
+            raise PreparationError("finalizer rollback file mismatch")
+
+    for entry in snapshot["args"]:
+        path = source_root / entry["relative"]
+        if not entry["parent_existed"] and path.parent.is_dir():
+            try:
+                path.parent.rmdir()
+            except OSError:
+                pass
+
+    if working_tree_inventory(source_root) != expected_post_version_working_tree():
+        raise PreparationError("rollback did not restore post-version working tree")
+    if ignored_working_tree_inventory(source_root) != expected_post_version_ignored_tree():
+        raise PreparationError("rollback did not restore post-version ignored tree")
+    if installed_dependency_tree(source_root, DEPENDENCY_CONTRACTS) != (
+        expected_post_version_dependency_tree()
+    ):
+        raise PreparationError("rollback did not restore post-version dependencies")
+    validate_post_version_artifacts(source_root)
+    if resource_destination_inventory(source_root, resource_plan) != (
+        expected_post_version_resource_inventory()
+    ):
+        raise PreparationError("rollback did not restore resource destinations")
+    return True
+
+
+def resume_post_version_failure(source_root, cache_root):
+    """Finish only the phases after the exact failed resource checkpoint."""
+    report = resume_post_version_preflight(source_root, cache_root)
+    source = Path(report["source_root"])
+    cache = require_real_directory(cache_root, "offline cache")
+    watched_filesystems = (source, cache)
+    disk_gates = []
+
+    def gate(phase):
+        disk_gates.append(require_disk_floor(watched_filesystems, phase))
+
+    gate("post-version checkpoint revalidation")
+    if working_tree_inventory(source) != expected_post_version_working_tree():
+        raise PreparationError("post-version working tree changed after preflight")
+    if ignored_working_tree_inventory(source) != expected_post_version_ignored_tree():
+        raise PreparationError("post-version ignored tree changed after preflight")
+    if installed_dependency_tree(source, DEPENDENCY_CONTRACTS) != (
+        expected_post_version_dependency_tree()
+    ):
+        raise PreparationError("post-version dependency tree changed after preflight")
+    validate_post_version_artifacts(source)
+    resource_plan = parse_resource_plan()
+    if resource_destination_inventory(source, resource_plan) != (
+        expected_post_version_resource_inventory()
+    ):
+        raise PreparationError("resource destinations changed after preflight")
+
+    snapshot_root = Path(
+        tempfile.mkdtemp(prefix="focus-finalizer-rollback-")
+    ).resolve()
+    snapshot = None
+    try:
+        snapshot = create_finalizer_rollback_snapshot(
+            source, resource_plan, snapshot_root
+        )
+    except BaseException:
+        shutil.rmtree(snapshot_root, ignore_errors=True)
+        raise
+    try:
+        gate("common resource copy")
+        resource_count = copy_common_resources(source, resource_plan)
+        gate("pinned ICNS install")
+        icon = install_focus_icns(source)
+        gate("arm64/x64 args.gn write")
+        args_paths = write_args_gn(source)
+        gate("deterministic onboarding strings generation")
+        localized_strings = generate_onboarding_strings(source)
+        gate("preparation completion")
+        receipt = write_preparation_receipt(
+            source,
+            report,
+            args_paths,
+            report["pruning"],
+            report["dependency_install"],
+            localized_strings,
+            execution_report=report["preparation_execution"],
+            recovery_checkpoint=report["recovery_checkpoint"],
+        )
+    except BaseException as original_error:
+        try:
+            restore_finalizer_rollback_snapshot(source, resource_plan, snapshot)
+        except BaseException as rollback_error:
+            raise PreparationError(
+                "finalizer failed and rollback could not restore the exact "
+                "checkpoint; rollback snapshot retained at {}: "
+                "original={!r}; rollback={!r}".format(
+                    snapshot_root, original_error, rollback_error
+                )
+            ) from original_error
+        shutil.rmtree(snapshot_root)
+        raise
+    else:
+        shutil.rmtree(snapshot_root)
+    report.update(
+        {
+            "prepared": True,
+            "patches_applied": RESUME_FULL_PATCH_SET_APPLIED,
+            "patches_applied_this_run": 0,
+            "recovery_phase": "post_version_pre_resources",
+            "resources_copied": resource_count,
+            "icns_installed": icon,
+            "args_gn_written": args_paths,
+            "localized_strings": localized_strings,
+            "preparation_receipt": receipt,
+            "disk_gates": disk_gates,
+            "hard_disk_floor_gib": HARD_DISK_FLOOR_GIB,
+            "build_executed": False,
+            "signing_executed": False,
+            "packaging_executed": False,
+        }
+    )
+    return report
 
 
 def resume_patch_failure(source_root, cache_root, applied_patches, workers=None):
@@ -3379,17 +4064,20 @@ def build_parser():
         "prepare",
         "resume-preflight",
         "resume-patch-failure",
+        "resume-finalize-preflight",
+        "resume-finalize",
     ):
         child = subparsers.add_parser(command)
         child.add_argument("--source-root", required=True)
         child.add_argument("--cache", required=True)
         child.add_argument("--json", action="store_true")
-        if command in ("prepare", "resume-patch-failure"):
+        if command in ("prepare", "resume-patch-failure", "resume-finalize"):
             child.add_argument(
                 "--confirm-source-mutation",
                 action="store_true",
                 help="required acknowledgement that the Chromium checkout will be modified",
             )
+        if command in ("prepare", "resume-patch-failure"):
             child.add_argument("--workers", type=int)
         if command in ("resume-preflight", "resume-patch-failure"):
             child.add_argument(
@@ -3405,22 +4093,27 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        if args.command in ("prepare", "resume-patch-failure"):
+        if args.command in ("prepare", "resume-patch-failure", "resume-finalize"):
             if not args.confirm_source_mutation:
                 raise PreparationError(
                     "{} requires --confirm-source-mutation".format(args.command)
                 )
-            if args.workers is not None and args.workers < 1:
+            workers = getattr(args, "workers", None)
+            if workers is not None and workers < 1:
                 raise PreparationError("--workers must be positive")
-            if args.command == "resume-patch-failure":
+            if args.command == "resume-finalize":
+                report = resume_post_version_failure(args.source_root, args.cache)
+            elif args.command == "resume-patch-failure":
                 report = resume_patch_failure(
                     args.source_root,
                     args.cache,
                     args.applied_patches,
-                    workers=args.workers,
+                    workers=workers,
                 )
             else:
-                report = prepare(args.source_root, args.cache, workers=args.workers)
+                report = prepare(args.source_root, args.cache, workers=workers)
+        elif args.command == "resume-finalize-preflight":
+            report = resume_post_version_preflight(args.source_root, args.cache)
         elif args.command == "resume-preflight":
             report = resume_preflight_exact(
                 args.source_root, args.cache, args.applied_patches

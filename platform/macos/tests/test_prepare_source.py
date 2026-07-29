@@ -1015,6 +1015,154 @@ class PrepareSourceTests(unittest.TestCase):
         plan = prepare_source.parse_resource_plan()
         self.assertEqual(prepare_source.RESOURCE_BODY_COUNT, len(plan))
         self.assertEqual(len(plan), len({destination for _, destination in plan}))
+        destinations = {destination for _, destination in plan}
+        self.assertNotIn(
+            "chrome/app/vector_icons/browser_logo.icon", destinations
+        )
+        self.assertNotIn(
+            "components/omnibox/browser/vector_icons/product_chrome_refresh.icon",
+            destinations,
+        )
+        self.assertIn(
+            "chrome/app/vector_icons/browser_logo_old.icon", destinations
+        )
+        self.assertIn(
+            "components/omnibox/browser/vector_icons/product_chrome_refresh_old.icon",
+            destinations,
+        )
+
+    def test_resource_destinations_fail_closed_before_copy(self):
+        source_root = self.root / "resource-source"
+        source_root.mkdir()
+        focus_one = self.root / "focus-one"
+        focus_two = self.root / "focus-two"
+        focus_one.write_text("focus-one\n", encoding="utf-8")
+        focus_two.write_text("focus-two\n", encoding="utf-8")
+        destination_one = source_root / "one/first.txt"
+        destination_two = source_root / "two/second.txt"
+        destination_one.parent.mkdir()
+        destination_two.parent.mkdir()
+        destination_one.write_text("upstream-one\n", encoding="utf-8")
+        destination_two.write_text("upstream-two\n", encoding="utf-8")
+        plan = [
+            (focus_one, "one/first.txt"),
+            (focus_two, "two/second.txt"),
+        ]
+        with mock.patch.object(prepare_source, "RESOURCE_BODY_COUNT", 2):
+            copy_plan, report = prepare_source.validate_resource_destinations(
+                source_root, plan
+            )
+            self.assertEqual(2, len(copy_plan))
+            self.assertEqual(2, report["copy_targets"])
+
+            destination_two.unlink()
+            with self.assertRaisesRegex(
+                prepare_source.PreparationError, "missing regular"
+            ):
+                prepare_source.copy_common_resources(source_root, plan)
+            self.assertEqual(
+                "upstream-one\n", destination_one.read_text(encoding="utf-8")
+            )
+
+            destination_two.symlink_to(destination_one)
+            with self.assertRaisesRegex(
+                prepare_source.PreparationError, "not a regular"
+            ):
+                prepare_source.validate_resource_destinations(source_root, plan)
+            destination_two.unlink()
+            destination_two.mkdir()
+            with self.assertRaisesRegex(
+                prepare_source.PreparationError, "not a regular"
+            ):
+                prepare_source.validate_resource_destinations(source_root, plan)
+            destination_two.rmdir()
+            destination_two.parent.rmdir()
+            destination_two.parent.symlink_to(destination_one.parent)
+            with self.assertRaisesRegex(
+                prepare_source.PreparationError, "symlink"
+            ):
+                prepare_source.validate_resource_destinations(source_root, plan)
+
+    def test_post_version_checkpoint_pins_are_exact(self):
+        self.assertEqual(
+            {
+                "records": 16077,
+                "sha256": "14aab1de3e2f927acba39c388ac0870034473d92c567b5d5847610b26ada711a",
+                "status_counts": {" D": 3189, " M": 10991, "??": 1897},
+            },
+            prepare_source.expected_post_version_working_tree(),
+        )
+        self.assertEqual(
+            "278c39af67b4674790f9dafae8b02f752095c006aec1df0ea0639327fe002f18",
+            prepare_source.expected_post_version_ignored_tree()["sha256"],
+        )
+        self.assertEqual(
+            "43cc9cc434db94e24508c5801954e2ef3cd24fa78b3f45c5157fd36dca3f6930",
+            prepare_source.expected_post_version_dependency_tree()["sha256"],
+        )
+        self.assertEqual(
+            {
+                "manifest_entries": 58,
+                "copy_targets": 58,
+                "inventory_bytes": 7568,
+                "inventory_sha256": "e92041179473b41b20c4eb21c8adae2d5fd89bf4f561305ebf672358b3e43562",
+            },
+            prepare_source.expected_post_version_resource_inventory(),
+        )
+
+    def test_recovery_checkpoint_provenance_is_explicit_and_tamper_evident(self):
+        node = {"path": "/pinned/node", "architecture": "arm64"}
+        report = {
+            "phase": "post_version_pre_resources",
+            "git_head": prepare_source.ACQUISITION_CHROMIUM_COMMIT,
+            "working_tree": prepare_source.expected_post_version_working_tree(),
+            "ignored_tree": prepare_source.expected_post_version_ignored_tree(),
+            "dependency_tree": prepare_source.expected_post_version_dependency_tree(),
+            "pruning": {
+                "manifest_sha256": prepare_source.PRUNING_LIST_SHA256,
+                "listed_files": prepare_source.PRUNING_ENTRY_COUNT,
+                "all_targets_absent": True,
+                "absent_files": prepare_source.PRUNING_ENTRY_COUNT,
+                "symlink_targets": 0,
+            },
+            "overlay": {
+                "overlay_files_matching": 2531,
+                "cleanup_targets_absent": 20,
+            },
+            "artifacts": {
+                "chrome_version_sha256": (
+                    prepare_source.POST_VERSION_CHROME_VERSION_SHA256
+                ),
+                "focus_version": "1.0.5.0",
+                "onboarding_baseline_sha256": (
+                    prepare_source.ONBOARDING_STRINGS_BASELINE_SHA256
+                ),
+                "upstream_icns_sha256": (
+                    prepare_source.POST_VERSION_UPSTREAM_ICNS_SHA256
+                ),
+                "onboarding_node": node,
+                "args_gn_absent": True,
+                "receipt_absent": True,
+            },
+            "resources": prepare_source.expected_post_version_resource_inventory(),
+        }
+        with mock.patch.object(
+            prepare_source, "onboarding_node_contract", return_value=node
+        ):
+            self.assertEqual(
+                report,
+                prepare_source.validate_recovery_checkpoint_report(
+                    report, self.root
+                ),
+            )
+            tampered = json.loads(json.dumps(report))
+            tampered["resources"]["inventory_sha256"] = "0" * 64
+            with self.assertRaisesRegex(
+                prepare_source.PreparationError, "contract mismatch"
+            ):
+                prepare_source.validate_recovery_checkpoint_report(
+                    tampered, self.root
+                )
 
     def test_focus_version_is_appended_once(self):
         source = self.root / "src"
@@ -1190,6 +1338,7 @@ class PrepareSourceTests(unittest.TestCase):
             prepare_source.fresh_preparation_execution_report(),
             payload["preparation_execution"],
         )
+        self.assertIsNone(payload["recovery_checkpoint"])
         self.assertTrue(payload["offline"])
         self.assertEqual(0, payload["network_operations"])
         self.assertFalse(payload["build_executed"])
@@ -1992,6 +2141,13 @@ class PrepareSourceTests(unittest.TestCase):
                 mock.patch.object(prepare_source, "parse_resource_plan", return_value=[])
             )
             stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "resource_destination_inventory",
+                    return_value={"copy_targets": 58},
+                )
+            )
+            stack.enter_context(
                 mock.patch.object(prepare_source.focus_macos, "validate_icns_asset")
             )
             stack.enter_context(
@@ -2120,6 +2276,479 @@ class PrepareSourceTests(unittest.TestCase):
         self.assertEqual(0, report["patches_applied_this_run"])
         self.assertEqual("remaining 0-patch batch", report["disk_gates"][1]["phase"])
 
+    def test_post_version_finalizer_skips_completed_mutation_phases(self):
+        source = self.root / "post-version-source"
+        cache = self.root / "post-version-cache"
+        source.mkdir()
+        cache.mkdir()
+        preflight_report = {
+            "source_root": str(source),
+            "pruning": {},
+            "dependency_install": {},
+            "preparation_execution": {},
+            "recovery_checkpoint": {"phase": "fixture"},
+        }
+        localized = {"output_sha256": "a" * 64}
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "resume_post_version_preflight",
+                    return_value=preflight_report,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(prepare_source, "require_disk_floor", return_value={})
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "working_tree_inventory",
+                    return_value=prepare_source.expected_post_version_working_tree(),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "ignored_working_tree_inventory",
+                    return_value=prepare_source.expected_post_version_ignored_tree(),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "installed_dependency_tree",
+                    return_value=prepare_source.expected_post_version_dependency_tree(),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(prepare_source, "validate_post_version_artifacts")
+            )
+            stack.enter_context(
+                mock.patch.object(prepare_source, "parse_resource_plan", return_value=[])
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "resource_destination_inventory",
+                    return_value=(
+                        prepare_source.expected_post_version_resource_inventory()
+                    ),
+                )
+            )
+            snapshot = stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "create_finalizer_rollback_snapshot",
+                    return_value={"snapshot": True},
+                )
+            )
+            rollback = stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "restore_finalizer_rollback_snapshot"
+                )
+            )
+            resource_copy = stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "copy_common_resources", return_value=58
+                )
+            )
+            icon = stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "install_focus_icns", return_value="icon"
+                )
+            )
+            args_write = stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "write_args_gn",
+                    return_value={"arm64": "arm", "x64": "x64"},
+                )
+            )
+            strings = stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "generate_onboarding_strings",
+                    return_value=localized,
+                )
+            )
+            receipt = stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "write_preparation_receipt",
+                    return_value={"path": "receipt"},
+                )
+            )
+            transformations = stack.enter_context(
+                mock.patch.object(prepare_source, "apply_common_transformations")
+            )
+            overlay = stack.enter_context(
+                mock.patch.object(prepare_source, "apply_overlay")
+            )
+            version = stack.enter_context(
+                mock.patch.object(prepare_source, "append_focus_version_once")
+            )
+            report = prepare_source.resume_post_version_failure(source, cache)
+
+        transformations.assert_not_called()
+        overlay.assert_not_called()
+        version.assert_not_called()
+        resource_copy.assert_called_once_with(source, [])
+        icon.assert_called_once_with(source)
+        args_write.assert_called_once_with(source)
+        strings.assert_called_once_with(source)
+        receipt.assert_called_once()
+        self.assertEqual(
+            {"phase": "fixture"},
+            receipt.call_args.kwargs["recovery_checkpoint"],
+        )
+        self.assertTrue(report["prepared"])
+        self.assertEqual(58, report["resources_copied"])
+        self.assertEqual(0, report["patches_applied_this_run"])
+        snapshot.assert_called_once()
+        rollback.assert_not_called()
+
+    def test_post_version_finalizer_rolls_back_late_failure(self):
+        source = self.root / "rollback-source"
+        cache = self.root / "rollback-cache"
+        source.mkdir()
+        cache.mkdir()
+        preflight_report = {
+            "source_root": str(source),
+            "pruning": {},
+            "dependency_install": {},
+            "preparation_execution": {},
+            "recovery_checkpoint": {"phase": "fixture"},
+        }
+        snapshot_report = {"snapshot": True}
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "resume_post_version_preflight",
+                    return_value=preflight_report,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(prepare_source, "require_disk_floor", return_value={})
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "working_tree_inventory",
+                    return_value=prepare_source.expected_post_version_working_tree(),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "ignored_working_tree_inventory",
+                    return_value=prepare_source.expected_post_version_ignored_tree(),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "installed_dependency_tree",
+                    return_value=prepare_source.expected_post_version_dependency_tree(),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(prepare_source, "validate_post_version_artifacts")
+            )
+            stack.enter_context(
+                mock.patch.object(prepare_source, "parse_resource_plan", return_value=[])
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "resource_destination_inventory",
+                    return_value=(
+                        prepare_source.expected_post_version_resource_inventory()
+                    ),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "create_finalizer_rollback_snapshot",
+                    return_value=snapshot_report,
+                )
+            )
+            rollback = stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "restore_finalizer_rollback_snapshot",
+                    return_value=True,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "copy_common_resources", return_value=58
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "install_focus_icns", return_value="icon"
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "write_args_gn",
+                    return_value={"arm64": "arm", "x64": "x64"},
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "generate_onboarding_strings",
+                    side_effect=prepare_source.PreparationError("forced generator failure"),
+                )
+            )
+            receipt = stack.enter_context(
+                mock.patch.object(prepare_source, "write_preparation_receipt")
+            )
+            with self.assertRaisesRegex(
+                prepare_source.PreparationError, "forced generator failure"
+            ):
+                prepare_source.resume_post_version_failure(source, cache)
+
+        rollback.assert_called_once_with(source, [], snapshot_report)
+        receipt.assert_not_called()
+
+    def test_post_version_finalizer_retains_snapshot_when_rollback_fails(self):
+        source = self.root / "rollback-failure-source"
+        cache = self.root / "rollback-failure-cache"
+        snapshot_root = self.root / "retained-finalizer-snapshot"
+        source.mkdir()
+        cache.mkdir()
+        snapshot_root.mkdir()
+        snapshot_root = snapshot_root.resolve()
+        sentinel = snapshot_root / "001.backup"
+        sentinel.write_text("recoverable bytes\n", encoding="utf-8")
+        preflight_report = {
+            "source_root": str(source),
+            "pruning": {},
+            "dependency_install": {},
+            "preparation_execution": {},
+            "recovery_checkpoint": {"phase": "fixture"},
+        }
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "resume_post_version_preflight",
+                    return_value=preflight_report,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(prepare_source, "require_disk_floor", return_value={})
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "working_tree_inventory",
+                    return_value=prepare_source.expected_post_version_working_tree(),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "ignored_working_tree_inventory",
+                    return_value=prepare_source.expected_post_version_ignored_tree(),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "installed_dependency_tree",
+                    return_value=prepare_source.expected_post_version_dependency_tree(),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(prepare_source, "validate_post_version_artifacts")
+            )
+            stack.enter_context(
+                mock.patch.object(prepare_source, "parse_resource_plan", return_value=[])
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "resource_destination_inventory",
+                    return_value=(
+                        prepare_source.expected_post_version_resource_inventory()
+                    ),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source.tempfile,
+                    "mkdtemp",
+                    return_value=str(snapshot_root),
+                )
+            )
+            snapshot_report = {"files": [str(sentinel)]}
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "create_finalizer_rollback_snapshot",
+                    return_value=snapshot_report,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "copy_common_resources",
+                    side_effect=prepare_source.PreparationError("forced mutation failure"),
+                )
+            )
+            rollback = stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "restore_finalizer_rollback_snapshot",
+                    side_effect=prepare_source.PreparationError("forced rollback failure"),
+                )
+            )
+            with self.assertRaisesRegex(
+                prepare_source.PreparationError,
+                "rollback snapshot retained at {}".format(snapshot_root),
+            ):
+                prepare_source.resume_post_version_failure(source, cache)
+
+        rollback.assert_called_once_with(source, [], snapshot_report)
+        self.assertTrue(snapshot_root.is_dir())
+        self.assertEqual("recoverable bytes\n", sentinel.read_text(encoding="utf-8"))
+
+    def test_split_recovery_requires_full_patch_prefix_execution(self):
+        full = prepare_source.expected_resume_execution_report(324)
+        earlier = prepare_source.expected_resume_execution_report(138)
+        recovery = {"phase": "fixture"}
+        with mock.patch.object(
+            prepare_source, "validate_recovery_checkpoint_report"
+        ):
+            self.assertTrue(
+                prepare_source.validate_recovery_execution_link(full, recovery)
+            )
+            with self.assertRaisesRegex(
+                prepare_source.PreparationError, "exact full-prefix"
+            ):
+                prepare_source.validate_recovery_execution_link(earlier, recovery)
+            self.assertTrue(
+                prepare_source.validate_recovery_execution_link(earlier, None)
+            )
+
+    def test_finalizer_snapshot_restores_files_args_and_receipt(self):
+        source = self.root / "transaction-source"
+        backup = self.root / "transaction-backup"
+        source.mkdir()
+        backup.mkdir()
+        focus_one = self.root / "transaction-focus-one"
+        focus_two = self.root / "transaction-focus-two"
+        focus_one.write_text("focus-one\n", encoding="utf-8")
+        focus_two.write_text("focus-two\n", encoding="utf-8")
+        destination_one = source / "resources/one"
+        destination_two = source / "resources/two"
+        destination_one.parent.mkdir()
+        destination_one.write_text("original-one\n", encoding="utf-8")
+        destination_two.write_text("original-two\n", encoding="utf-8")
+        icon = source / "icon.icns"
+        strings = source / "strings.ts"
+        icon.write_text("original-icon\n", encoding="utf-8")
+        strings.write_text("original-strings\n", encoding="utf-8")
+        plan = [
+            (focus_one, "resources/one"),
+            (focus_two, "resources/two"),
+        ]
+        args_plan = OrderedDict(
+            (
+                ("arm64", ("out/Arm", "arm\n")),
+                ("x64", ("out/X64", "x64\n")),
+            )
+        )
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(prepare_source, "RESOURCE_BODY_COUNT", 2))
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "ONBOARDING_STRINGS_OUTPUT", "strings.ts"
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "PREPARATION_RECEIPT", "out/receipt.json"
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "validate_icon_destination",
+                    return_value=icon.resolve(),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(prepare_source, "args_gn_plan", return_value=args_plan)
+            )
+            snapshot = prepare_source.create_finalizer_rollback_snapshot(
+                source, plan, backup
+            )
+
+            destination_one.write_text("mutated-one\n", encoding="utf-8")
+            destination_two.write_text("mutated-two\n", encoding="utf-8")
+            icon.write_text("mutated-icon\n", encoding="utf-8")
+            strings.write_text("mutated-strings\n", encoding="utf-8")
+            (source / "out/Arm").mkdir(parents=True)
+            (source / "out/X64").mkdir(parents=True)
+            (source / "out/Arm/args.gn").write_text("arm\n", encoding="utf-8")
+            (source / "out/X64/args.gn").write_text("x64\n", encoding="utf-8")
+            (source / "out/receipt.json").write_text("receipt\n", encoding="utf-8")
+
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "working_tree_inventory",
+                    return_value=prepare_source.expected_post_version_working_tree(),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "ignored_working_tree_inventory",
+                    return_value=prepare_source.expected_post_version_ignored_tree(),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "installed_dependency_tree",
+                    return_value=prepare_source.expected_post_version_dependency_tree(),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(prepare_source, "validate_post_version_artifacts")
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "resource_destination_inventory",
+                    return_value=(
+                        prepare_source.expected_post_version_resource_inventory()
+                    ),
+                )
+            )
+            self.assertTrue(
+                prepare_source.restore_finalizer_rollback_snapshot(
+                    source, plan, snapshot
+                )
+            )
+
+        self.assertEqual("original-one\n", destination_one.read_text(encoding="utf-8"))
+        self.assertEqual("original-two\n", destination_two.read_text(encoding="utf-8"))
+        self.assertEqual("original-icon\n", icon.read_text(encoding="utf-8"))
+        self.assertEqual("original-strings\n", strings.read_text(encoding="utf-8"))
+        self.assertFalse((source / "out/Arm/args.gn").exists())
+        self.assertFalse((source / "out/X64/args.gn").exists())
+        self.assertFalse((source / "out/receipt.json").exists())
+
     def test_resume_preflight_cli_is_read_only_and_needs_exact_count(self):
         report = {"resume_ready": True}
         with mock.patch.object(
@@ -2155,6 +2784,40 @@ class PrepareSourceTests(unittest.TestCase):
                     str(self.root),
                     "--applied-patches",
                     "98",
+                ]
+            )
+        self.assertEqual(2, context.exception.code)
+
+    def test_resume_finalize_cli_routes_preflight_and_requires_confirmation(self):
+        report = {"resume_ready": True}
+        with mock.patch.object(
+            prepare_source, "resume_post_version_preflight", return_value=report
+        ) as preflight, mock.patch("sys.stdout", new=io.StringIO()):
+            self.assertEqual(
+                0,
+                prepare_source.main(
+                    [
+                        "resume-finalize-preflight",
+                        "--source-root",
+                        str(self.root),
+                        "--cache",
+                        str(self.root),
+                        "--json",
+                    ]
+                ),
+            )
+        preflight.assert_called_once_with(str(self.root), str(self.root))
+
+        with mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(
+            SystemExit
+        ) as context:
+            prepare_source.main(
+                [
+                    "resume-finalize",
+                    "--source-root",
+                    str(self.root),
+                    "--cache",
+                    str(self.root),
                 ]
             )
         self.assertEqual(2, context.exception.code)
