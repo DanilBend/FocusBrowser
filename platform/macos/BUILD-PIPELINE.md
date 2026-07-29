@@ -60,9 +60,11 @@ python3 platform/macos/build_pipeline.py bootstrap-tools \
 ```
 
 This first proves the exact clean Chromium and depot_tools Git revisions and
-hash-pinned upstream Mac signing inputs. It then runs only pinned `gclient
-runhooks`, verifies the revisions again, records GN/tool hashes, and writes
-`.focus-macos-tool-bootstrap.json`. It is forbidden after preparation.
+hash-pinned upstream Mac signing inputs. It runs the hash-pinned depot_tools
+`ensure_bootstrap` helper (which initializes the current checkout without
+updating it), then pinned `gclient runhooks`, verifies the revisions again,
+records GN/tool hashes, and writes `.focus-macos-tool-bootstrap.json`. It is
+forbidden after preparation.
 
 ### 2. Prepare the source offline
 

@@ -239,12 +239,20 @@ class BuildPipelineTests(unittest.TestCase):
     def test_bootstrap_is_hook_only_and_must_precede_preparation(self):
         (self.checkout / build_pipeline.TOOL_RECEIPT).unlink()
         (self.source / build_pipeline.PREPARATION_RECEIPT).unlink()
+        ensure = self.depot / "ensure_bootstrap"
+        ensure.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        ensure.chmod(0o755)
         with mock.patch.object(
             build_pipeline, "free_bytes", return_value=80 * build_pipeline.GIB
+        ), mock.patch.object(
+            build_pipeline, "ensure_bootstrap_path", return_value=ensure
         ):
             plan = build_pipeline.bootstrap_plan(self.source, self.developer)
         self.assertEqual(
             [str(self.depot / "gclient"), "runhooks"], plan["command"]
+        )
+        self.assertEqual(
+            [str(self.depot / "ensure_bootstrap")], plan["bootstrap_command"]
         )
         self.assertEqual(str(self.checkout), plan["cwd"])
         self.write_json(
@@ -252,13 +260,21 @@ class BuildPipelineTests(unittest.TestCase):
         )
         with mock.patch.object(
             build_pipeline, "free_bytes", return_value=80 * build_pipeline.GIB
+        ), mock.patch.object(
+            build_pipeline, "ensure_bootstrap_path", return_value=ensure
         ), self.assertRaisesRegex(build_pipeline.PipelineError, "before source preparation"):
             build_pipeline.bootstrap_plan(self.source, self.developer)
 
     def test_execute_bootstrap_writes_source_bound_receipt(self):
         (self.checkout / build_pipeline.TOOL_RECEIPT).unlink()
         (self.source / build_pipeline.PREPARATION_RECEIPT).unlink()
-        plan = {"command": [str(self.depot / "gclient"), "runhooks"]}
+        ensure = self.depot / "ensure_bootstrap"
+        ensure.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        ensure.chmod(0o755)
+        plan = {
+            "bootstrap_command": [str(ensure)],
+            "command": [str(self.depot / "gclient"), "runhooks"],
+        }
         with mock.patch.object(
             build_pipeline, "verify_pristine_bootstrap_source"
         ) as pristine, mock.patch.object(build_pipeline, "run_monitored") as run, mock.patch.object(
@@ -269,7 +285,7 @@ class BuildPipelineTests(unittest.TestCase):
             report = build_pipeline.execute_bootstrap(
                 self.source, self.developer, plan
             )
-        run.assert_called_once()
+        self.assertEqual(2, run.call_count)
         self.assertEqual(2, pristine.call_count)
         receipt = json.loads(Path(report["path"]).read_text(encoding="utf-8"))
         self.assertEqual(str(self.source), receipt["source_root"])

@@ -64,6 +64,9 @@ SIGN_CHROME_SHA256 = (
 MAC_SIGNING_SOURCES_GNI_SHA256 = (
     "6ad40408f0461b4804d83872f3000030b673edd4337a984d5a2c592f36c201c5"
 )
+ENSURE_BOOTSTRAP_SHA256 = (
+    "a88ab230f6d92fea7588747a21854981442ba5866026fe48f792a2e43c5a986c"
+)
 MAX_RECEIPT_BYTES = 1024 * 1024
 TOOL_RECEIPT_KEYS = frozenset(
     (
@@ -259,6 +262,15 @@ def tool_paths(source):
         if path.is_symlink() or not path.is_file() or not os.access(str(path), os.X_OK):
             raise PipelineError("missing executable {}: {}".format(label, path))
     return paths
+
+
+def ensure_bootstrap_path(source):
+    path = source.parent / "depot_tools" / "ensure_bootstrap"
+    if path.is_symlink() or not path.is_file() or not os.access(str(path), os.X_OK):
+        raise PipelineError("missing executable pinned depot_tools ensure_bootstrap")
+    if sha256_file(path) != ENSURE_BOOTSTRAP_SHA256:
+        raise PipelineError("depot_tools ensure_bootstrap hash mismatch")
+    return path
 
 
 def safe_environment(source, developer_dir, inherited=None):
@@ -728,10 +740,12 @@ def bootstrap_plan(source, developer_dir):
     if in_source(source, PREPARATION_RECEIPT, "preparation receipt").exists():
         raise PipelineError("tools must be bootstrapped before source preparation")
     tools = tool_paths(source)
+    ensure_bootstrap = ensure_bootstrap_path(source)
     require_free(source, BOOTSTRAP_POST_GIB, "tool bootstrap start")
     command = [str(tools["gclient"]), "runhooks"]
     return {
         "stage": "bootstrap-tools",
+        "bootstrap_command": [str(ensure_bootstrap)],
         "command": command,
         "cwd": str(source.parent),
         "acquisition_marker": str(acquisition_path),
@@ -742,6 +756,12 @@ def bootstrap_plan(source, developer_dir):
 def execute_bootstrap(source, developer_dir, plan):
     environment = safe_environment(source, developer_dir)
     verify_pristine_bootstrap_source(source, developer_dir)
+    run_monitored(
+        plan["bootstrap_command"],
+        source.parent,
+        environment,
+        watched_paths=(source,),
+    )
     run_monitored(plan["command"], source.parent, environment, watched_paths=(source,))
     verify_pristine_bootstrap_source(source, developer_dir)
     tools = tool_paths(source)
