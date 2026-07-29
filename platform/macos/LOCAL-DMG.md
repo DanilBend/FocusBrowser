@@ -1,0 +1,44 @@
+# Local Focus Browser app and DMG
+
+The target is local installation on supported Intel and Apple Silicon Macs.
+There is no App Store, publishing, updater, Developer ID, or notarization
+workflow.
+
+A paid Apple Developer account is not required. Executable code in the final
+bundle may use an ad-hoc signature, which has no certificate identity and is
+suitable for local use. Chromium has multiple nested helper apps and
+frameworks, so the build/package workflow must sign them in the correct order;
+do not repair a broken bundle with a blanket `codesign --deep --force` command.
+
+After the separate arm64 and x86_64 builds are merged and the complete
+`Focus Browser.app` is signed, acceptance is:
+
+1. Launch the app directly and run the native Incognito checklist.
+2. Verify the complete nested signature with `codesign --verify --deep --strict
+   --verbose=2` and inspect it with `codesign -dv --verbose=4`.
+3. Place the verified app and an `/Applications` link in an isolated staging
+   directory.
+4. Run `package_local_dmg.py`; it stages with system `ditto`, creates a
+   compressed drag-and-drop image with system `hdiutil`, verifies it, mounts it
+   read-only, and revalidates the app and `/Applications` link. The release
+   invocation must include `--require-universal`; thin images are only for
+   architecture-specific local testing.
+5. Record the app/DMG SHA-256 and exact Chromium/Focus versions.
+
+The DMG container itself does not require an Apple account for local use. An
+ad-hoc signature satisfies the native-code signature requirement but does not
+establish a trusted developer identity. If another Mac receives the app or DMG
+with a quarantine attribute, it will not pass the default Gatekeeper
+assessment. The user may have to allow it manually in Privacy & Security, and
+managed-device policy may prohibit that override. The normal no-manual-override
+distribution path requires Developer ID signing and Apple notarization, which
+is outside this local-only branch.
+
+Ad-hoc signing must preserve every entitlement required by Chromium and its
+nested helpers. "No Developer ID, provisioning, or notarization" never means
+removing those entitlements.
+
+No DMG is generated at the planning stage: the repository has no Chromium
+checkout or built `.app`, and the current free space has not been proven
+sufficient against a measured checkout, two native builds, universal merge,
+and packaging threshold.

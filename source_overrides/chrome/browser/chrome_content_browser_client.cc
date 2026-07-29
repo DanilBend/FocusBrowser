@@ -861,9 +861,15 @@ bool HandleNewTabPageLocationOverride(
 
   // Don't change the URL when incognito mode.
   if (profile->IsOffTheRecord()) {
+#if BUILDFLAG(IS_MAC)
+    // Keep the native private new-tab surface on macOS. In particular, never
+    // let --custom-ntp navigate a private window to an external page.
+    return false;
+#else
     if (!base::CommandLine::ForCurrentProcess()->HasSwitch("custom-ntp")) {
       return false;
     }
+#endif
   }
 
   std::string ntp_location =

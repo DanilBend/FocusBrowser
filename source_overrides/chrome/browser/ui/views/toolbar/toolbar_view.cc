@@ -736,7 +736,15 @@ void ToolbarView::Init() {
           browser_->profile()->IsIncognitoProfile() ||
           browser_->profile()->IsGuestSession();
     } else if (sab_value == "never") {
+#if BUILDFLAG(IS_MAC)
+      // A private window must remain visually distinguishable even when the
+      // regular-profile avatar preference is "never".
+      show_avatar_toolbar_button =
+          browser_->profile()->IsIncognitoProfile() ||
+          browser_->profile()->IsGuestSession();
+#else
       show_avatar_toolbar_button = false;
+#endif
     }
 
     avatar_->SetVisible(show_avatar_toolbar_button);
@@ -2389,7 +2397,15 @@ void ToolbarView::OnShowReloadButtonChanged() {
 }
 
 void ToolbarView::OnShowAvatarButtonChanged() {
+#if BUILDFLAG(IS_MAC)
+  // Incognito and Guest are privacy identities, not optional regular-profile
+  // chrome. Never let a pref callback hide their persistent visual marker.
+  avatar_->SetVisible(browser_->profile()->IsIncognitoProfile() ||
+                      browser_->profile()->IsGuestSession() ||
+                      show_avatar_button_.GetValue());
+#else
   avatar_->SetVisible(show_avatar_button_.GetValue());
+#endif
 }
 
 void ToolbarView::OnShowExtensionsButtonChanged() {

@@ -1,4 +1,6 @@
 # Audited shared Views patches. Their historical directory name is misleading:
-# both patches are platform-neutral, and FocusYoutube depends on FocusBlock context.
+# both are platform-neutral, and FocusYoutube depends on FocusBlock context.
 ../../../patches/focus/windows/focusblock-location-bar-shield.patch
 ../../../patches/focus/windows/focusyoutube-native-popup.patch
+# Final macOS-only private-window safety and disclosure contract.
+native-incognito-contract.patch
