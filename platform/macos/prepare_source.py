@@ -1070,6 +1070,7 @@ def merge_staged_dependencies(source_root, stage_root, contracts):
 
     plan = []
     destinations = set()
+    destination_parents = set()
     expected_directories = set(roots)
     expected_files = {}
     for name, contract in contracts.items():
@@ -1087,16 +1088,18 @@ def merge_staged_dependencies(source_root, stage_root, contracts):
             candidate = PurePosixPath(destination_relative)
             if destination_relative in destinations or any(
                 parent.as_posix() in destinations for parent in candidate.parents
-            ) or any(
-                PurePosixPath(existing).parts[: len(candidate.parts)] == candidate.parts
-                for existing in destinations
-            ):
+            ) or destination_relative in destination_parents:
                 raise PreparationError(
                     "duplicate or colliding dependency destination: {}".format(
                         destination_relative
                     )
                 )
             destinations.add(destination_relative)
+            destination_parents.update(
+                parent.as_posix()
+                for parent in candidate.parents
+                if parent.as_posix() not in ("", ".")
+            )
             destination = reject_symlink_ancestors(
                 source_root, destination_relative, include_leaf=False
             )

@@ -361,6 +361,8 @@ class BuildPipelineTests(unittest.TestCase):
             "NODE_OPTIONS": "--require=/tmp/inject.js",
             "npm_config_arch": "ia32",
             "DYLD_INSERT_LIBRARIES": "/tmp/inject.dylib",
+            "BASH_ENV": "/tmp/inject.sh",
+            "ENV": "/tmp/inject.sh",
             "KEEP": "yes",
         }
         developer = self.root / "Xcode.app/Contents/Developer"
@@ -372,9 +374,14 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertNotIn("NODE_OPTIONS", result)
         self.assertNotIn("npm_config_arch", result)
         self.assertNotIn("DYLD_INSERT_LIBRARIES", result)
-        self.assertEqual("yes", result["KEEP"])
+        self.assertNotIn("BASH_ENV", result)
+        self.assertNotIn("ENV", result)
+        self.assertNotIn("KEEP", result)
         self.assertEqual(str(developer), result["DEVELOPER_DIR"])
-        self.assertTrue(result["PATH"].startswith(str(self.depot)))
+        self.assertEqual(
+            str(self.depot) + ":" + build_pipeline.SYSTEM_PATH,
+            result["PATH"],
+        )
 
     def test_safe_environment_adds_pinned_ninja_after_depot_tools(self):
         result = build_pipeline.safe_environment(
@@ -384,8 +391,12 @@ class BuildPipelineTests(unittest.TestCase):
             build_ninja=self.ninja,
         )
         self.assertEqual(
-            [str(self.depot), str(self.ninja.parent), "/bin"],
-            result["PATH"].split(":"),
+            str(self.depot)
+            + ":"
+            + str(self.ninja.parent)
+            + ":"
+            + build_pipeline.SYSTEM_PATH,
+            result["PATH"],
         )
         with self.assertRaisesRegex(build_pipeline.PipelineError, "pinned Dawn Ninja"):
             build_pipeline.safe_environment(

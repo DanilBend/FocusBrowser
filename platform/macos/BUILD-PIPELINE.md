@@ -77,6 +77,9 @@ lifecycle scripts run. Its preflight is read-only; mutation requires
 Preparation requires the exact ten-entry cache marker, starts from six absent
 or completely empty dependency-owned roots, and proves the merged union as
 13,212 regular files / 527,357,876 bytes with its pinned inventory SHA-256.
+Ten validated onboarding `node_modules/.bin` symlinks are intentionally omitted
+because copying their target bytes would change Node relative-import behavior;
+their exact path/target inventory is separately count/hash pinned.
 After the reviewed patches and translations, it runs the pinned native Node
 and `generate-i18n.mts` twice offline, requires byte-identical `strings.ts`,
 and records the final transformed dependency-tree hash for every later stage.

@@ -1033,8 +1033,8 @@ def parse_args(argv=None):
         "--fetch-project-dependencies",
         action="store_true",
         help=(
-            "plan retrieval of the three focus-chromium/deps.ini archives; "
-            "never unpack them"
+            "plan retrieval of all ten pinned shared and Mac-host archives; "
+            "never unpack them or mutate Chromium source"
         ),
     )
     parser.add_argument(

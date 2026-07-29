@@ -65,49 +65,7 @@ NINJA_CIPD_INSTANCE_BY_HOST = {
     "arm64": "xem0_6s7Lt77xBhJ_IHxFsjQR7JYkGvswGG-nsrwSv0C",
     "x86_64": "mGbmncDR78ysAZaXITtasuAzLcxiloLxNzPgeS6pURkC",
 }
-BUILD_ENVIRONMENT_DENYLIST = frozenset(
-    (
-        "ARCHFLAGS",
-        "CC",
-        "CFLAGS",
-        "CPATH",
-        "CPPFLAGS",
-        "CPLUS_INCLUDE_PATH",
-        "CXX",
-        "CXXFLAGS",
-        "EFFECTIVE_PLATFORM_NAME",
-        "GIT_CACHE_PATH",
-        "GN_ARGS",
-        "GYP_DEFINES",
-        "GYP_GENERATORS",
-        "IPHONEOS_DEPLOYMENT_TARGET",
-        "LD_LIBRARY_PATH",
-        "LDFLAGS",
-        "LIBRARY_PATH",
-        "MACOSX_DEPLOYMENT_TARGET",
-        "NINJAFLAGS",
-        "NINJA_STATUS",
-        "NODE_OPTIONS",
-        "NODE_PATH",
-        "OBJCFLAGS",
-        "PLATFORM_NAME",
-        "PYTHONHOME",
-        "PYTHONPATH",
-        "RUSTDOCFLAGS",
-        "RUSTFLAGS",
-        "SDKROOT",
-        "TVOS_DEPLOYMENT_TARGET",
-        "WATCHOS_DEPLOYMENT_TARGET",
-        "XROS_DEPLOYMENT_TARGET",
-    )
-)
-BUILD_ENVIRONMENT_DENY_PREFIXES = (
-    "DYLD_",
-    "NPM_CONFIG_",
-    "PNPM_",
-    "npm_config_",
-    "pnpm_",
-)
+SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
 CHROME_BUILD_GN_SHA256 = (
     "3851bd31f3f9bc123395dbd966557885d62911f4e1359bca47390bfc942653e4"
@@ -332,12 +290,18 @@ def ensure_bootstrap_path(source):
 
 def safe_environment(source, developer_dir, inherited=None, build_ninja=None):
     inherited = os.environ if inherited is None else inherited
-    result = dict(inherited)
-    for variable in tuple(result):
-        if variable in BUILD_ENVIRONMENT_DENYLIST or variable.startswith(
-            BUILD_ENVIRONMENT_DENY_PREFIXES
+    result = {"LANG": "C", "LC_ALL": "C", "TZ": "UTC"}
+    inherited_home = inherited.get("HOME")
+    if inherited_home:
+        home_path = Path(inherited_home)
+        if (
+            not home_path.is_absolute()
+            or any(ord(character) < 0x20 for character in inherited_home)
+            or home_path.is_symlink()
+            or not home_path.is_dir()
         ):
-            result.pop(variable, None)
+            raise PipelineError("inherited HOME is not a safe real absolute directory")
+        result["HOME"] = inherited_home
     depot = source.parent / "depot_tools"
     path_entries = [str(depot)]
     if build_ninja is not None:
@@ -346,7 +310,7 @@ def safe_environment(source, developer_dir, inherited=None, build_ninja=None):
         if build_ninja != expected_ninja:
             raise PipelineError("build Ninja path does not match pinned Dawn Ninja")
         path_entries.append(str(build_ninja.parent))
-    path_entries.append(inherited.get("PATH", ""))
+    path_entries.append(SYSTEM_PATH)
     result.update(
         {
             "DEVELOPER_DIR": str(developer_dir),
@@ -472,8 +436,7 @@ def ninja_contract(source):
     observed_hash = sha256_file(path)
     if observed_hash != NINJA_SHA256_BY_HOST[machine]:
         raise PipelineError("pinned Dawn Ninja hash mismatch")
-    environment = dict(os.environ)
-    environment["PATH"] = "/usr/bin:/bin"
+    environment = {"PATH": SYSTEM_PATH, "LANG": "C", "LC_ALL": "C", "TZ": "UTC"}
     architectures = capture(["/usr/bin/lipo", "-archs", str(path)], source, environment).split()
     if architectures != [machine]:
         raise PipelineError("pinned Dawn Ninja architecture mismatch")
