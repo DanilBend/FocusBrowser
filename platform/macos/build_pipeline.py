@@ -38,7 +38,7 @@ GIB = 1024 ** 3
 SOFT_FLOOR_GIB = 35
 HARD_FLOOR_GIB = 30
 BOOTSTRAP_POST_GIB = 70
-BUILD_JOBS = 4
+BUILD_JOBS = 10
 POLL_SECONDS = 2.0
 
 APP_NAME = "Focus Browser.app"
@@ -101,6 +101,30 @@ XCODE27_COMPAT_FILES = {
         "pre_sha256": "9753adb6fe3c4ded31e7631d0e8c1a3ee7d17b6b3c9a595976c7f50ad393f46a",
         "post_sha256": "e1916a65a94dfe6a4d1324eed43def375377d32f86ed6ac77759a036f0db85bf",
     }
+}
+XCODE27_SEATBELT_RECEIPT = "out/FocusMacXcode27SeatbeltCompatibility.json"
+XCODE27_SEATBELT_PATCH = MACOS_DIR / "patches/xcode27-seatbelt.patch"
+XCODE27_SEATBELT_PATCH_SHA256 = (
+    "91e05b88e414a4115924a3296284691975be846189a4087a87acc5fa20a462d0"
+)
+XCODE27_SEATBELT_UPSTREAM = {
+    "commit": "6c0a651f9cf91d07c87be8feba854a38a311aba6",
+    "change_id": "Idcca8b7863c2b10821d8eae5bca782c80be6fe70",
+    "commit_position": "refs/heads/main@{#1655528}",
+    "url": (
+        "https://chromium.googlesource.com/chromium/src/+"
+        "/6c0a651f9cf91d07c87be8feba854a38a311aba6%5E%21/"
+    ),
+}
+XCODE27_SEATBELT_FILES = {
+    "sandbox/mac/seatbelt.cc": {
+        "pre_sha256": "2b2c1a3821bd4546e6f59fa8e666a1846c7d607aa2e3834a75c4a0fe519a55f2",
+        "post_sha256": "ca74d83dfa03acd119d3900ba0c10608df46df21982126c3c0a8832d4d23b08d",
+    },
+    "sandbox/mac/seatbelt.h": {
+        "pre_sha256": "d29decfc61f3f9c56e635c00936a129082e5781f11717d9a8ecffaab278161dc",
+        "post_sha256": "56d67b2b333ef2cefaf8f1f609f3ca6c9dcfa745fd93c16ad0ad6baef8302691",
+    },
 }
 
 DAWN_NINJA_RELATIVE = "third_party/dawn/third_party/ninja/ninja"
@@ -976,6 +1000,217 @@ def execute_xcode27_compat(source, developer_dir, plan):
     }
 
 
+def xcode27_seatbelt_provenance_link(source, developer_dir=None):
+    """Bind the sandbox fix to the already-validated module compatibility fix."""
+    receipt_path, _ = xcode27_compat_receipt_contract(
+        source, developer_dir, required=True
+    )
+    return {
+        "path": str(receipt_path),
+        "sha256": sha256_file(receipt_path),
+    }
+
+
+def xcode27_seatbelt_receipt_contract(source, developer_dir=None, required=True):
+    """Validate Chromium's exact macOS 27 Seatbelt source backport."""
+    receipt_path = in_source(
+        source, XCODE27_SEATBELT_RECEIPT, "Xcode 27 Seatbelt receipt"
+    )
+    if not receipt_path.exists():
+        if required:
+            raise PipelineError("Xcode 27 Seatbelt compatibility receipt is required")
+        return None
+    receipt = load_json(receipt_path, "Xcode 27 Seatbelt compatibility receipt")
+    expected_keys = {
+        "schema",
+        "source_root",
+        "xcode27_module_compatibility_receipt",
+        "toolchain",
+        "upstream",
+        "patch",
+        "files",
+        "offline",
+        "network_operations",
+        "build_executed",
+        "signing_executed",
+        "packaging_executed",
+    }
+    module_link = xcode27_seatbelt_provenance_link(source, developer_dir)
+    if set(receipt) != expected_keys or receipt.get("schema") != 1:
+        raise PipelineError("Xcode 27 Seatbelt compatibility receipt schema mismatch")
+    if (
+        receipt.get("source_root") != str(source)
+        or receipt.get("xcode27_module_compatibility_receipt") != module_link
+        or receipt.get("toolchain") != XCODE27_COMPAT_TOOLCHAIN
+        or receipt.get("upstream") != XCODE27_SEATBELT_UPSTREAM
+        or receipt.get("patch")
+        != {
+            "path": str(XCODE27_SEATBELT_PATCH),
+            "sha256": XCODE27_SEATBELT_PATCH_SHA256,
+        }
+        or receipt.get("files") != XCODE27_SEATBELT_FILES
+        or receipt.get("offline") is not True
+        or receipt.get("network_operations") != 0
+        or receipt.get("build_executed") is not False
+        or receipt.get("signing_executed") is not False
+        or receipt.get("packaging_executed") is not False
+    ):
+        raise PipelineError("Xcode 27 Seatbelt compatibility provenance mismatch")
+    if sha256_file(XCODE27_SEATBELT_PATCH) != XCODE27_SEATBELT_PATCH_SHA256:
+        raise PipelineError("Xcode 27 Seatbelt compatibility patch hash mismatch")
+    for relative, hashes in XCODE27_SEATBELT_FILES.items():
+        current = in_source(
+            source, relative, "Xcode 27 Seatbelt source", must_exist=True
+        )
+        if sha256_file(current) != hashes["post_sha256"]:
+            raise PipelineError(
+                "Xcode 27 Seatbelt source hash mismatch: {}".format(relative)
+            )
+    return receipt_path, receipt
+
+
+def xcode27_seatbelt_plan(source, developer_dir):
+    """Validate the exact pre-backport Seatbelt state without mutation."""
+    module_link = xcode27_seatbelt_provenance_link(source, developer_dir)
+    identity = xcode27_toolchain_identity(developer_contract(developer_dir))
+    if identity != XCODE27_COMPAT_TOOLCHAIN:
+        raise PipelineError("Xcode 27 Seatbelt compatibility toolchain mismatch")
+    receipt_path = in_source(
+        source, XCODE27_SEATBELT_RECEIPT, "Xcode 27 Seatbelt receipt"
+    )
+    if receipt_path.exists() or receipt_path.is_symlink():
+        raise PipelineError("Xcode 27 Seatbelt compatibility receipt already exists")
+    if XCODE27_SEATBELT_PATCH.is_symlink() or not XCODE27_SEATBELT_PATCH.is_file():
+        raise PipelineError("Xcode 27 Seatbelt patch is not a regular file")
+    if sha256_file(XCODE27_SEATBELT_PATCH) != XCODE27_SEATBELT_PATCH_SHA256:
+        raise PipelineError("Xcode 27 Seatbelt compatibility patch hash mismatch")
+    files = {}
+    for relative, hashes in XCODE27_SEATBELT_FILES.items():
+        path = in_source(
+            source, relative, "Xcode 27 Seatbelt source", must_exist=True
+        )
+        if sha256_file(path) != hashes["pre_sha256"]:
+            raise PipelineError(
+                "Xcode 27 Seatbelt pre-fix hash mismatch: {}".format(relative)
+            )
+        files[relative] = dict(hashes)
+    try:
+        boundary = prepare_source.check_patch_boundary(source, XCODE27_SEATBELT_PATCH)
+    except prepare_source.PreparationError as exc:
+        raise PipelineError(str(exc)) from exc
+    return {
+        "stage": "apply-xcode27-seatbelt-compat",
+        "source_root": str(source),
+        "xcode27_module_compatibility_receipt": module_link,
+        "toolchain": identity,
+        "upstream": XCODE27_SEATBELT_UPSTREAM,
+        "patch": boundary,
+        "files": files,
+        "receipt": str(receipt_path),
+        "offline": True,
+        "network_operations": 0,
+    }
+
+
+def execute_xcode27_seatbelt(source, developer_dir, plan):
+    """Remove the obsolete SDK symbol dependency with transactional rollback."""
+    expected = xcode27_seatbelt_plan(source, developer_dir)
+    if plan != expected:
+        raise PipelineError("Xcode 27 Seatbelt plan changed before execution")
+    require_free(source, SOFT_FLOOR_GIB, "Xcode 27 Seatbelt compatibility fix")
+    snapshot_root = Path(
+        tempfile.mkdtemp(prefix="focus-xcode27-seatbelt-rollback-")
+    ).resolve()
+    backups = {}
+    try:
+        for position, relative in enumerate(XCODE27_SEATBELT_FILES, 1):
+            current = in_source(
+                source, relative, "Xcode 27 Seatbelt snapshot", must_exist=True
+            )
+            backup = snapshot_root / "{:02d}.backup".format(position)
+            prepare_source.atomic_copy(current, backup)
+            backups[relative] = backup
+        prepare_source.apply_patch_plan(
+            source, [XCODE27_SEATBELT_PATCH], total_patches=1
+        )
+        for relative, hashes in XCODE27_SEATBELT_FILES.items():
+            current = in_source(
+                source, relative, "Xcode 27 Seatbelt result", must_exist=True
+            )
+            if sha256_file(current) != hashes["post_sha256"]:
+                raise PipelineError(
+                    "Xcode 27 Seatbelt post-fix hash mismatch: {}".format(relative)
+                )
+        receipt_value = {
+            "schema": 1,
+            "source_root": str(source),
+            "xcode27_module_compatibility_receipt": expected[
+                "xcode27_module_compatibility_receipt"
+            ],
+            "toolchain": XCODE27_COMPAT_TOOLCHAIN,
+            "upstream": XCODE27_SEATBELT_UPSTREAM,
+            "patch": {
+                "path": str(XCODE27_SEATBELT_PATCH),
+                "sha256": XCODE27_SEATBELT_PATCH_SHA256,
+            },
+            "files": XCODE27_SEATBELT_FILES,
+            "offline": True,
+            "network_operations": 0,
+            "build_executed": False,
+            "signing_executed": False,
+            "packaging_executed": False,
+        }
+        receipt_report = atomic_json(expected["receipt"], receipt_value)
+        xcode27_seatbelt_receipt_contract(source, developer_dir, required=True)
+    except BaseException as original_error:
+        try:
+            receipt_path = Path(expected["receipt"])
+            if receipt_path.is_symlink() or (
+                receipt_path.exists() and not receipt_path.is_file()
+            ):
+                raise PipelineError(
+                    "unsafe Xcode 27 Seatbelt receipt during rollback"
+                )
+            if receipt_path.is_file():
+                receipt_path.unlink()
+            for relative, backup in backups.items():
+                target = in_source(
+                    source, relative, "Xcode 27 Seatbelt rollback", must_exist=True
+                )
+                prepare_source.atomic_copy(backup, target)
+                if sha256_file(target) != XCODE27_SEATBELT_FILES[relative][
+                    "pre_sha256"
+                ]:
+                    raise PipelineError(
+                        "Xcode 27 Seatbelt rollback hash mismatch: {}".format(
+                            relative
+                        )
+                    )
+        except BaseException as rollback_error:
+            raise PipelineError(
+                "Xcode 27 Seatbelt fix failed and rollback failed; snapshot "
+                "retained at {}: original={!r}; rollback={!r}".format(
+                    snapshot_root, original_error, rollback_error
+                )
+            ) from original_error
+        shutil.rmtree(snapshot_root)
+        if isinstance(original_error, prepare_source.PreparationError):
+            raise PipelineError(str(original_error)) from original_error
+        raise
+    else:
+        shutil.rmtree(snapshot_root)
+    return {
+        "stage": "apply-xcode27-seatbelt-compat",
+        "applied": True,
+        "receipt": receipt_report,
+        "files": XCODE27_SEATBELT_FILES,
+        "upstream": XCODE27_SEATBELT_UPSTREAM,
+        "offline": True,
+        "network_operations": 0,
+        "build_executed": False,
+    }
+
+
 def preparation_contract(
     source, allow_reclaimed_arm=False, allow_missing_gn_compat=False
 ):
@@ -1349,6 +1584,18 @@ def slice_receipt_contract(source, out, architecture):
         raise PipelineError(
             "{} Xcode 27 compatibility receipt mismatch".format(architecture)
         )
+    seatbelt_receipt = in_source(
+        source,
+        XCODE27_SEATBELT_RECEIPT,
+        "Xcode 27 Seatbelt compatibility receipt",
+        must_exist=True,
+    )
+    if receipt.get(
+        "xcode27_seatbelt_compatibility_receipt_sha256"
+    ) != sha256_file(seatbelt_receipt):
+        raise PipelineError(
+            "{} Xcode 27 Seatbelt receipt mismatch".format(architecture)
+        )
     if receipt.get("ninja") != ninja_contract(source):
         raise PipelineError("{} Ninja provenance mismatch".format(architecture))
     return receipt_path, receipt
@@ -1543,6 +1790,9 @@ def build_plan(source, developer_dir, architecture):
     xcode27_path, _ = xcode27_compat_receipt_contract(
         source, developer_dir, required=True
     )
+    seatbelt_path, _ = xcode27_seatbelt_receipt_contract(
+        source, developer_dir, required=True
+    )
     tools = tool_paths(source)
     ninja = ninja_contract(source)
     if architecture == "arm64":
@@ -1584,6 +1834,10 @@ def build_plan(source, developer_dir, architecture):
             "path": str(xcode27_path),
             "sha256": sha256_file(xcode27_path),
         },
+        "xcode27_seatbelt_compatibility": {
+            "path": str(seatbelt_path),
+            "sha256": sha256_file(seatbelt_path),
+        },
     }
 
 
@@ -1609,6 +1863,17 @@ def execute_build(source, developer_dir, plan):
     if plan.get("xcode27_compatibility") != current_xcode27:
         raise PipelineError(
             "build plan Xcode 27 compatibility provenance changed before execution"
+        )
+    seatbelt_path, _ = xcode27_seatbelt_receipt_contract(
+        source, developer_dir, required=True
+    )
+    current_seatbelt = {
+        "path": str(seatbelt_path),
+        "sha256": sha256_file(seatbelt_path),
+    }
+    if plan.get("xcode27_seatbelt_compatibility") != current_seatbelt:
+        raise PipelineError(
+            "build plan Xcode 27 Seatbelt provenance changed before execution"
         )
     environment = safe_environment(
         source, developer_dir, build_ninja=Path(current_ninja["path"])
@@ -1636,6 +1901,9 @@ def execute_build(source, developer_dir, plan):
             in_source(source, PREPARATION_RECEIPT, "preparation receipt", must_exist=True)
         ),
         "xcode27_compatibility_receipt_sha256": current_xcode27["sha256"],
+        "xcode27_seatbelt_compatibility_receipt_sha256": current_seatbelt[
+            "sha256"
+        ],
         "tool_receipt_sha256": sha256_file(source.parent / TOOL_RECEIPT),
         "ninja": current_ninja,
         "sign_chrome_sha256": SIGN_CHROME_SHA256,
@@ -1940,6 +2208,7 @@ def parser():
         "bootstrap-tools",
         "apply-gn-compat",
         "apply-xcode27-compat",
+        "apply-xcode27-seatbelt-compat",
         "build-arm64",
         "stage-arm64",
         "build-x64",
@@ -1976,6 +2245,13 @@ def main(argv=None):
             plan = xcode27_compat_plan(source, developer_dir)
             result = (
                 execute_xcode27_compat(source, developer_dir, plan)
+                if args.execute
+                else plan
+            )
+        elif args.command == "apply-xcode27-seatbelt-compat":
+            plan = xcode27_seatbelt_plan(source, developer_dir)
+            result = (
+                execute_xcode27_seatbelt(source, developer_dir, plan)
                 if args.execute
                 else plan
             )

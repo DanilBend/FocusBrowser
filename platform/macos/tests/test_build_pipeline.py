@@ -332,6 +332,9 @@ class BuildPipelineTests(unittest.TestCase):
         xcode27 = self.source / build_pipeline.XCODE27_COMPAT_RECEIPT
         if not xcode27.exists():
             self.write_json(xcode27, {"fixture": True})
+        seatbelt = self.source / build_pipeline.XCODE27_SEATBELT_RECEIPT
+        if not seatbelt.exists():
+            self.write_json(seatbelt, {"fixture": True})
         return self.write_json(
             out / build_pipeline.SLICE_RECEIPT_NAME,
             {
@@ -344,6 +347,9 @@ class BuildPipelineTests(unittest.TestCase):
                 "preparation_receipt_sha256": build_pipeline.sha256_file(prep),
                 "xcode27_compatibility_receipt_sha256": (
                     build_pipeline.sha256_file(xcode27)
+                ),
+                "xcode27_seatbelt_compatibility_receipt_sha256": (
+                    build_pipeline.sha256_file(seatbelt)
                 ),
                 "ninja": self.ninja_report,
                 "build_complete": True,
@@ -460,6 +466,94 @@ class BuildPipelineTests(unittest.TestCase):
 
         self.assertFalse(receipt.exists())
         self.assertEqual(files[relative]["pre_sha256"], build_pipeline.sha256_file(target))
+
+    def test_xcode27_seatbelt_patch_is_upstream_pinned_scoped_and_deletion_only(self):
+        patch = build_pipeline.XCODE27_SEATBELT_PATCH
+        self.assertEqual(
+            build_pipeline.XCODE27_SEATBELT_PATCH_SHA256,
+            build_pipeline.sha256_file(patch),
+        )
+        text = patch.read_text(encoding="utf-8")
+        self.assertEqual(
+            {"sandbox/mac/seatbelt.cc", "sandbox/mac/seatbelt.h"},
+            {
+                line.removeprefix("--- a/")
+                for line in text.splitlines()
+                if line.startswith("--- a/")
+            },
+        )
+        self.assertEqual(
+            1,
+            text.count(
+                "-const char* Seatbelt::kProfilePureComputation = "
+                "kSBXProfilePureComputation;"
+            ),
+        )
+        self.assertEqual(
+            1, text.count("-  static const char* kProfilePureComputation;")
+        )
+        self.assertFalse(
+            any(
+                line.startswith("+") and not line.startswith("+++")
+                for line in text.splitlines()
+            )
+        )
+        self.assertEqual(
+            "6c0a651f9cf91d07c87be8feba854a38a311aba6",
+            build_pipeline.XCODE27_SEATBELT_UPSTREAM["commit"],
+        )
+
+    def test_xcode27_seatbelt_execution_restores_both_files_on_failure(self):
+        patch = self.root / "fixture-seatbelt.patch"
+        patch.write_text("fixture\n", encoding="utf-8")
+        files = {}
+        targets = {}
+        for name in ("seatbelt.cc", "seatbelt.h"):
+            relative = "sandbox/mac/{}".format(name)
+            target = self.source / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            pre = ("pre {}\n".format(name)).encode("utf-8")
+            post = ("post {}\n".format(name)).encode("utf-8")
+            target.write_bytes(pre)
+            files[relative] = {
+                "pre_sha256": hashlib.sha256(pre).hexdigest(),
+                "post_sha256": hashlib.sha256(post).hexdigest(),
+            }
+            targets[relative] = (target, post)
+        receipt = self.source / build_pipeline.XCODE27_SEATBELT_RECEIPT
+        plan = {
+            "stage": "apply-xcode27-seatbelt-compat",
+            "source_root": str(self.source),
+            "receipt": str(receipt),
+        }
+
+        def fail_after_mutation(*_args, **_kwargs):
+            for target, post in targets.values():
+                target.write_bytes(post)
+            raise build_pipeline.prepare_source.PreparationError("forced Seatbelt failure")
+
+        with mock.patch.object(
+            build_pipeline, "XCODE27_SEATBELT_PATCH", patch
+        ), mock.patch.object(
+            build_pipeline, "XCODE27_SEATBELT_FILES", files
+        ), mock.patch.object(
+            build_pipeline, "xcode27_seatbelt_plan", return_value=plan
+        ), mock.patch.object(
+            build_pipeline, "require_free"
+        ), mock.patch.object(
+            build_pipeline.prepare_source,
+            "apply_patch_plan",
+            side_effect=fail_after_mutation,
+        ), self.assertRaisesRegex(build_pipeline.PipelineError, "forced Seatbelt failure"):
+            build_pipeline.execute_xcode27_seatbelt(
+                self.source, self.developer, plan
+            )
+
+        self.assertFalse(receipt.exists())
+        for relative, (target, _post) in targets.items():
+            self.assertEqual(
+                files[relative]["pre_sha256"], build_pipeline.sha256_file(target)
+            )
 
     def test_disabled_profiles_require_gn_compat_receipt(self):
         for relative in (
@@ -669,24 +763,32 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertTrue(receipt["hooks_complete"])
         self.assertFalse(receipt["build_executed"])
 
-    def test_build_plan_is_sequential_local_and_four_jobs(self):
+    def test_build_plan_is_sequential_local_and_ten_jobs(self):
         out = self.source / build_pipeline.ARM_OUT
         out.mkdir(parents=True, exist_ok=True)
         xcode27 = self.write_json(
             self.source / build_pipeline.XCODE27_COMPAT_RECEIPT,
             {"fixture": True},
         )
+        seatbelt = self.write_json(
+            self.source / build_pipeline.XCODE27_SEATBELT_RECEIPT,
+            {"fixture": True},
+        )
         with mock.patch.object(
             build_pipeline,
             "xcode27_compat_receipt_contract",
             return_value=(xcode27, {"fixture": True}),
+        ), mock.patch.object(
+            build_pipeline,
+            "xcode27_seatbelt_receipt_contract",
+            return_value=(seatbelt, {"fixture": True}),
         ):
             plan = build_pipeline.build_plan(
                 self.source, self.developer, "arm64"
             )
         self.assertEqual("build-arm64", plan["stage"])
         self.assertEqual(self.ninja_report, plan["ninja"])
-        self.assertEqual("-j4", plan["commands"][1][1])
+        self.assertEqual("-j10", plan["commands"][1][1])
         self.assertEqual(
             ["chrome", "chrome/installer/mac:copies"], plan["commands"][1][-2:]
         )
@@ -708,6 +810,10 @@ class BuildPipelineTests(unittest.TestCase):
             self.source / build_pipeline.XCODE27_COMPAT_RECEIPT,
             {"fixture": True},
         )
+        seatbelt = self.write_json(
+            self.source / build_pipeline.XCODE27_SEATBELT_RECEIPT,
+            {"fixture": True},
+        )
         plan = {
             "architecture": "arm64",
             "out": str(out),
@@ -717,6 +823,10 @@ class BuildPipelineTests(unittest.TestCase):
             "xcode27_compatibility": {
                 "path": str(xcode27),
                 "sha256": build_pipeline.sha256_file(xcode27),
+            },
+            "xcode27_seatbelt_compatibility": {
+                "path": str(seatbelt),
+                "sha256": build_pipeline.sha256_file(seatbelt),
             },
         }
         app_report = {
@@ -733,6 +843,10 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline,
             "xcode27_compat_receipt_contract",
             return_value=(xcode27, {"fixture": True}),
+        ), mock.patch.object(
+            build_pipeline,
+            "xcode27_seatbelt_receipt_contract",
+            return_value=(seatbelt, {"fixture": True}),
         ):
             report = build_pipeline.execute_build(
                 self.source, self.developer, plan
@@ -746,6 +860,10 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertEqual(
             build_pipeline.sha256_file(xcode27),
             receipt["xcode27_compatibility_receipt_sha256"],
+        )
+        self.assertEqual(
+            build_pipeline.sha256_file(seatbelt),
+            receipt["xcode27_seatbelt_compatibility_receipt_sha256"],
         )
 
     def test_stage_reclaims_only_exact_arm_output_after_verified_copy(self):

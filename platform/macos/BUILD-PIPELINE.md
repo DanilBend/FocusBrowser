@@ -19,7 +19,8 @@ is rejected.
 - Xcode: 27 beta 4 (`27A5228h`), macOS SDK 27.0
 - deployment target: macOS 12.0
 - slices: native `arm64`, then `x86_64`
-- local parallelism: `-j4` on the 16 GiB host
+- local parallelism: `-j10` on the 10-core, 16 GiB host, selected after live
+  memory-pressure checks
 - outputs: `chrome` and `chrome/installer/mac:copies`
 - remote execution, Siso, updater, and branded entitlements: disabled
 - signing: Chromium's generated nested signing workflow with ad-hoc identity
@@ -111,12 +112,18 @@ python3 platform/macos/build_pipeline.py apply-gn-compat \
 
 python3 platform/macos/build_pipeline.py apply-xcode27-compat \
   --source-root "$SRC" --developer-dir "$XCODE" --execute --json
+
+python3 platform/macos/build_pipeline.py apply-xcode27-seatbelt-compat \
+  --source-root "$SRC" --developer-dir "$XCODE" --execute --json
 ```
 
 The first command gates Chromium GN dependencies that are absent when the
 prepared profiles disable Safe Browsing and SwiftShader. The second applies
 Chromium upstream commit `f0ccfb5933f7daa9545159afbb35bdf8951efcc4`'s
-one-file `_Builtin_float` dependency fix for Xcode 27 explicit modules. Both
+one-file `_Builtin_float` dependency fix for Xcode 27 explicit modules. The
+third applies canonical Chromium commit
+`6c0a651f9cf91d07c87be8feba854a38a311aba6`, which removes the unused
+`kSBXProfilePureComputation` SDK dependency deleted by macOS SDK 27. All three
 commands are offline, hash-pinned, transactional, and publish immutable
 receipts only after the exact post-images are verified.
 
