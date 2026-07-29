@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for the offline macOS Chromium source preparer."""
 
+import contextlib
 import hashlib
 import io
 import json
@@ -1221,8 +1222,22 @@ class PrepareSourceTests(unittest.TestCase):
         source = self.root / "src"
         source.mkdir()
         calls = []
+        domain_plan = (
+            {
+                "listed": 3,
+                "regular": 2,
+                "expected_absent": 1,
+                "expected_absent_bytes": 10,
+                "expected_absent_sha256": "a" * 64,
+            },
+            b"regex\n",
+            b"one\ntwo\n",
+            "b" * 64,
+        )
         with mock.patch.object(
-            prepare_source, "validate_domain_targets", return_value=(Path("r"), Path("f"), 3)
+            prepare_source,
+            "validate_domain_targets",
+            return_value=domain_plan,
         ), mock.patch.object(
             prepare_source.domain_substitution,
             "apply_substitution",
@@ -1244,7 +1259,160 @@ class PrepareSourceTests(unittest.TestCase):
         ):
             report = prepare_source.apply_common_transformations(source, workers=1)
         self.assertEqual(["domain", "name", "i18n"], calls)
+        self.assertEqual(3, report["domain_targets"])
+        self.assertEqual(2, report["domain_regular_targets"])
+        self.assertEqual(1, report["domain_expected_absent_targets"])
         self.assertEqual(6, report["i18n_xtb_targets"])
+
+    def test_domain_targets_accept_only_exact_pinned_macos_absence(self):
+        source = self.root / "domain-source"
+        source.mkdir()
+        (source / "present.txt").write_text("present\n", encoding="utf-8")
+        regex_path = self.root / "domain-regex.list"
+        files_path = self.root / "domain-files.list"
+        regex_path.write_text("example\\.com#example.invalid\n", encoding="utf-8")
+        files_path.write_text("present.txt\nmissing.txt\n", encoding="utf-8")
+        missing_body = b"missing.txt\n"
+
+        constants = {
+            "DOMAIN_LIST_ENTRY_COUNT": 2,
+            "MACOS_DOMAIN_REGULAR_TARGET_COUNT": 1,
+            "MACOS_DOMAIN_MISSING_TARGET_COUNT": 1,
+            "MACOS_DOMAIN_MISSING_MANIFEST_BYTES": len(missing_body),
+            "MACOS_DOMAIN_MISSING_MANIFEST_SHA256": hashlib.sha256(
+                missing_body
+            ).hexdigest(),
+        }
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "_read_pinned_file_snapshot",
+                    side_effect=lambda *args: (
+                        (regex_path, regex_path.read_bytes())
+                        if "regex" in args[2]
+                        else (files_path, files_path.read_bytes())
+                    ),
+                )
+            )
+            for name, value in constants.items():
+                stack.enter_context(mock.patch.object(prepare_source, name, value))
+            report, _, _, _ = prepare_source.validate_domain_targets(source)
+            self.assertEqual(
+                {
+                    "listed": 2,
+                    "regular": 1,
+                    "expected_absent": 1,
+                    "expected_absent_bytes": len(missing_body),
+                    "expected_absent_sha256": hashlib.sha256(
+                        missing_body
+                    ).hexdigest(),
+                },
+                report,
+            )
+
+            (source / "missing.txt").write_text("unexpected\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                prepare_source.PreparationError, "inventory changed"
+            ):
+                prepare_source.validate_domain_targets(source)
+
+    def test_domain_targets_reject_unexpected_missing_and_symlink(self):
+        source = self.root / "domain-drift-source"
+        source.mkdir()
+        (source / "present.txt").write_text("present\n", encoding="utf-8")
+        regex_path = self.root / "drift-regex.list"
+        files_path = self.root / "drift-files.list"
+        regex_path.write_text("regex\n", encoding="utf-8")
+        files_path.write_text("present.txt\nmissing.txt\n", encoding="utf-8")
+        missing_body = b"missing.txt\n"
+        constants = {
+            "DOMAIN_LIST_ENTRY_COUNT": 2,
+            "MACOS_DOMAIN_REGULAR_TARGET_COUNT": 1,
+            "MACOS_DOMAIN_MISSING_TARGET_COUNT": 1,
+            "MACOS_DOMAIN_MISSING_MANIFEST_BYTES": len(missing_body),
+            "MACOS_DOMAIN_MISSING_MANIFEST_SHA256": hashlib.sha256(
+                missing_body
+            ).hexdigest(),
+        }
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "_read_pinned_file_snapshot",
+                    side_effect=lambda *args: (
+                        (regex_path, regex_path.read_bytes())
+                        if "regex" in args[2]
+                        else (files_path, files_path.read_bytes())
+                    ),
+                )
+            )
+            for name, value in constants.items():
+                stack.enter_context(mock.patch.object(prepare_source, name, value))
+
+            (source / "present.txt").unlink()
+            with self.assertRaisesRegex(
+                prepare_source.PreparationError, "inventory changed"
+            ):
+                prepare_source.validate_domain_targets(source)
+
+            (source / "present.txt").symlink_to("missing.txt")
+            with self.assertRaisesRegex(
+                prepare_source.PreparationError, "symlink"
+            ):
+                prepare_source.validate_domain_targets(source)
+
+    def test_common_transformations_reject_domain_skip_warning(self):
+        source = self.root / "domain-warning-source"
+        source.mkdir()
+        inventory = {
+            "listed": 1,
+            "regular": 1,
+            "expected_absent": 0,
+            "expected_absent_bytes": 0,
+            "expected_absent_sha256": hashlib.sha256(b"").hexdigest(),
+        }
+        plan = (inventory, b"regex\n", b"target.txt\n", "a" * 64)
+        logger = prepare_source.domain_substitution.get_logger()
+
+        def warn_about_skip(*args):
+            logger.warning("Skipping non-existent path: target.txt")
+
+        with mock.patch.object(
+            prepare_source, "validate_domain_targets", return_value=plan
+        ), mock.patch.object(
+            prepare_source.domain_substitution,
+            "apply_substitution",
+            side_effect=warn_about_skip,
+        ):
+            with self.assertRaisesRegex(
+                prepare_source.PreparationError, "skipped a validated target"
+            ):
+                prepare_source.apply_common_transformations(source)
+
+    def test_common_transformations_reject_domain_identity_race(self):
+        source = self.root / "domain-identity-source"
+        source.mkdir()
+        inventory = {
+            "listed": 1,
+            "regular": 1,
+            "expected_absent": 0,
+            "expected_absent_bytes": 0,
+            "expected_absent_sha256": hashlib.sha256(b"").hexdigest(),
+        }
+        before = (inventory, b"regex\n", b"target.txt\n", "a" * 64)
+        after = (inventory, b"regex\n", b"target.txt\n", "b" * 64)
+        with mock.patch.object(
+            prepare_source,
+            "validate_domain_targets",
+            side_effect=(before, after),
+        ), mock.patch.object(
+            prepare_source.domain_substitution, "apply_substitution"
+        ):
+            with self.assertRaisesRegex(
+                prepare_source.PreparationError, "changed during substitution"
+            ):
+                prepare_source.apply_common_transformations(source)
 
     def test_prepare_gates_source_and_cache_before_every_phase_and_after(self):
         source = self.root / "source"
@@ -1445,6 +1613,14 @@ class PrepareSourceTests(unittest.TestCase):
         )
         self.assertEqual(
             {
+                "records": 5293,
+                "sha256": "7225019e77e7eecddeaeaece124ccbf30957fa2a965b9020c56ec60d8664639e",
+                "status_counts": {" M": 1219, " D": 3189, "??": 885},
+            },
+            prepare_source.expected_resume_working_tree(324),
+        )
+        self.assertEqual(
+            {
                 "ownership_roots": list(prepare_source.DEPENDENCY_OWNERSHIP_ROOTS),
                 "regular_files": 13214,
                 "logical_bytes": 527367518,
@@ -1454,7 +1630,18 @@ class PrepareSourceTests(unittest.TestCase):
             },
             prepare_source.expected_resume_dependency_tree(138),
         )
-        for value in (0, 97, 99, 137, 139, 324):
+        self.assertEqual(
+            {
+                "ownership_roots": list(prepare_source.DEPENDENCY_OWNERSHIP_ROOTS),
+                "regular_files": 13217,
+                "logical_bytes": 527368134,
+                "sha256": "b6d7bc835bed4516a353590dc51da263acb2fa92a8970c35e8353856d6c35eeb",
+                "installed_symlinks": 0,
+                "installed_special_files": 0,
+            },
+            prepare_source.expected_resume_dependency_tree(324),
+        )
+        for value in (0, 97, 99, 137, 139, 323, 325):
             with self.subTest(value=value), self.assertRaisesRegex(
                 prepare_source.PreparationError, "only audited"
             ):
@@ -1538,6 +1725,401 @@ class PrepareSourceTests(unittest.TestCase):
         self.assertEqual(138, prefix["last_position"])
         self.assertEqual(186, execution["patches_applied_this_run"])
 
+    def test_checkpoint_324_full_prefix_and_receipt_execution_validate(self):
+        repository = self.root / "full-prefix-repository"
+        patch_root = repository / "patches"
+        patch_root.mkdir(parents=True)
+        patch_plan = []
+        for position in range(1, 325):
+            path = patch_root / "{:03d}.patch".format(position)
+            path.write_text("# fixture {}\n".format(position), encoding="utf-8")
+            patch_plan.append(path)
+
+        source = self.root / "full-prefix-boundary"
+        source.mkdir()
+        (source / "value.txt").write_text("after-324\n", encoding="utf-8")
+        patch_plan[-1].write_text(
+            "--- a/value.txt\n+++ b/value.txt\n"
+            "@@ -1 +1 @@\n-before-324\n+after-324\n",
+            encoding="utf-8",
+        )
+        prepare_source.check_patch_boundary(source, patch_plan[-1], reverse=True)
+
+        with mock.patch.object(prepare_source, "REPO_ROOT", repository.resolve()):
+            prefix = prepare_source.patch_slice_inventory(patch_plan, 0, 324)
+            execution = {
+                "mode": "resume_exact_prefix",
+                "initial_applied_patch_count": 324,
+                "patches_applied_this_run": 0,
+                "total_patches": 324,
+                "resume_checkpoint": {
+                    "git_head": prepare_source.ACQUISITION_CHROMIUM_COMMIT,
+                    "working_tree": prepare_source.expected_resume_working_tree(324),
+                    "ignored_tree": (
+                        prepare_source.expected_ignored_working_tree_inventory()
+                    ),
+                    "dependency_tree": (
+                        prepare_source.expected_resume_dependency_tree(324)
+                    ),
+                    "pruning": {
+                        "manifest_sha256": prepare_source.PRUNING_LIST_SHA256,
+                        "listed_files": prepare_source.PRUNING_ENTRY_COUNT,
+                        "all_targets_absent": True,
+                        "absent_files": prepare_source.PRUNING_ENTRY_COUNT,
+                        "symlink_targets": 0,
+                    },
+                    "applied_prefix": prefix,
+                    "last_applied_patch": {
+                        "position": 324,
+                        "path": str(patch_plan[-1]),
+                        "sha256": prepare_source.sha256_file(patch_plan[-1]),
+                        "reverse_applicable": True,
+                    },
+                    "next_patch": None,
+                },
+            }
+            with mock.patch.object(
+                prepare_source, "build_patch_plan", return_value=patch_plan
+            ):
+                self.assertEqual(
+                    execution,
+                    prepare_source.validate_preparation_execution_report(execution),
+                )
+                tampered = json.loads(json.dumps(execution))
+                tampered["resume_checkpoint"]["next_patch"] = {
+                    "position": 325,
+                    "path": "impossible.patch",
+                    "sha256": "0" * 64,
+                    "forward_applicable": True,
+                }
+                with self.assertRaisesRegex(
+                    prepare_source.PreparationError, "next patch"
+                ):
+                    prepare_source.validate_preparation_execution_report(tampered)
+        self.assertEqual(324, prefix["count"])
+        self.assertEqual(1, prefix["first_position"])
+        self.assertEqual(324, prefix["last_position"])
+        self.assertEqual(0, execution["patches_applied_this_run"])
+
+    def test_checkpoint_324_preflight_rejects_completion_artifacts(self):
+        source = self.root / "artifact-source"
+        cache = self.root / "artifact-cache"
+        source.mkdir()
+        cache.mkdir()
+        args_plan = OrderedDict(
+            (
+                ("arm64", ("out/Arm", "arm\n")),
+                ("x64", ("out/X64", "x64\n")),
+            )
+        )
+        artifacts = (
+            (prepare_source.PREPARATION_RECEIPT, "receipt already exists"),
+            ("out/Arm/args.gn", "args.gn already exists"),
+            (prepare_source.ONBOARDING_STRINGS_OUTPUT, "strings already exist"),
+        )
+        with mock.patch.object(
+            prepare_source.focus_macos,
+            "resolve_source_root",
+            return_value=(source.resolve(), prepare_source.focus_macos.PINNED_CHROMIUM_VERSION),
+        ), mock.patch.object(
+            prepare_source, "validate_acquisition_marker", return_value={}
+        ), mock.patch.object(
+            prepare_source, "validate_tool_bootstrap_marker", return_value={}
+        ), mock.patch.object(
+            prepare_source,
+            "validate_pinned_git_head",
+            return_value=prepare_source.ACQUISITION_CHROMIUM_COMMIT,
+        ), mock.patch.object(
+            prepare_source.focus_macos, "validate_repository_contract", return_value={}
+        ), mock.patch.object(
+            prepare_source, "validate_dependency_manifest", return_value=OrderedDict()
+        ), mock.patch.object(
+            prepare_source,
+            "validate_offline_cache",
+            return_value=(cache.resolve(), []),
+        ), mock.patch.object(
+            prepare_source, "validate_dependency_cache_marker", return_value={}
+        ), mock.patch.object(
+            prepare_source, "args_gn_plan", return_value=args_plan
+        ):
+            for relative, message in artifacts:
+                artifact = source / relative
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                artifact.write_text("unexpected\n", encoding="utf-8")
+                with self.subTest(relative=relative), self.assertRaisesRegex(
+                    prepare_source.PreparationError, message
+                ):
+                    prepare_source.resume_preflight_exact(source, cache, 324)
+                artifact.unlink()
+
+    def test_checkpoint_324_preflight_has_only_last_reverse_boundary(self):
+        repository = self.root / "preflight-repository"
+        patch_root = repository / "patches"
+        source = self.root / "preflight-source"
+        cache = self.root / "preflight-cache"
+        patch_root.mkdir(parents=True)
+        (source / "chrome").mkdir(parents=True)
+        cache.mkdir()
+        (source / "chrome/VERSION").write_text("MAJOR=150\n", encoding="utf-8")
+        patch_plan = []
+        for position in range(1, 325):
+            path = patch_root / "{:03d}.patch".format(position)
+            path.write_text("# fixture {}\n".format(position), encoding="utf-8")
+            patch_plan.append(path)
+        expected_working = prepare_source.expected_resume_working_tree(324)
+        expected_ignored = prepare_source.expected_ignored_working_tree_inventory()
+        expected_dependency = prepare_source.expected_resume_dependency_tree(324)
+        pruning = {
+            "manifest_sha256": prepare_source.PRUNING_LIST_SHA256,
+            "listed_files": prepare_source.PRUNING_ENTRY_COUNT,
+            "all_targets_absent": True,
+            "absent_files": prepare_source.PRUNING_ENTRY_COUNT,
+            "symlink_targets": 0,
+        }
+        repository_report = {
+            "shared_series": {"planned_entries": 321},
+            "platform_patches": [{}, {}, {}],
+        }
+        args_plan = OrderedDict(
+            (
+                ("arm64", ("out/Arm", "arm\n")),
+                ("x64", ("out/X64", "x64\n")),
+            )
+        )
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(prepare_source, "REPO_ROOT", repository.resolve())
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source.focus_macos,
+                    "resolve_source_root",
+                    return_value=(
+                        source.resolve(),
+                        prepare_source.focus_macos.PINNED_CHROMIUM_VERSION,
+                    ),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "validate_acquisition_marker", return_value={}
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "validate_tool_bootstrap_marker", return_value={}
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "validate_pinned_git_head",
+                    return_value=prepare_source.ACQUISITION_CHROMIUM_COMMIT,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source.focus_macos,
+                    "validate_repository_contract",
+                    return_value=repository_report,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "validate_dependency_manifest",
+                    return_value=OrderedDict(),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "validate_offline_cache",
+                    return_value=(cache.resolve(), []),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "validate_dependency_cache_marker", return_value={}
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source.focus_version, "check_existing_version"
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "installed_dependency_tree",
+                    return_value=expected_dependency,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "validate_completed_pruning", return_value=pruning
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "working_tree_inventory",
+                    return_value=expected_working,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "ignored_working_tree_inventory",
+                    return_value=expected_ignored,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "build_patch_plan", return_value=patch_plan
+                )
+            )
+            stack.enter_context(mock.patch.object(prepare_source, "validate_patch_tool"))
+            boundary = stack.enter_context(
+                mock.patch.object(prepare_source, "check_patch_boundary")
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "build_overlay_plan", return_value=([], [], [])
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(prepare_source, "parse_resource_plan", return_value=[])
+            )
+            stack.enter_context(
+                mock.patch.object(prepare_source.focus_macos, "validate_icns_asset")
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "expected_upstream_source_contracts", return_value={}
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "args_gn_plan", return_value=args_plan
+                )
+            )
+            report = prepare_source.resume_preflight_exact(source, cache, 324)
+
+        boundary.assert_called_once_with(source.resolve(), patch_plan[-1], reverse=True)
+        execution = report["preparation_execution"]
+        self.assertEqual(0, execution["patches_applied_this_run"])
+        self.assertIsNone(execution["resume_checkpoint"]["next_patch"])
+        self.assertEqual(324, execution["resume_checkpoint"]["applied_prefix"]["count"])
+        self.assertEqual(0, report["patches"]["remaining"])
+
+    def test_checkpoint_324_mutation_skips_empty_patch_batch(self):
+        source = self.root / "mutation-source"
+        cache = self.root / "mutation-cache"
+        source.mkdir()
+        cache.mkdir()
+        expected_working = prepare_source.expected_resume_working_tree(324)
+        expected_ignored = prepare_source.expected_ignored_working_tree_inventory()
+        preflight_report = {
+            "source_root": str(source),
+            "preparation_execution": {
+                "initial_applied_patch_count": 324,
+                "resume_checkpoint": {
+                    "working_tree": expected_working,
+                    "ignored_tree": expected_ignored,
+                },
+            },
+            "pruning": {},
+            "dependency_install": {},
+        }
+        patch_plan = [self.root / "{:03d}.patch".format(value) for value in range(1, 325)]
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "resume_preflight_exact",
+                    return_value=preflight_report,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "build_patch_plan", return_value=patch_plan
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "working_tree_inventory",
+                    return_value=expected_working,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "ignored_working_tree_inventory",
+                    return_value=expected_ignored,
+                )
+            )
+            boundary = stack.enter_context(
+                mock.patch.object(prepare_source, "check_patch_boundary")
+            )
+            patch_apply = stack.enter_context(
+                mock.patch.object(prepare_source, "apply_patch_plan")
+            )
+            transformations = stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "apply_common_transformations", return_value={}
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "build_overlay_plan", return_value=([], [], [])
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(prepare_source, "apply_overlay", return_value={})
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source,
+                    "append_focus_version_once",
+                    return_value="1.0.5.0",
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(prepare_source, "parse_resource_plan", return_value=[])
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "copy_common_resources", return_value=0
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "install_focus_icns", return_value="icon"
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(prepare_source, "write_args_gn", return_value={})
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "generate_onboarding_strings", return_value={}
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    prepare_source, "write_preparation_receipt", return_value={}
+                )
+            )
+            report = prepare_source.resume_patch_failure(source, cache, 324)
+
+        boundary.assert_not_called()
+        patch_apply.assert_not_called()
+        transformations.assert_called_once_with(source, workers=None)
+        self.assertEqual(0, report["patches_applied_this_run"])
+        self.assertEqual("remaining 0-patch batch", report["disk_gates"][1]["phase"])
+
     def test_resume_preflight_cli_is_read_only_and_needs_exact_count(self):
         report = {"resume_ready": True}
         with mock.patch.object(
@@ -1598,6 +2180,12 @@ class PrepareSourceTests(unittest.TestCase):
                     base_position=base_position,
                     total_patches=324,
                 )
+        self.assertEqual(
+            [],
+            prepare_source.apply_patch_plan(
+                source, [], base_position=324, total_patches=324
+            ),
+        )
 
     def test_preparation_execution_report_rejects_count_drift(self):
         report = prepare_source.fresh_preparation_execution_report()

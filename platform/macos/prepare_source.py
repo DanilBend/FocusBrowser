@@ -10,6 +10,7 @@ import argparse
 import configparser
 import hashlib
 import json
+import logging
 import os
 import platform
 import posixpath
@@ -46,6 +47,13 @@ DEPS_INI = REPO_ROOT / "focus-chromium" / "deps.ini"
 DEPS_INI_SHA256 = "158806c990d70174a6f401ae488d03246d867e0272b753bfbcb7c1757633b9ea"
 DOMAIN_REGEX_SHA256 = "cf128b0f182692dbf90553aaedd0d3ebc1982076dd94ad94f344bb3677455d2c"
 DOMAIN_LIST_SHA256 = "e9661a754d4c15778cecabc1e9cbbb40a3876de5018d9d49d3d98e998acffd1d"
+DOMAIN_LIST_ENTRY_COUNT = 17297
+MACOS_DOMAIN_REGULAR_TARGET_COUNT = 17139
+MACOS_DOMAIN_MISSING_TARGET_COUNT = 158
+MACOS_DOMAIN_MISSING_MANIFEST_BYTES = 8222
+MACOS_DOMAIN_MISSING_MANIFEST_SHA256 = (
+    "3fa3788f6857ea3a4dcdcad9585ef2cf1925c66de2de28e717be72f9210b999c"
+)
 RESOURCE_LIST_SHA256 = "e1d545a3dfd4e91f561a3800524f7e098665dfcf35f8619735e09412906c713a"
 GENERATE_LIST_SHA256 = "02da891cb3b867e9bc806b9ab3b433fd3d8c01024fac41d5fa60c78d11b6aca9"
 RESOURCE_BODY_COUNT = 60
@@ -272,9 +280,20 @@ RESUME_SECOND_DEPENDENCY_LOGICAL_BYTES = 527367518
 RESUME_SECOND_DEPENDENCY_SHA256 = (
     "38ebf05e4f17c4e8c2545bf9a93b446c0e182404d8e86617f0f811b60d8da0db"
 )
+RESUME_FULL_PATCH_SET_APPLIED = 324
+RESUME_FULL_PATCH_SET_STATUS_COUNT = 5293
+RESUME_FULL_PATCH_SET_STATUS_SHA256 = (
+    "7225019e77e7eecddeaeaece124ccbf30957fa2a965b9020c56ec60d8664639e"
+)
+RESUME_FULL_DEPENDENCY_REGULAR_FILES = 13217
+RESUME_FULL_DEPENDENCY_LOGICAL_BYTES = 527368134
+RESUME_FULL_DEPENDENCY_SHA256 = (
+    "b6d7bc835bed4516a353590dc51da263acb2fa92a8970c35e8353856d6c35eeb"
+)
 RESUME_AUDITED_PATCH_CHECKPOINTS = (
     RESUME_PATCH_FAILURE_APPLIED,
     RESUME_SECOND_PATCH_FAILURE_APPLIED,
+    RESUME_FULL_PATCH_SET_APPLIED,
 )
 RESUME_PATCH_FAILURE_IGNORED_COUNT = 23138
 RESUME_PATCH_FAILURE_IGNORED_REGULAR_FILES = 23080
@@ -1441,6 +1460,12 @@ def expected_resume_working_tree(applied_patches):
             "sha256": RESUME_SECOND_PATCH_FAILURE_STATUS_SHA256,
             "status_counts": {" D": 3189, " M": 766, "??": 825},
         }
+    if applied_patches == RESUME_FULL_PATCH_SET_APPLIED:
+        return {
+            "records": RESUME_FULL_PATCH_SET_STATUS_COUNT,
+            "sha256": RESUME_FULL_PATCH_SET_STATUS_SHA256,
+            "status_counts": {" M": 1219, " D": 3189, "??": 885},
+        }
     raise PreparationError(
         "resume accepts only audited patch checkpoints: {}".format(
             ", ".join(str(value) for value in RESUME_AUDITED_PATCH_CHECKPOINTS)
@@ -1458,6 +1483,15 @@ def expected_resume_dependency_tree(applied_patches):
             "regular_files": RESUME_SECOND_DEPENDENCY_REGULAR_FILES,
             "logical_bytes": RESUME_SECOND_DEPENDENCY_LOGICAL_BYTES,
             "sha256": RESUME_SECOND_DEPENDENCY_SHA256,
+            "installed_symlinks": 0,
+            "installed_special_files": 0,
+        }
+    if applied_patches == RESUME_FULL_PATCH_SET_APPLIED:
+        return {
+            "ownership_roots": list(DEPENDENCY_OWNERSHIP_ROOTS),
+            "regular_files": RESUME_FULL_DEPENDENCY_REGULAR_FILES,
+            "logical_bytes": RESUME_FULL_DEPENDENCY_LOGICAL_BYTES,
+            "sha256": RESUME_FULL_DEPENDENCY_SHA256,
             "installed_symlinks": 0,
             "installed_special_files": 0,
         }
@@ -2136,27 +2170,134 @@ def _validate_pinned_file(path, expected_hash, label):
     return path
 
 
+def _read_pinned_file_snapshot(path, expected_hash, label):
+    """Read one pinned regular file through a no-follow descriptor."""
+    path = _validate_pinned_file(path, expected_hash, label)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise PreparationError("could not safely open {}: {}".format(label, path)) from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise PreparationError("{} is not regular: {}".format(label, path))
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            body = stream.read()
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    identity_before = (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_size,
+        before.st_mtime_ns,
+    )
+    identity_after = (
+        after.st_dev,
+        after.st_ino,
+        after.st_mode,
+        after.st_size,
+        after.st_mtime_ns,
+    )
+    if identity_before != identity_after or len(body) != before.st_size:
+        raise PreparationError("{} changed while being read".format(label))
+    actual_hash = hashlib.sha256(body).hexdigest()
+    if actual_hash != expected_hash:
+        raise PreparationError(
+            "{} snapshot hash mismatch: expected {}, got {}".format(
+                label, expected_hash, actual_hash
+            )
+        )
+    return path, body
+
+
 def validate_domain_targets(source_root):
-    """Require every listed domain-substitution input to be an in-tree file."""
-    regex_path = _validate_pinned_file(
+    """Validate the exact macOS domain input and host-conditioned absence sets."""
+    source_root = require_real_directory(source_root, "Chromium source")
+    _, regex_body = _read_pinned_file_snapshot(
         REPO_ROOT / "focus-chromium" / "domain_regex.list",
         DOMAIN_REGEX_SHA256,
         "domain regex list",
     )
-    files_path = _validate_pinned_file(
+    _, files_body = _read_pinned_file_snapshot(
         REPO_ROOT / "focus-chromium" / "domain_substitution.list",
         DOMAIN_LIST_SHA256,
         "domain substitution list",
     )
-    count = 0
-    for number, line in enumerate(files_path.read_text(encoding="utf-8").splitlines(), 1):
-        value = line.strip()
-        if not value:
+    try:
+        lines = files_body.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise PreparationError("domain substitution list is not UTF-8") from exc
+    listed = []
+    regular = []
+    identity_lines = []
+    regular_count = 0
+    missing = []
+    for number, line in enumerate(lines, 1):
+        if not line:
             continue
-        relative = safe_relative(value, "domain list line {}".format(number))
-        require_regular_in_tree(source_root, relative, "domain target")
-        count += 1
-    return regex_path, files_path, count
+        relative = safe_relative(line, "domain list line {}".format(number))
+        listed.append(relative)
+        target = reject_symlink_ancestors(
+            source_root, relative, include_leaf=False
+        )
+        try:
+            metadata = target.lstat()
+        except FileNotFoundError:
+            missing.append(relative)
+            continue
+        if stat.S_ISLNK(metadata.st_mode):
+            raise PreparationError("domain target is a symlink: {}".format(target))
+        if stat.S_ISREG(metadata.st_mode):
+            regular.append(relative)
+            identity_lines.append(
+                "{}\t{}\t{}\n".format(relative, metadata.st_dev, metadata.st_ino)
+            )
+            regular_count += 1
+        else:
+            raise PreparationError(
+                "domain target is neither a regular file nor absent: {}".format(
+                    target
+                )
+            )
+
+    if len(listed) != DOMAIN_LIST_ENTRY_COUNT or len(set(listed)) != len(listed):
+        raise PreparationError("domain target list count or uniqueness changed")
+    missing_body = "".join("{}\n".format(path) for path in missing).encode("utf-8")
+    missing_sha256 = hashlib.sha256(missing_body).hexdigest()
+    regular_body = "".join("{}\n".format(path) for path in regular).encode("utf-8")
+    identity_sha256 = hashlib.sha256(
+        "".join(identity_lines).encode("utf-8")
+    ).hexdigest()
+    if (
+        regular_count != MACOS_DOMAIN_REGULAR_TARGET_COUNT
+        or len(missing) != MACOS_DOMAIN_MISSING_TARGET_COUNT
+        or len(missing_body) != MACOS_DOMAIN_MISSING_MANIFEST_BYTES
+        or missing_sha256 != MACOS_DOMAIN_MISSING_MANIFEST_SHA256
+    ):
+        raise PreparationError(
+            "macOS domain target inventory changed: regular={}, missing={}, "
+            "missing_bytes={}, missing_sha256={}".format(
+                regular_count,
+                len(missing),
+                len(missing_body),
+                missing_sha256,
+            )
+        )
+    return (
+        {
+            "listed": len(listed),
+            "regular": regular_count,
+            "expected_absent": len(missing),
+            "expected_absent_bytes": len(missing_body),
+            "expected_absent_sha256": missing_sha256,
+        },
+        regex_body,
+        regular_body,
+        identity_sha256,
+    )
 
 
 def validate_name_targets(source_root):
@@ -2191,8 +2332,51 @@ def validate_i18n_targets(source_root):
 
 def apply_common_transformations(source_root, workers=None):
     """Run the shared domain, browser-name, and translation operations."""
-    regex_path, files_path, domain_count = validate_domain_targets(source_root)
-    domain_substitution.apply_substitution(regex_path, files_path, Path(source_root), None)
+    source_root = require_real_directory(source_root, "Chromium source")
+    (
+        domain_inventory,
+        regex_body,
+        regular_body,
+        identity_before,
+    ) = validate_domain_targets(source_root)
+    domain_warnings = []
+
+    class DomainWarningCollector(logging.Handler):
+        def emit(self, record):
+            domain_warnings.append(record.getMessage())
+
+    with tempfile.TemporaryDirectory(prefix="focus-domain-substitution-") as temporary:
+        temporary_root = Path(temporary)
+        regex_path = temporary_root / "domain_regex.list"
+        files_path = temporary_root / "domain_substitution.list"
+        for path, body in ((regex_path, regex_body), (files_path, regular_body)):
+            with path.open("xb") as stream:
+                stream.write(body)
+                stream.flush()
+                os.fchmod(stream.fileno(), 0o400)
+                os.fsync(stream.fileno())
+        collector = DomainWarningCollector(level=logging.WARNING)
+        logger = domain_substitution.get_logger()
+        previous_logger_level = logger.level
+        if previous_logger_level > logging.WARNING:
+            logger.setLevel(logging.WARNING)
+        logger.addHandler(collector)
+        try:
+            domain_substitution.apply_substitution(
+                regex_path, files_path, source_root, None
+            )
+        finally:
+            logger.removeHandler(collector)
+            logger.setLevel(previous_logger_level)
+    if domain_warnings:
+        raise PreparationError(
+            "domain substitution skipped a validated target: {}".format(
+                domain_warnings[0]
+            )
+        )
+    domain_inventory_after, _, _, identity_after = validate_domain_targets(source_root)
+    if domain_inventory_after != domain_inventory or identity_after != identity_before:
+        raise PreparationError("domain target inventory changed during substitution")
     name_count = validate_name_targets(source_root)
     name_substitution.replacement_sanity()
     name_substitution.do_substitution(
@@ -2204,7 +2388,13 @@ def apply_common_transformations(source_root, workers=None):
     i18n_source_count, xtb_count = validate_i18n_targets(source_root)
     i18n_apply.apply_translations(Path(source_root))
     return {
-        "domain_targets": domain_count,
+        "domain_targets": domain_inventory["listed"],
+        "domain_regular_targets": domain_inventory["regular"],
+        "domain_expected_absent_targets": domain_inventory["expected_absent"],
+        "domain_expected_absent_bytes": domain_inventory["expected_absent_bytes"],
+        "domain_expected_absent_sha256": domain_inventory[
+            "expected_absent_sha256"
+        ],
         "name_candidates": name_count,
         "i18n_source_entries": i18n_source_count,
         "i18n_xtb_targets": xtb_count,
@@ -2554,12 +2744,14 @@ def validate_preparation_execution_report(report):
         "sha256": sha256_file(patch_plan[initial_applied - 1]),
         "reverse_applicable": True,
     }
-    expected_next = {
-        "position": initial_applied + 1,
-        "path": str(patch_plan[initial_applied]),
-        "sha256": sha256_file(patch_plan[initial_applied]),
-        "forward_applicable": True,
-    }
+    expected_next = None
+    if initial_applied < len(patch_plan):
+        expected_next = {
+            "position": initial_applied + 1,
+            "path": str(patch_plan[initial_applied]),
+            "sha256": sha256_file(patch_plan[initial_applied]),
+            "forward_applicable": True,
+        }
     if checkpoint["last_applied_patch"] != expected_last:
         raise PreparationError("resume checkpoint last patch mismatch")
     if checkpoint["next_patch"] != expected_next:
@@ -2920,9 +3112,14 @@ def resume_preflight_exact(source_root, cache_root, applied_patches):
     patch_plan = build_patch_plan()
     validate_patch_tool()
     last_path = patch_plan[applied_patches - 1]
-    next_path = patch_plan[applied_patches]
+    next_path = (
+        patch_plan[applied_patches]
+        if applied_patches < len(patch_plan)
+        else None
+    )
     check_patch_boundary(source, last_path, reverse=True)
-    check_patch_boundary(source, next_path, reverse=False)
+    if next_path is not None:
+        check_patch_boundary(source, next_path, reverse=False)
     checkpoint = {
         "git_head": git_head,
         "working_tree": working_tree,
@@ -2938,12 +3135,16 @@ def resume_preflight_exact(source_root, cache_root, applied_patches):
             "sha256": sha256_file(last_path),
             "reverse_applicable": True,
         },
-        "next_patch": {
-            "position": applied_patches + 1,
-            "path": str(next_path),
-            "sha256": sha256_file(next_path),
-            "forward_applicable": True,
-        },
+        "next_patch": (
+            {
+                "position": applied_patches + 1,
+                "path": str(next_path),
+                "sha256": sha256_file(next_path),
+                "forward_applicable": True,
+            }
+            if next_path is not None
+            else None
+        ),
     }
     execution = {
         "mode": "resume_exact_prefix",
@@ -3024,16 +3225,18 @@ def resume_patch_failure(source_root, cache_root, applied_patches, workers=None)
         "ignored_tree"
     ]:
         raise PreparationError("ignored tree changed after resume preflight")
-    check_patch_boundary(
-        source, patch_plan[initial_applied], reverse=False
-    )
-    gate("remaining {}-patch batch".format(len(patch_plan) - initial_applied))
-    applied = apply_patch_plan(
-        source,
-        patch_plan[initial_applied:],
-        base_position=initial_applied,
-        total_patches=len(patch_plan),
-    )
+    remaining_plan = patch_plan[initial_applied:]
+    if remaining_plan:
+        check_patch_boundary(source, remaining_plan[0], reverse=False)
+    gate("remaining {}-patch batch".format(len(remaining_plan)))
+    applied = []
+    if remaining_plan:
+        applied = apply_patch_plan(
+            source,
+            remaining_plan,
+            base_position=initial_applied,
+            total_patches=len(patch_plan),
+        )
     gate("domain/name/i18n transformations")
     transformations = apply_common_transformations(source, workers=workers)
     overlay_files, cleanup_paths, _ = build_overlay_plan()
