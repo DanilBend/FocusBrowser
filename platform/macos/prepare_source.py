@@ -262,6 +262,20 @@ RESUME_PATCH_FAILURE_STATUS_COUNT = 4673
 RESUME_PATCH_FAILURE_STATUS_SHA256 = (
     "5619bcc2e95f36fd8177f6f23c9bc0784812bd94bf784af7f92bf540867568bb"
 )
+RESUME_SECOND_PATCH_FAILURE_APPLIED = 138
+RESUME_SECOND_PATCH_FAILURE_STATUS_COUNT = 4780
+RESUME_SECOND_PATCH_FAILURE_STATUS_SHA256 = (
+    "0a1830a8cf89875186597053e6c12130aef2b8b32e43ceed060830b94a43f2b5"
+)
+RESUME_SECOND_DEPENDENCY_REGULAR_FILES = 13214
+RESUME_SECOND_DEPENDENCY_LOGICAL_BYTES = 527367518
+RESUME_SECOND_DEPENDENCY_SHA256 = (
+    "38ebf05e4f17c4e8c2545bf9a93b446c0e182404d8e86617f0f811b60d8da0db"
+)
+RESUME_AUDITED_PATCH_CHECKPOINTS = (
+    RESUME_PATCH_FAILURE_APPLIED,
+    RESUME_SECOND_PATCH_FAILURE_APPLIED,
+)
 RESUME_PATCH_FAILURE_IGNORED_COUNT = 23138
 RESUME_PATCH_FAILURE_IGNORED_REGULAR_FILES = 23080
 RESUME_PATCH_FAILURE_IGNORED_SYMLINKS = 58
@@ -1413,6 +1427,44 @@ def expected_installed_dependency_tree_report():
     }
 
 
+def expected_resume_working_tree(applied_patches):
+    """Return the exact canonical Git status checkpoint for an audited prefix."""
+    if applied_patches == RESUME_PATCH_FAILURE_APPLIED:
+        return {
+            "records": RESUME_PATCH_FAILURE_STATUS_COUNT,
+            "sha256": RESUME_PATCH_FAILURE_STATUS_SHA256,
+            "status_counts": {" D": 3189, " M": 680, "??": 804},
+        }
+    if applied_patches == RESUME_SECOND_PATCH_FAILURE_APPLIED:
+        return {
+            "records": RESUME_SECOND_PATCH_FAILURE_STATUS_COUNT,
+            "sha256": RESUME_SECOND_PATCH_FAILURE_STATUS_SHA256,
+            "status_counts": {" D": 3189, " M": 766, "??": 825},
+        }
+    raise PreparationError(
+        "resume accepts only audited patch checkpoints: {}".format(
+            ", ".join(str(value) for value in RESUME_AUDITED_PATCH_CHECKPOINTS)
+        )
+    )
+
+
+def expected_resume_dependency_tree(applied_patches):
+    """Return the exact dependency-root tree at an audited patch prefix."""
+    if applied_patches == RESUME_PATCH_FAILURE_APPLIED:
+        return expected_installed_dependency_tree_report()
+    if applied_patches == RESUME_SECOND_PATCH_FAILURE_APPLIED:
+        return {
+            "ownership_roots": list(DEPENDENCY_OWNERSHIP_ROOTS),
+            "regular_files": RESUME_SECOND_DEPENDENCY_REGULAR_FILES,
+            "logical_bytes": RESUME_SECOND_DEPENDENCY_LOGICAL_BYTES,
+            "sha256": RESUME_SECOND_DEPENDENCY_SHA256,
+            "installed_symlinks": 0,
+            "installed_special_files": 0,
+        }
+    expected_resume_working_tree(applied_patches)
+    raise AssertionError("unreachable")
+
+
 def merge_staged_dependencies(source_root, stage_root, contracts):
     """Install a deterministic archive tree into initially empty owned roots."""
     source_root = require_real_directory(source_root, "Chromium source")
@@ -1896,10 +1948,11 @@ def validate_patch_tool(patch_bin=SYSTEM_PATCH):
 
 
 def patch_command(patch_bin, patch_path, source_root, check_only):
-    """Build one noninteractive BSD patch command with exact fuzz zero."""
+    """Build a noninteractive BSD patch command with fuzz zero and deletions."""
     command = [
         str(patch_bin),
         "-f",
+        "-E",
         "-p1",
         "-F",
         "0",
@@ -1917,6 +1970,37 @@ def patch_command(patch_bin, patch_path, source_root, check_only):
     return command
 
 
+def patch_has_paired_explicit_deletion(patch_path):
+    """Return whether a real unified-diff file header deletes a path."""
+    patch_path = Path(patch_path)
+    if patch_path.is_symlink() or not patch_path.is_file():
+        raise PreparationError("patch is not a regular file: {}".format(patch_path))
+    try:
+        operations = focus_macos.scan_common_patch_path_operations(patch_path)
+    except focus_macos.ContractError as exc:
+        raise PreparationError("invalid patch path operations: {}".format(exc)) from exc
+    return bool(operations["deletions"])
+
+
+def git_reverse_check_command(source_root, patch_path):
+    """Build the fixed read-only Git check needed for explicit deletions."""
+    if (
+        SYSTEM_GIT.is_symlink()
+        or not SYSTEM_GIT.is_file()
+        or not os.access(SYSTEM_GIT, os.X_OK)
+    ):
+        raise PreparationError("fixed system Git is unavailable")
+    return [
+        str(SYSTEM_GIT),
+        "-C",
+        str(source_root),
+        "apply",
+        "--check",
+        "--reverse",
+        str(patch_path),
+    ]
+
+
 def check_patch_boundary(
     source_root,
     patch_path,
@@ -1926,19 +2010,33 @@ def check_patch_boundary(
 ):
     """Check one exact forward/reverse patch boundary without modifying source."""
     source_root = require_real_directory(source_root, "Chromium source")
-    patch_bin = validate_patch_tool(patch_bin)
     patch_path = Path(patch_path)
     if patch_path.is_symlink() or not patch_path.is_file():
         raise PreparationError("patch is not a regular file: {}".format(patch_path))
-    command = patch_command(patch_bin, patch_path, source_root, True)
-    if reverse:
-        command.insert(2, "-R")
-    result = runner(
-        command,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    use_git_reverse = reverse and patch_has_paired_explicit_deletion(patch_path)
+    if use_git_reverse:
+        # Apple BSD patch cannot reverse-check a deleted old path once -E has
+        # removed it. Fixed Git provides the required read-only boundary check.
+        command = git_reverse_check_command(source_root, patch_path)
+    else:
+        patch_bin = validate_patch_tool(patch_bin)
+        command = patch_command(patch_bin, patch_path, source_root, True)
+        if reverse:
+            command.insert(2, "-R")
+    run_arguments = {
+        "capture_output": True,
+        "text": True,
+        "check": False,
+    }
+    if use_git_reverse:
+        run_arguments.update(
+            {
+                "cwd": source_root,
+                "env": fixed_git_environment(),
+                "stdin": subprocess.DEVNULL,
+            }
+        )
+    result = runner(command, **run_arguments)
     if result.returncode != 0:
         direction = "reverse" if reverse else "forward"
         detail = (result.stderr or result.stdout).strip()[-2000:]
@@ -2408,11 +2506,11 @@ def validate_preparation_execution_report(report):
         if report != fresh_preparation_execution_report():
             raise PreparationError("fresh preparation execution report mismatch")
         return report
+    initial_applied = report["initial_applied_patch_count"]
     if (
         report["mode"] != "resume_exact_prefix"
-        or report["initial_applied_patch_count"] != RESUME_PATCH_FAILURE_APPLIED
-        or report["patches_applied_this_run"]
-        != 324 - RESUME_PATCH_FAILURE_APPLIED
+        or initial_applied not in RESUME_AUDITED_PATCH_CHECKPOINTS
+        or report["patches_applied_this_run"] != 324 - initial_applied
     ):
         raise PreparationError("resume preparation execution report mismatch")
     checkpoint = report["resume_checkpoint"]
@@ -2430,15 +2528,11 @@ def validate_preparation_execution_report(report):
     if checkpoint["git_head"] != ACQUISITION_CHROMIUM_COMMIT:
         raise PreparationError("resume checkpoint Git HEAD mismatch")
     working_tree = checkpoint["working_tree"]
-    if (
-        not isinstance(working_tree, dict)
-        or working_tree.get("records") != RESUME_PATCH_FAILURE_STATUS_COUNT
-        or working_tree.get("sha256") != RESUME_PATCH_FAILURE_STATUS_SHA256
-    ):
+    if working_tree != expected_resume_working_tree(initial_applied):
         raise PreparationError("resume checkpoint working-tree mismatch")
     if checkpoint["ignored_tree"] != expected_ignored_working_tree_inventory():
         raise PreparationError("resume checkpoint ignored-tree mismatch")
-    expected_tree = expected_installed_dependency_tree_report()
+    expected_tree = expected_resume_dependency_tree(initial_applied)
     if checkpoint["dependency_tree"] != expected_tree:
         raise PreparationError("resume checkpoint dependency tree mismatch")
     if checkpoint["pruning"] != {
@@ -2451,19 +2545,19 @@ def validate_preparation_execution_report(report):
         raise PreparationError("resume checkpoint pruning mismatch")
     patch_plan = build_patch_plan()
     if checkpoint["applied_prefix"] != patch_slice_inventory(
-        patch_plan, 0, RESUME_PATCH_FAILURE_APPLIED
+        patch_plan, 0, initial_applied
     ):
         raise PreparationError("resume checkpoint patch-prefix mismatch")
     expected_last = {
-        "position": RESUME_PATCH_FAILURE_APPLIED,
-        "path": str(patch_plan[RESUME_PATCH_FAILURE_APPLIED - 1]),
-        "sha256": sha256_file(patch_plan[RESUME_PATCH_FAILURE_APPLIED - 1]),
+        "position": initial_applied,
+        "path": str(patch_plan[initial_applied - 1]),
+        "sha256": sha256_file(patch_plan[initial_applied - 1]),
         "reverse_applicable": True,
     }
     expected_next = {
-        "position": RESUME_PATCH_FAILURE_APPLIED + 1,
-        "path": str(patch_plan[RESUME_PATCH_FAILURE_APPLIED]),
-        "sha256": sha256_file(patch_plan[RESUME_PATCH_FAILURE_APPLIED]),
+        "position": initial_applied + 1,
+        "path": str(patch_plan[initial_applied]),
+        "sha256": sha256_file(patch_plan[initial_applied]),
         "forward_applicable": True,
     }
     if checkpoint["last_applied_patch"] != expected_last:
@@ -2761,14 +2855,11 @@ def preflight(source_root, cache_root):
     }
 
 
-def resume_preflight_98(source_root, cache_root, applied_patches):
-    """Prove the one known patch-98 failure checkpoint without mutating source."""
-    if type(applied_patches) is not int or applied_patches != RESUME_PATCH_FAILURE_APPLIED:
-        raise PreparationError(
-            "resume accepts only the pinned {}-patch checkpoint".format(
-                RESUME_PATCH_FAILURE_APPLIED
-            )
-        )
+def resume_preflight_exact(source_root, cache_root, applied_patches):
+    """Prove one exact audited patch-failure checkpoint without mutation."""
+    if type(applied_patches) is not int:
+        raise PreparationError("resume patch checkpoint must be an integer")
+    expected_working_tree = expected_resume_working_tree(applied_patches)
     source_input = Path(source_root).expanduser()
     if source_input.is_symlink():
         raise PreparationError("Chromium source argument must not be a symlink")
@@ -2799,19 +2890,16 @@ def resume_preflight_98(source_root, cache_root, applied_patches):
     )
 
     dependency_tree = installed_dependency_tree(source, contracts)
-    expected_tree = expected_installed_dependency_tree_report()
+    expected_tree = expected_resume_dependency_tree(applied_patches)
     if dependency_tree != expected_tree:
         raise PreparationError("installed dependency tree changed before resume")
     pruning_checkpoint = validate_completed_pruning(source)
     working_tree = working_tree_inventory(source)
-    if (
-        working_tree["records"] != RESUME_PATCH_FAILURE_STATUS_COUNT
-        or working_tree["sha256"] != RESUME_PATCH_FAILURE_STATUS_SHA256
-    ):
+    if working_tree != expected_working_tree:
         raise PreparationError(
             "resume working-tree checkpoint mismatch: expected {}/{}, got {}/{}".format(
-                RESUME_PATCH_FAILURE_STATUS_COUNT,
-                RESUME_PATCH_FAILURE_STATUS_SHA256,
+                expected_working_tree["records"],
+                expected_working_tree["sha256"],
                 working_tree["records"],
                 working_tree["sha256"],
             )
@@ -2831,8 +2919,8 @@ def resume_preflight_98(source_root, cache_root, applied_patches):
 
     patch_plan = build_patch_plan()
     validate_patch_tool()
-    last_path = patch_plan[RESUME_PATCH_FAILURE_APPLIED - 1]
-    next_path = patch_plan[RESUME_PATCH_FAILURE_APPLIED]
+    last_path = patch_plan[applied_patches - 1]
+    next_path = patch_plan[applied_patches]
     check_patch_boundary(source, last_path, reverse=True)
     check_patch_boundary(source, next_path, reverse=False)
     checkpoint = {
@@ -2842,16 +2930,16 @@ def resume_preflight_98(source_root, cache_root, applied_patches):
         "dependency_tree": dependency_tree,
         "pruning": pruning_checkpoint,
         "applied_prefix": patch_slice_inventory(
-            patch_plan, 0, RESUME_PATCH_FAILURE_APPLIED
+            patch_plan, 0, applied_patches
         ),
         "last_applied_patch": {
-            "position": RESUME_PATCH_FAILURE_APPLIED,
+            "position": applied_patches,
             "path": str(last_path),
             "sha256": sha256_file(last_path),
             "reverse_applicable": True,
         },
         "next_patch": {
-            "position": RESUME_PATCH_FAILURE_APPLIED + 1,
+            "position": applied_patches + 1,
             "path": str(next_path),
             "sha256": sha256_file(next_path),
             "forward_applicable": True,
@@ -2859,8 +2947,8 @@ def resume_preflight_98(source_root, cache_root, applied_patches):
     }
     execution = {
         "mode": "resume_exact_prefix",
-        "initial_applied_patch_count": RESUME_PATCH_FAILURE_APPLIED,
-        "patches_applied_this_run": len(patch_plan) - RESUME_PATCH_FAILURE_APPLIED,
+        "initial_applied_patch_count": applied_patches,
+        "patches_applied_this_run": len(patch_plan) - applied_patches,
         "total_patches": len(patch_plan),
         "resume_checkpoint": checkpoint,
     }
@@ -2894,8 +2982,8 @@ def resume_preflight_98(source_root, cache_root, applied_patches):
             "common_filtered": repository["shared_series"]["planned_entries"],
             "platform": len(repository["platform_patches"]),
             "total": len(patch_plan),
-            "initially_applied": RESUME_PATCH_FAILURE_APPLIED,
-            "remaining": len(patch_plan) - RESUME_PATCH_FAILURE_APPLIED,
+            "initially_applied": applied_patches,
+            "remaining": len(patch_plan) - applied_patches,
         },
         "preparation_execution": execution,
         "overlay_files": len(overlay_files),
@@ -2910,8 +2998,8 @@ def resume_preflight_98(source_root, cache_root, applied_patches):
 
 
 def resume_patch_failure(source_root, cache_root, applied_patches, workers=None):
-    """Continue only the exact, fully audited patch-98 preparation failure."""
-    report = resume_preflight_98(source_root, cache_root, applied_patches)
+    """Continue only an exact, fully audited patch preparation failure."""
+    report = resume_preflight_exact(source_root, cache_root, applied_patches)
     source = Path(report["source_root"])
     cache = require_real_directory(cache_root, "offline cache")
     watched_filesystems = (source, cache)
@@ -2923,6 +3011,9 @@ def resume_patch_failure(source_root, cache_root, applied_patches, workers=None)
 
     gate("resume checkpoint revalidation")
     patch_plan = build_patch_plan()
+    initial_applied = report["preparation_execution"][
+        "initial_applied_patch_count"
+    ]
     current_inventory = working_tree_inventory(source)
     if current_inventory != report["preparation_execution"]["resume_checkpoint"][
         "working_tree"
@@ -2934,13 +3025,13 @@ def resume_patch_failure(source_root, cache_root, applied_patches, workers=None)
     ]:
         raise PreparationError("ignored tree changed after resume preflight")
     check_patch_boundary(
-        source, patch_plan[RESUME_PATCH_FAILURE_APPLIED], reverse=False
+        source, patch_plan[initial_applied], reverse=False
     )
-    gate("remaining 226-patch batch")
+    gate("remaining {}-patch batch".format(len(patch_plan) - initial_applied))
     applied = apply_patch_plan(
         source,
-        patch_plan[RESUME_PATCH_FAILURE_APPLIED:],
-        base_position=RESUME_PATCH_FAILURE_APPLIED,
+        patch_plan[initial_applied:],
+        base_position=initial_applied,
         total_patches=len(patch_plan),
     )
     gate("domain/name/i18n transformations")
@@ -3102,7 +3193,7 @@ def build_parser():
                 "--applied-patches",
                 required=True,
                 type=int,
-                help="must equal the single audited patch-failure checkpoint",
+                help="must equal an explicitly audited patch-failure checkpoint",
             )
     return parser
 
@@ -3128,7 +3219,7 @@ def main(argv=None):
             else:
                 report = prepare(args.source_root, args.cache, workers=args.workers)
         elif args.command == "resume-preflight":
-            report = resume_preflight_98(
+            report = resume_preflight_exact(
                 args.source_root, args.cache, args.applied_patches
             )
         else:

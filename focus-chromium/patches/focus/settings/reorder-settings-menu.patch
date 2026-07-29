@@ -22,9 +22,9 @@
 +          $i18n{appearanceBehaviorPageTitle}
 +          <cr-ripple></cr-ripple>
 +        </a>
-         <a role="menuitem" href="/privacy"
-             hidden="[[!pageVisibility_.privacy]]"
-             class="cr-nav-menu-item">
+         <a role="menuitem" id="autofill" href="/autofill"
+             on-click="onAutofillClick_"
+             class="cr-nav-menu-item"
 @@ -71,21 +78,6 @@
            $i18n{performancePageTitle}
            <cr-ripple></cr-ripple>

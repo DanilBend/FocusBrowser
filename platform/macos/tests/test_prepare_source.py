@@ -837,8 +837,24 @@ class PrepareSourceTests(unittest.TestCase):
         )
         self.assertEqual("/usr/bin/patch", command[0])
         self.assertIn("-C", command)
+        self.assertIn("-E", command)
         self.assertEqual("0", command[command.index("-F") + 1])
         self.assertNotIn("--ignore-whitespace", command)
+
+        patch = self.root / "reverse-command.patch"
+        patch.write_text("fixture\n", encoding="utf-8")
+        runner = mock.Mock(
+            return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        )
+        prepare_source.check_patch_boundary(
+            self.root, patch, reverse=True, runner=runner
+        )
+        reverse_command = runner.call_args.args[0]
+        self.assertEqual(str(prepare_source.SYSTEM_PATCH), reverse_command[0])
+        self.assertIn("-C", reverse_command)
+        self.assertIn("-R", reverse_command)
+        self.assertIn("-E", reverse_command)
+        self.assertNotIn("apply", reverse_command)
 
     def test_system_patch_applies_fixture_after_check_only_pass(self):
         source = self.root / "patch-src"
@@ -857,6 +873,105 @@ class PrepareSourceTests(unittest.TestCase):
         self.assertEqual([str(patch)], applied)
         self.assertEqual("new\n", (source / "example.txt").read_text(encoding="utf-8"))
         self.assertFalse((source / "example.txt.orig").exists())
+
+    def test_system_patch_full_delete_create_forward_topology(self):
+        source = self.root / "rename-src"
+        source.mkdir()
+        old = source / "old.txt"
+        new = source / "new.txt"
+        old.write_text("old first\nold second\n", encoding="utf-8")
+        patch = self.root / "delete-create.patch"
+        patch.write_text(
+            "--- a/old.txt\n"
+            "+++ /dev/null\n"
+            "@@ -1,2 +0,0 @@\n"
+            "-old first\n"
+            "-old second\n"
+            "--- /dev/null\n"
+            "+++ b/new.txt\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+new first\n"
+            "+new second\n",
+            encoding="utf-8",
+        )
+
+        prepare_source.check_patch_boundary(source, patch)
+        self.assertEqual("old first\nold second\n", old.read_text(encoding="utf-8"))
+        self.assertFalse(new.exists())
+
+        self.assertEqual(
+            [str(patch)], prepare_source.apply_patch_plan(source, [patch])
+        )
+        self.assertFalse(old.exists())
+        self.assertEqual("new first\nnew second\n", new.read_text(encoding="utf-8"))
+        reverse_runner = mock.Mock(side_effect=subprocess.run)
+        reverse = prepare_source.check_patch_boundary(
+            source, patch, reverse=True, runner=reverse_runner
+        )
+        self.assertEqual("reverse", reverse["direction"])
+        reverse_command = reverse_runner.call_args.args[0]
+        self.assertEqual(str(prepare_source.SYSTEM_GIT), reverse_command[0])
+        self.assertEqual("apply", reverse_command[3])
+        self.assertIn("--check", reverse_command)
+        self.assertIn("--reverse", reverse_command)
+        self.assertNotIn("--unsafe-paths", reverse_command)
+        self.assertFalse(old.exists())
+        self.assertEqual("new first\nnew second\n", new.read_text(encoding="utf-8"))
+
+    def test_explicit_deletion_detector_ignores_header_like_hunk_payload(self):
+        patch = self.root / "header-like-payload.patch"
+        patch.write_text(
+            "diff --git a/value.txt b/value.txt\n"
+            "--- a/value.txt\n"
+            "+++ b/value.txt\n"
+            "@@ -1 +1 @@\n"
+            "--- /dev/null\n"
+            "+++ /dev/null\n",
+            encoding="utf-8",
+        )
+        self.assertFalse(prepare_source.patch_has_paired_explicit_deletion(patch))
+
+    def test_git_reverse_handles_one_deletion_and_two_creations(self):
+        source = self.root / "uneven-delete-create-src"
+        source.mkdir()
+        old = source / "old.txt"
+        first = source / "first.txt"
+        second = source / "second.txt"
+        old.write_text("old\n", encoding="utf-8")
+        patch = self.root / "uneven-delete-create.patch"
+        patch.write_text(
+            "--- a/old.txt\n"
+            "+++ /dev/null\n"
+            "@@ -1 +0,0 @@\n"
+            "-old\n"
+            "--- /dev/null\n"
+            "+++ b/first.txt\n"
+            "@@ -0,0 +1 @@\n"
+            "+first\n"
+            "--- /dev/null\n"
+            "+++ b/second.txt\n"
+            "@@ -0,0 +1 @@\n"
+            "+second\n",
+            encoding="utf-8",
+        )
+
+        self.assertTrue(prepare_source.patch_has_paired_explicit_deletion(patch))
+        prepare_source.apply_patch_plan(source, [patch])
+        self.assertFalse(old.exists())
+        self.assertEqual("first\n", first.read_text(encoding="utf-8"))
+        self.assertEqual("second\n", second.read_text(encoding="utf-8"))
+
+        reverse_runner = mock.Mock(side_effect=subprocess.run)
+        prepare_source.check_patch_boundary(
+            source, patch, reverse=True, runner=reverse_runner
+        )
+        reverse_command = reverse_runner.call_args.args[0]
+        self.assertEqual(str(prepare_source.SYSTEM_GIT), reverse_command[0])
+        self.assertIn("--check", reverse_command)
+        self.assertIn("--reverse", reverse_command)
+        self.assertFalse(old.exists())
+        self.assertEqual("first\n", first.read_text(encoding="utf-8"))
+        self.assertEqual("second\n", second.read_text(encoding="utf-8"))
 
     def test_patch_failure_leaves_current_patch_unapplied(self):
         source = self.root / "patch-src"
@@ -1321,17 +1436,112 @@ class PrepareSourceTests(unittest.TestCase):
         self.assertEqual(1, ignored["symlinks"])
         self.assertEqual(hashlib.sha256(ignored_body).hexdigest(), ignored["sha256"])
 
-    def test_resume_accepts_only_the_single_audited_checkpoint(self):
-        for value in (0, 97, 99, 324):
+    def test_resume_accepts_only_explicitly_audited_checkpoints(self):
+        self.assertEqual(
+            4673, prepare_source.expected_resume_working_tree(98)["records"]
+        )
+        self.assertEqual(
+            4780, prepare_source.expected_resume_working_tree(138)["records"]
+        )
+        self.assertEqual(
+            {
+                "ownership_roots": list(prepare_source.DEPENDENCY_OWNERSHIP_ROOTS),
+                "regular_files": 13214,
+                "logical_bytes": 527367518,
+                "sha256": "38ebf05e4f17c4e8c2545bf9a93b446c0e182404d8e86617f0f811b60d8da0db",
+                "installed_symlinks": 0,
+                "installed_special_files": 0,
+            },
+            prepare_source.expected_resume_dependency_tree(138),
+        )
+        for value in (0, 97, 99, 137, 139, 324):
             with self.subTest(value=value), self.assertRaisesRegex(
-                prepare_source.PreparationError, "only the pinned"
+                prepare_source.PreparationError, "only audited"
             ):
-                prepare_source.resume_preflight_98(self.root, self.root, value)
+                prepare_source.resume_preflight_exact(self.root, self.root, value)
+
+    def test_checkpoint_138_prefix_boundaries_and_receipt_execution_validate(self):
+        repository = self.root / "focus-repository"
+        patch_root = repository / "patches"
+        patch_root.mkdir(parents=True)
+        patch_plan = []
+        for position in range(1, 325):
+            path = patch_root / "{:03d}.patch".format(position)
+            path.write_text("# fixture {}\n".format(position), encoding="utf-8")
+            patch_plan.append(path)
+
+        source = self.root / "boundary-source"
+        source.mkdir()
+        (source / "value.txt").write_text("after-138\n", encoding="utf-8")
+        patch_plan[137].write_text(
+            "--- a/value.txt\n+++ b/value.txt\n"
+            "@@ -1 +1 @@\n-before-138\n+after-138\n",
+            encoding="utf-8",
+        )
+        patch_plan[138].write_text(
+            "--- a/value.txt\n+++ b/value.txt\n"
+            "@@ -1 +1 @@\n-after-138\n+after-139\n",
+            encoding="utf-8",
+        )
+        prepare_source.check_patch_boundary(source, patch_plan[137], reverse=True)
+        prepare_source.check_patch_boundary(source, patch_plan[138], reverse=False)
+
+        with mock.patch.object(prepare_source, "REPO_ROOT", repository.resolve()):
+            prefix = prepare_source.patch_slice_inventory(patch_plan, 0, 138)
+            execution = {
+                "mode": "resume_exact_prefix",
+                "initial_applied_patch_count": 138,
+                "patches_applied_this_run": 186,
+                "total_patches": 324,
+                "resume_checkpoint": {
+                    "git_head": prepare_source.ACQUISITION_CHROMIUM_COMMIT,
+                    "working_tree": prepare_source.expected_resume_working_tree(138),
+                    "ignored_tree": (
+                        prepare_source.expected_ignored_working_tree_inventory()
+                    ),
+                    "dependency_tree": (
+                        prepare_source.expected_resume_dependency_tree(138)
+                    ),
+                    "pruning": {
+                        "manifest_sha256": prepare_source.PRUNING_LIST_SHA256,
+                        "listed_files": prepare_source.PRUNING_ENTRY_COUNT,
+                        "all_targets_absent": True,
+                        "absent_files": prepare_source.PRUNING_ENTRY_COUNT,
+                        "symlink_targets": 0,
+                    },
+                    "applied_prefix": prefix,
+                    "last_applied_patch": {
+                        "position": 138,
+                        "path": str(patch_plan[137]),
+                        "sha256": prepare_source.sha256_file(patch_plan[137]),
+                        "reverse_applicable": True,
+                    },
+                    "next_patch": {
+                        "position": 139,
+                        "path": str(patch_plan[138]),
+                        "sha256": prepare_source.sha256_file(patch_plan[138]),
+                        "forward_applicable": True,
+                    },
+                },
+            }
+            with mock.patch.object(
+                prepare_source, "build_patch_plan", return_value=patch_plan
+            ):
+                receipt = {"preparation_execution": execution}
+                self.assertEqual(
+                    execution,
+                    prepare_source.validate_preparation_execution_report(
+                        receipt["preparation_execution"]
+                    ),
+                )
+        self.assertEqual(138, prefix["count"])
+        self.assertEqual(138, prefix["last_position"])
+        self.assertEqual(186, execution["patches_applied_this_run"])
 
     def test_resume_preflight_cli_is_read_only_and_needs_exact_count(self):
         report = {"resume_ready": True}
         with mock.patch.object(
-            prepare_source, "resume_preflight_98", return_value=report
+            prepare_source, "resume_preflight_exact", return_value=report
         ) as preflight, mock.patch("sys.stdout", new=io.StringIO()):
             self.assertEqual(
                 0,
@@ -1377,10 +1587,17 @@ class PrepareSourceTests(unittest.TestCase):
             "--- a/example.txt\n+++ b/example.txt\n@@ -1 +1 @@\n-old\n+new\n",
             encoding="utf-8",
         )
-        with self.assertRaisesRegex(prepare_source.PreparationError, r"\(99/324\)"):
-            prepare_source.apply_patch_plan(
-                source, [patch], base_position=98, total_patches=324
-            )
+        for base_position, expected_position in ((98, 99), (138, 139)):
+            with self.subTest(base_position=base_position), self.assertRaisesRegex(
+                prepare_source.PreparationError,
+                r"\({}/324\)".format(expected_position),
+            ):
+                prepare_source.apply_patch_plan(
+                    source,
+                    [patch],
+                    base_position=base_position,
+                    total_patches=324,
+                )
 
     def test_preparation_execution_report_rejects_count_drift(self):
         report = prepare_source.fresh_preparation_execution_report()

@@ -195,7 +195,7 @@ REQUIRED_COMMON_PATCHES = (
     (
         "focus/core/ublock-setup-sources.patch",
         147,
-        "144d8c911352f5916a7182dc55c1e605a449f55178d39793d2526219326ee6e5",
+        "e55dfc9c7fdf773ec9ebdbb596238e11bc64e4828492a6feb4a39b8650a0a228",
     ),
     (
         "focus/core/ublock-install-as-component.patch",
@@ -210,7 +210,17 @@ REQUIRED_COMMON_PATCHES = (
     (
         "focus/core/ublock-focus-services.patch",
         150,
-        "1ae42d5e1757ef359a29058e67a6cdb1bc0755efabdc6e3c48f6e57ec1b2c084",
+        "edeb4f2cfd389d8763a88dcd083a36a26d6b8e954a1910037bbdf11228c1c72f",
+    ),
+    (
+        "focus/core/rename-focus-import-product-layer.patch",
+        245,
+        "85848e99aeea42d86a67954aac40716287835074edc54ef811b8d38c6cfd4ca4",
+    ),
+    (
+        "focus/core/rename-focus-import-internals.patch",
+        246,
+        "62bf40bac974b3e57c9c13913149dc62f57129a913eccfe8f0bd812a726e994e",
     ),
     (
         "focus/ui/ublock-show-in-settings.patch",
@@ -220,8 +230,95 @@ REQUIRED_COMMON_PATCHES = (
     (
         "focus/core/focusblock-native-service.patch",
         319,
-        "b03926e51ba69392f40146ad35d24a10a2c33aa78d9335bb37fddc12acf8e3b6",
+        "066950edec41399e3e59fc4fa1175a570595241de10aaa27871446e9049b2cfa",
     ),
+)
+
+PORTABLE_DELETE_CREATE_PAIRS = (
+    (
+        "focus/core/rename-focus-import-product-layer.patch",
+        "chrome/browser/ui/webui/settings/brave_import_data_handler.cc",
+        "chrome/browser/ui/webui/settings/focus_import_data_handler.cc",
+    ),
+    (
+        "focus/core/rename-focus-import-product-layer.patch",
+        "chrome/browser/ui/webui/settings/brave_import_data_handler.h",
+        "chrome/browser/ui/webui/settings/focus_import_data_handler.h",
+    ),
+    (
+        "focus/core/rename-focus-import-product-layer.patch",
+        "chrome/browser/ui/webui/settings/brave_importer_observer.cc",
+        "chrome/browser/ui/webui/settings/focus_importer_observer.cc",
+    ),
+    (
+        "focus/core/rename-focus-import-product-layer.patch",
+        "chrome/browser/ui/webui/settings/brave_importer_observer.h",
+        "chrome/browser/ui/webui/settings/focus_importer_observer.h",
+    ),
+    (
+        "focus/core/rename-focus-import-internals.patch",
+        "chrome/browser/importer/brave_external_process_importer_client.cc",
+        "chrome/browser/importer/focus_external_process_importer_client.cc",
+    ),
+    (
+        "focus/core/rename-focus-import-internals.patch",
+        "chrome/browser/importer/brave_external_process_importer_client.h",
+        "chrome/browser/importer/focus_external_process_importer_client.h",
+    ),
+    (
+        "focus/core/rename-focus-import-internals.patch",
+        "chrome/browser/importer/brave_external_process_importer_host.cc",
+        "chrome/browser/importer/focus_external_process_importer_host.cc",
+    ),
+    (
+        "focus/core/rename-focus-import-internals.patch",
+        "chrome/browser/importer/brave_external_process_importer_host.h",
+        "chrome/browser/importer/focus_external_process_importer_host.h",
+    ),
+    (
+        "focus/core/rename-focus-import-internals.patch",
+        "chrome/browser/importer/brave_in_process_importer_bridge.cc",
+        "chrome/browser/importer/focus_in_process_importer_bridge.cc",
+    ),
+    (
+        "focus/core/rename-focus-import-internals.patch",
+        "chrome/browser/importer/brave_in_process_importer_bridge.h",
+        "chrome/browser/importer/focus_in_process_importer_bridge.h",
+    ),
+    (
+        "focus/core/rename-focus-import-internals.patch",
+        "chrome/utility/importer/brave_external_process_importer_bridge.cc",
+        "chrome/utility/importer/focus_external_process_importer_bridge.cc",
+    ),
+    (
+        "focus/core/rename-focus-import-internals.patch",
+        "chrome/utility/importer/brave_external_process_importer_bridge.h",
+        "chrome/utility/importer/focus_external_process_importer_bridge.h",
+    ),
+    (
+        "focus/core/rename-focus-import-internals.patch",
+        "chrome/utility/importer/brave_profile_import_impl.cc",
+        "chrome/utility/importer/focus_profile_import_impl.cc",
+    ),
+    (
+        "focus/core/rename-focus-import-internals.patch",
+        "chrome/utility/importer/brave_profile_import_impl.h",
+        "chrome/utility/importer/focus_profile_import_impl.h",
+    ),
+    (
+        "focus/core/rename-focus-import-internals.patch",
+        "chrome/browser/ui/webui/settings/brave_full_disk_access_confirm_dialog_delegate.h",
+        "chrome/browser/ui/webui/settings/focus_full_disk_access_confirm_dialog_delegate.h",
+    ),
+    (
+        "focus/core/rename-focus-import-internals.patch",
+        "chrome/browser/ui/webui/settings/brave_full_disk_access_confirm_dialog_delegate_mac.mm",
+        "chrome/browser/ui/webui/settings/focus_full_disk_access_confirm_dialog_delegate_mac.mm",
+    ),
+)
+EXPECTED_PORTABLE_DELETE_CREATE_COUNT = 16
+EXPECTED_PORTABLE_DELETE_CREATE_SHA256 = (
+    "3278f2e891b0bf4465e69808d1950cceafed1ac037e00f079e46d69e79e9459f"
 )
 
 FOCUS_FEATURE_HASHES = {
@@ -365,11 +462,11 @@ PROTECTED_PATCH_PATTERN = re.compile(
 )
 EXPECTED_PROTECTED_PATCH_COUNT = 59
 EXPECTED_PROTECTED_PATCH_SHA256 = (
-    "7d6b2eb80652ba32a8f24e8f0686c132e88380b7a4fca085af753793808b3001"
+    "bdc173d31a8263ed58003b04ac41b0ae6e366b8303f2b2f5afb0a0030e68f99c"
 )
 EXPECTED_FULL_PATCH_BODY_COUNT = 321
 EXPECTED_FULL_PATCH_BODY_SHA256 = (
-    "86281ce7822db3e8880422ac5cdfc0b0ae46e43090663afa0f8060dc07ece9c2"
+    "21d5f5055ce57e70a41d028e0a4ee9660b458aae531f128877c48490e126d94e"
 )
 PROTECTED_OVERLAY_TARGETS = frozenset(
     set(PROTECTED_PATCH_TARGETS)
@@ -1268,6 +1365,176 @@ def validate_platform_patch_series():
     return report
 
 
+def scan_common_patch_path_operations(patch_path):
+    """Reject Git-only path operations that Apple BSD patch cannot realize."""
+    patch_path = Path(patch_path)
+    if patch_path.is_symlink() or not patch_path.is_file():
+        raise ContractError("common patch must be a regular file: {}".format(patch_path))
+    lines = patch_path.read_text(encoding="utf-8").splitlines()
+    hunk_header = re.compile(
+        r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$"
+    )
+    forbidden = (
+        "rename from ",
+        "rename to ",
+        "copy from ",
+        "copy to ",
+        "similarity index ",
+    )
+    deletions = []
+    creations = []
+    current_file = False
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith(forbidden):
+            raise ContractError(
+                "Git-only patch metadata is forbidden in {} at line {}".format(
+                    patch_path, index + 1
+                )
+            )
+        if line.startswith("@@ "):
+            if not current_file:
+                raise ContractError("common patch hunk appears before a file header")
+            match = hunk_header.fullmatch(line)
+            if not match:
+                raise ContractError(
+                    "invalid common patch hunk header in {} at line {}".format(
+                        patch_path, index + 1
+                    )
+                )
+            remaining_old = int(match.group(2) or "1")
+            remaining_new = int(match.group(4) or "1")
+            index += 1
+            while remaining_old or remaining_new:
+                if index >= len(lines):
+                    raise ContractError(
+                        "common patch hunk ended before its declared line counts"
+                    )
+                body_line = lines[index]
+                if body_line == r"\ No newline at end of file":
+                    index += 1
+                    continue
+                if body_line.startswith(" "):
+                    remaining_old -= 1
+                    remaining_new -= 1
+                elif body_line.startswith("-"):
+                    remaining_old -= 1
+                elif body_line.startswith("+"):
+                    remaining_new -= 1
+                else:
+                    raise ContractError(
+                        "invalid common patch hunk body in {} at line {}".format(
+                            patch_path, index + 1
+                        )
+                    )
+                if remaining_old < 0 or remaining_new < 0:
+                    raise ContractError(
+                        "common patch hunk exceeded its declared line counts"
+                    )
+                index += 1
+            while (
+                index < len(lines)
+                and lines[index] == r"\ No newline at end of file"
+            ):
+                index += 1
+            continue
+        if not line.startswith("--- "):
+            index += 1
+            continue
+        if index + 1 >= len(lines) or not lines[index + 1].startswith("+++ "):
+            raise ContractError(
+                "unpaired common patch header in {} at line {}".format(
+                    patch_path, index + 1
+                )
+            )
+        old_raw = line[4:].split("\t", 1)[0]
+        new_raw = lines[index + 1][4:].split("\t", 1)[0]
+        if '"' in old_raw or '"' in new_raw:
+            raise ContractError("quoted common patch paths are forbidden")
+        old_path = diff_header_path(line)
+        new_path = diff_header_path(lines[index + 1])
+        if old_path is not None and new_path is not None and old_path != new_path:
+            raise ContractError(
+                "common patch changes paths without /dev/null: {} -> {}".format(
+                    old_path, new_path
+                )
+            )
+        if old_path is not None and new_path is None:
+            deletions.append(old_path)
+        elif old_path is None and new_path is not None:
+            creations.append(new_path)
+        current_file = True
+        index += 2
+    return {"deletions": deletions, "creations": creations}
+
+
+def validate_common_patch_portability(entries, patch_root):
+    """Pin the 16 importer moves as BSD-portable full delete/create pairs."""
+    operations = {}
+    actual_deletions = []
+    for position, entry in enumerate(entries, 1):
+        patch_path = require_regular_tree_file(
+            patch_root, entry, "portable common patch"
+        )
+        report = scan_common_patch_path_operations(patch_path)
+        operations[entry] = report
+        actual_deletions.extend(
+            (position, entry, old_path) for old_path in report["deletions"]
+        )
+
+    expected_deletions = []
+    manifest_records = []
+    for entry, old_path, new_path in PORTABLE_DELETE_CREATE_PAIRS:
+        if entry not in entries:
+            raise ContractError("portable delete/create patch is absent: {}".format(entry))
+        position = entries.index(entry) + 1
+        expected_deletions.append((position, entry, old_path))
+        if new_path not in operations[entry]["creations"]:
+            raise ContractError(
+                "portable delete/create destination is absent: {}".format(new_path)
+            )
+        text = require_regular_tree_file(
+            patch_root, entry, "portable delete/create patch"
+        ).read_text(encoding="utf-8")
+        delete_marker = (
+            "diff --git a/{0} b/{0}\n"
+            "deleted file mode 100644\n"
+            "--- a/{0}\n"
+            "+++ /dev/null\n"
+        ).format(old_path)
+        create_marker = (
+            "diff --git a/{0} b/{0}\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/{0}\n"
+        ).format(new_path)
+        if text.count(delete_marker) != 1 or text.count(create_marker) != 1:
+            raise ContractError(
+                "portable delete/create marker mismatch: {} -> {}".format(
+                    old_path, new_path
+                )
+            )
+        manifest_records.append(
+            "{}\t{}\t{}\t{}\n".format(position, entry, old_path, new_path)
+        )
+
+    if actual_deletions != expected_deletions:
+        raise ContractError("explicit common patch deletion inventory changed")
+    manifest = "".join(manifest_records).encode("utf-8")
+    report = {
+        "pair_count": len(manifest_records),
+        "manifest_bytes": len(manifest),
+        "sha256": hashlib.sha256(manifest).hexdigest(),
+    }
+    if (
+        report["pair_count"] != EXPECTED_PORTABLE_DELETE_CREATE_COUNT
+        or report["sha256"] != EXPECTED_PORTABLE_DELETE_CREATE_SHA256
+    ):
+        raise ContractError("portable delete/create inventory changed")
+    return report
+
+
 def validate_common_series():
     """Pin the complete common patch graph and its filtered macOS order."""
     actual_series_hash = sha256_file(COMMON_SERIES)
@@ -1291,6 +1558,7 @@ def validate_common_series():
     patch_root = COMMON_SERIES.parent
     for entry in entries:
         require_regular_tree_file(patch_root, entry, "common patch target")
+    portability = validate_common_patch_portability(entries, patch_root)
 
     required = []
     for entry, expected_position, expected_hash in REQUIRED_COMMON_PATCHES:
@@ -1344,6 +1612,7 @@ def validate_common_series():
         "planned_entries": len(filtered),
         "filtered_order_sha256": filtered_hash,
         "required_patches": required,
+        "portable_delete_create": portability,
         "full_body_inventory": full_body_inventory,
         "protected_incognito_inventory": protected_inventory,
     }

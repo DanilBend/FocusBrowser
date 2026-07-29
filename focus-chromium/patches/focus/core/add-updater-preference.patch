@@ -67,9 +67,11 @@
    declare private isAdPrivacyAvailable_: boolean;
 --- a/chrome/browser/resources/settings/privacy_page/privacy_page.html
 +++ b/chrome/browser/resources/settings/privacy_page/privacy_page.html
-@@ -48,6 +48,13 @@
-         sub-label="$i18n{securityPageDescription}"
-         on-click="onSecurityPageClick_"
+@@ -49,8 +49,15 @@
+     <cr-link-row id="focusServicesLinkRow" start-icon="cr:chrome-product"
+         class="hr" label="$i18n{focusServicesTitle}"
+         sub-label="$i18n{focusServicesDescription}"
+         on-click="onFocusServicesPageClick_"
          role-description="$i18n{subpageArrowRoleDescription}"></cr-link-row>
 +    <template is="dom-if" if="[[focusUpdaterAvailable_]]">
 +      <settings-toggle-button id="focusBrowserUpdatesToggle" class="hr"
@@ -83,24 +85,30 @@
      </cr-toast>
 --- a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
 +++ b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
-@@ -17,6 +17,7 @@
+@@ -17,8 +17,9 @@
+ #include "build/branding_buildflags.h"
  #include "build/build_config.h"
  #include "build/buildflag.h"
  #include "chrome/browser/autofill/personal_data_manager_factory.h"
-+#include "chrome/browser/buildflags.h"
- #include "chrome/browser/browser_features.h"
  #include "chrome/browser/browser_process.h"
  #include "chrome/browser/browser_process_platform_part.h"
-@@ -2356,6 +2357,9 @@ void AddPrivacyStrings(content::WebUIDat
-   static constexpr webui::LocalizedString kLocalizedStrings[] = {
-       {"newBadgeLabel", IDS_NEW_BADGE},
-       {"privacyPageTitle", IDS_SETTINGS_PRIVACY},
-       {"privacyPageMore", IDS_SETTINGS_PRIVACY_MORE},
+ #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
++#include "chrome/browser/buildflags.h"
+ #include "chrome/browser/contextual_cueing/features.h"
+@@ -2367,10 +2368,13 @@ void AddPrivacyStrings(content::WebUIDat
+       {"focusOriginOverrideDescriptionWarning",
+         IDS_SETTINGS_FOCUS_SERVICES_OVERRIDE_DESCRIPTION_WARNING},
+       {"focusOriginOverrideLabel",
+         IDS_SETTINGS_FOCUS_SERVICES_OVERRIDE_ARIA_LABEL},
+       {"focusOriginOverrideInvalidOrigin",
+         IDS_SETTINGS_FOCUS_SERVICES_OVERRIDE_INVALID_ORIGIN},
 +      {"focusBrowserUpdatesLabel", IDS_SETTINGS_FOCUS_BROWSER_UPDATES},
 +      {"focusBrowserUpdatesDescription",
 +       IDS_SETTINGS_FOCUS_BROWSER_UPDATES_DESCRIPTION},
-       {"doNotTrack", IDS_SETTINGS_ENABLE_DO_NOT_TRACK},
-       {"doNotTrackDialogTitle", IDS_SETTINGS_ENABLE_DO_NOT_TRACK_DIALOG_TITLE},
+       {"advancedProtectionProgramTitle",
+        IDS_SETTINGS_ADVANCED_PROTECTION_PROGRAM},
+       {"advancedProtectionProgramDesc",
+        IDS_SETTINGS_ADVANCED_PROTECTION_PROGRAM_DESC},
 @@ -2636,6 +2640,14 @@ void AddPrivacyStrings(content::WebUIDat
         IDS_SETTINGS_SECURITY_JAVASCRIPT_GUARDRAILS_MANAGE_SITE_EXCEPTIONS_DESCRIPTION}};
    html_source->AddLocalizedStrings(kLocalizedStrings);

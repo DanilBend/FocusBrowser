@@ -220,6 +220,60 @@ class FocusMacPlannerTests(unittest.TestCase):
         full = report["full_body_inventory"]
         self.assertEqual(focus_macos.EXPECTED_FULL_PATCH_BODY_COUNT, full["count"])
         self.assertEqual(focus_macos.EXPECTED_FULL_PATCH_BODY_SHA256, full["sha256"])
+        portable = report["portable_delete_create"]
+        self.assertEqual(
+            focus_macos.EXPECTED_PORTABLE_DELETE_CREATE_COUNT,
+            portable["pair_count"],
+        )
+        self.assertEqual(
+            focus_macos.EXPECTED_PORTABLE_DELETE_CREATE_SHA256,
+            portable["sha256"],
+        )
+        self.assertEqual(
+            245,
+            required[
+                "focus/core/rename-focus-import-product-layer.patch"
+            ]["position"],
+        )
+        self.assertEqual(
+            246,
+            required["focus/core/rename-focus-import-internals.patch"]["position"],
+        )
+
+    def test_common_patch_portability_rejects_git_only_rename_metadata(self):
+        patch = Path(self.temporary.name) / "raw-git-rename.patch"
+        patch.write_text(
+            "diff --git a/old.txt b/new.txt\n"
+            "similarity index 50%\n"
+            "rename from old.txt\n"
+            "rename to new.txt\n"
+            "--- a/old.txt\n"
+            "+++ b/new.txt\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            focus_macos.ContractError, "Git-only patch metadata"
+        ):
+            focus_macos.scan_common_patch_path_operations(patch)
+
+    def test_common_patch_portability_ignores_header_like_hunk_payload(self):
+        patch = Path(self.temporary.name) / "header-like-payload.patch"
+        patch.write_text(
+            "diff --git a/value.txt b/value.txt\n"
+            "--- a/value.txt\n"
+            "+++ b/value.txt\n"
+            "@@ -1 +1 @@\n"
+            "--- old marker\n"
+            "+++ new marker\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            {"deletions": [], "creations": []},
+            focus_macos.scan_common_patch_path_operations(patch),
+        )
 
     def test_i18n_catalogs_have_semantic_ru_en_contracts(self):
         report = focus_macos.validate_i18n_catalogs()
