@@ -480,7 +480,16 @@ def validate_offline_cache(cache_root, contracts=None):
 
 
 def _stripped_archive_path(name, prefix, label):
-    normalized = safe_relative(name.rstrip("/"), label)
+    raw = name.rstrip("/")
+    # Reproducible tar tools conventionally prefix every member with exactly
+    # "./" and include a root directory marker "./". Normalize only those
+    # leading current-directory components before applying the strict path
+    # grammar; absolute paths and any ".." remain forbidden.
+    while raw.startswith("./"):
+        raw = raw[2:]
+    if raw in ("", "."):
+        return None
+    normalized = safe_relative(raw, label)
     pure = PurePosixPath(normalized)
     if prefix is None:
         return pure
@@ -521,7 +530,7 @@ def inspect_archive(archive, contract):
                         "ZIP member is not a regular file: {}".format(member.filename)
                     )
                 if relative is None:
-                    continue
+                    raise PreparationError("ZIP regular file resolves to archive root")
                 value = relative.as_posix()
                 if value in seen:
                     raise PreparationError("duplicate archive destination: {}".format(value))
@@ -539,7 +548,7 @@ def inspect_archive(archive, contract):
                     )
                 relative = _stripped_archive_path(member.name, prefix, "tar member")
                 if relative is None:
-                    continue
+                    raise PreparationError("tar regular file resolves to archive root")
                 value = relative.as_posix()
                 if value in seen:
                     raise PreparationError("duplicate archive destination: {}".format(value))

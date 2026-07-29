@@ -371,6 +371,29 @@ class PrepareSourceTests(unittest.TestCase):
         )
         self.assertEqual("file.txt", entries[0][0])
 
+    def test_tar_inspection_accepts_conventional_dot_slash_root(self):
+        archive = self.root / "dot-root.tar.gz"
+        with tarfile.open(archive, "w:gz") as stream:
+            directory = tarfile.TarInfo("./")
+            directory.type = tarfile.DIRTYPE
+            stream.addfile(directory)
+            payload = b"safe"
+            info = tarfile.TarInfo("./folder/file.txt")
+            info.size = len(payload)
+            info.mode = 0o644
+            stream.addfile(info, io.BytesIO(payload))
+        entries = prepare_source.inspect_archive(
+            archive, {"kind": "tar", "strip_leading_dirs": None}
+        )
+        self.assertEqual("folder/file.txt", entries[0][0])
+
+    def test_dot_slash_normalization_does_not_allow_parent_traversal(self):
+        archive = self.make_tar(members=[("./../escape", b"bad")])
+        with self.assertRaises(prepare_source.PreparationError):
+            prepare_source.inspect_archive(
+                archive, {"kind": "tar", "strip_leading_dirs": None}
+            )
+
     def test_zip_inspection_rejects_traversal(self):
         archive = self.make_zip(members=[("../escape", b"bad")])
         with self.assertRaises(prepare_source.PreparationError):
