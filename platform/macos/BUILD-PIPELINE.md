@@ -68,8 +68,18 @@ forbidden after preparation.
 
 ### 2. Prepare the source offline
 
-Use `prepare_source.py` with the verified three-archive dependency cache. Its
-preflight is read-only; mutation requires `--confirm-source-mutation`.
+Use `prepare_source.py` with the verified ten-archive dependency cache. It
+contains the three shared Focus inputs plus pinned Chromium Node, general Node
+modules, and Darwin arm64/x86_64 esbuild/Rollup packages; no package-manager
+lifecycle scripts run. Its preflight is read-only; mutation requires
+`--confirm-source-mutation`.
+
+Preparation requires the exact ten-entry cache marker, starts from six absent
+or completely empty dependency-owned roots, and proves the merged union as
+13,212 regular files / 527,357,876 bytes with its pinned inventory SHA-256.
+After the reviewed patches and translations, it runs the pinned native Node
+and `generate-i18n.mts` twice offline, requires byte-identical `strings.ts`,
+and records the final transformed dependency-tree hash for every later stage.
 
 ```sh
 python3 platform/macos/prepare_source.py preflight \
@@ -82,6 +92,13 @@ python3 platform/macos/prepare_source.py prepare \
 
 Hooks must never be rerun after this point. Preparation writes both exact
 `args.gn` files and `out/FocusMacPreparation.json`.
+
+The low-space checkout intentionally omits Chromium's top-level Ninja CIPD.
+Build stages instead verify the same pinned Ninja 1.12.1 already present under
+Dawn (host architecture, executable SHA-256, CIPD package/version/instance),
+place its directory after `depot_tools` in the child-only PATH, and scrub
+compiler, Node/npm, Python, Rust, GN/GYP, Ninja, SDK, and dynamic-loader
+override variables from the inherited build environment.
 
 ### 3. Build and preserve arm64
 

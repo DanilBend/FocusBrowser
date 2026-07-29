@@ -12,7 +12,9 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import plistlib
+import re
 import shutil
 import signal
 import subprocess
@@ -51,6 +53,61 @@ RECLAIM_RECEIPT = STAGING_ROOT + "/arm64-reclaim-complete.json"
 UNSIGNED_ROOT = "out/FocusMacUnsignedUniversal"
 SIGNED_ROOT = "out/FocusMacSignedUniversal"
 SLICE_RECEIPT_NAME = "FocusMacBuild.json"
+
+DAWN_NINJA_RELATIVE = "third_party/dawn/third_party/ninja/ninja"
+NINJA_VERSION = "1.12.1"
+NINJA_CIPD_VERSION = "version:3@1.12.1.chromium.4"
+NINJA_SHA256_BY_HOST = {
+    "arm64": "6c03e94e3ee141301a7e5151227508ac8cec05c12d79ed9240062a86a0e2d14f",
+    "x86_64": "49876d36b01735eb8a1b6e8a02c435761e3964807930fdef3ba30c9f66f809f6",
+}
+NINJA_CIPD_INSTANCE_BY_HOST = {
+    "arm64": "xem0_6s7Lt77xBhJ_IHxFsjQR7JYkGvswGG-nsrwSv0C",
+    "x86_64": "mGbmncDR78ysAZaXITtasuAzLcxiloLxNzPgeS6pURkC",
+}
+BUILD_ENVIRONMENT_DENYLIST = frozenset(
+    (
+        "ARCHFLAGS",
+        "CC",
+        "CFLAGS",
+        "CPATH",
+        "CPPFLAGS",
+        "CPLUS_INCLUDE_PATH",
+        "CXX",
+        "CXXFLAGS",
+        "EFFECTIVE_PLATFORM_NAME",
+        "GIT_CACHE_PATH",
+        "GN_ARGS",
+        "GYP_DEFINES",
+        "GYP_GENERATORS",
+        "IPHONEOS_DEPLOYMENT_TARGET",
+        "LD_LIBRARY_PATH",
+        "LDFLAGS",
+        "LIBRARY_PATH",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "NINJAFLAGS",
+        "NINJA_STATUS",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "OBJCFLAGS",
+        "PLATFORM_NAME",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "RUSTDOCFLAGS",
+        "RUSTFLAGS",
+        "SDKROOT",
+        "TVOS_DEPLOYMENT_TARGET",
+        "WATCHOS_DEPLOYMENT_TARGET",
+        "XROS_DEPLOYMENT_TARGET",
+    )
+)
+BUILD_ENVIRONMENT_DENY_PREFIXES = (
+    "DYLD_",
+    "NPM_CONFIG_",
+    "PNPM_",
+    "npm_config_",
+    "pnpm_",
+)
 
 CHROME_BUILD_GN_SHA256 = (
     "3851bd31f3f9bc123395dbd966557885d62911f4e1359bca47390bfc942653e4"
@@ -273,25 +330,27 @@ def ensure_bootstrap_path(source):
     return path
 
 
-def safe_environment(source, developer_dir, inherited=None):
+def safe_environment(source, developer_dir, inherited=None, build_ninja=None):
     inherited = os.environ if inherited is None else inherited
     result = dict(inherited)
-    for variable in (
-        "SDKROOT",
-        "PLATFORM_NAME",
-        "EFFECTIVE_PLATFORM_NAME",
-        "IPHONEOS_DEPLOYMENT_TARGET",
-        "TVOS_DEPLOYMENT_TARGET",
-        "WATCHOS_DEPLOYMENT_TARGET",
-        "XROS_DEPLOYMENT_TARGET",
-        "GIT_CACHE_PATH",
-    ):
-        result.pop(variable, None)
+    for variable in tuple(result):
+        if variable in BUILD_ENVIRONMENT_DENYLIST or variable.startswith(
+            BUILD_ENVIRONMENT_DENY_PREFIXES
+        ):
+            result.pop(variable, None)
     depot = source.parent / "depot_tools"
+    path_entries = [str(depot)]
+    if build_ninja is not None:
+        build_ninja = Path(build_ninja)
+        expected_ninja = in_source(source, DAWN_NINJA_RELATIVE, "pinned Dawn Ninja")
+        if build_ninja != expected_ninja:
+            raise PipelineError("build Ninja path does not match pinned Dawn Ninja")
+        path_entries.append(str(build_ninja.parent))
+    path_entries.append(inherited.get("PATH", ""))
     result.update(
         {
             "DEVELOPER_DIR": str(developer_dir),
-            "PATH": str(depot) + os.pathsep + inherited.get("PATH", ""),
+            "PATH": os.pathsep.join(path_entries),
             "DEPOT_TOOLS_UPDATE": "0",
             "DEPOT_TOOLS_METRICS": "0",
             "GCLIENT_FILE": str(source.parent / ".gclient"),
@@ -398,6 +457,42 @@ def capture(command, cwd, environ, stderr_is_output=False):
     return (result.stderr if stderr_is_output else result.stdout).strip()
 
 
+def ninja_contract(source):
+    """Bind local builds to Dawn's already-synced, pinned host Ninja."""
+    machine = platform.machine().lower()
+    if machine == "aarch64":
+        machine = "arm64"
+    elif machine == "amd64":
+        machine = "x86_64"
+    if machine not in NINJA_SHA256_BY_HOST:
+        raise PipelineError("unsupported Mac host architecture for Ninja: {}".format(machine))
+    path = in_source(source, DAWN_NINJA_RELATIVE, "pinned Dawn Ninja", must_exist=True)
+    if path.is_symlink() or not path.is_file() or not os.access(str(path), os.X_OK):
+        raise PipelineError("pinned Dawn Ninja is not a regular executable")
+    observed_hash = sha256_file(path)
+    if observed_hash != NINJA_SHA256_BY_HOST[machine]:
+        raise PipelineError("pinned Dawn Ninja hash mismatch")
+    environment = dict(os.environ)
+    environment["PATH"] = "/usr/bin:/bin"
+    architectures = capture(["/usr/bin/lipo", "-archs", str(path)], source, environment).split()
+    if architectures != [machine]:
+        raise PipelineError("pinned Dawn Ninja architecture mismatch")
+    version = capture([str(path), "--version"], source, environment)
+    if version != NINJA_VERSION:
+        raise PipelineError("pinned Dawn Ninja version mismatch")
+    cipd_platform = "mac-arm64" if machine == "arm64" else "mac-amd64"
+    return {
+        "path": str(path),
+        "relative_path": DAWN_NINJA_RELATIVE,
+        "architecture": machine,
+        "sha256": observed_hash,
+        "version": version,
+        "cipd_package": "infra/3pp/tools/ninja/{}".format(cipd_platform),
+        "cipd_version": NINJA_CIPD_VERSION,
+        "cipd_instance": NINJA_CIPD_INSTANCE_BY_HOST[machine],
+    }
+
+
 def developer_contract(value):
     try:
         return focus_macos.validate_xcode_toolchain(value)
@@ -452,14 +547,148 @@ def preparation_contract(source, allow_reclaimed_arm=False):
         name: contract["sha256"]
         for name, contract in prepare_source.DEPENDENCY_CONTRACTS.items()
     }
-    if dependency != {
-        "manifest_sha256": prepare_source.DEPS_INI_SHA256,
-        "archives": expected_archives,
-    }:
+    if not isinstance(dependency, dict) or set(dependency) != {
+        "manifest_sha256",
+        "archives",
+        "cache_marker",
+        "install_inventory",
+        "post_prepare_tree",
+    } or dependency.get("manifest_sha256") != prepare_source.DEPS_INI_SHA256 or dependency.get(
+        "archives"
+    ) != expected_archives:
         raise PipelineError("preparation dependency contract mismatch")
+    cache_marker = dependency.get("cache_marker")
+    if not isinstance(cache_marker, dict) or set(cache_marker) != {
+        "path",
+        "sha256",
+        "archive_count",
+        "total_bytes",
+        "archives",
+    }:
+        raise PipelineError("preparation dependency cache-marker schema mismatch")
+    marker_path = Path(cache_marker.get("path", ""))
+    if not marker_path.is_absolute() or marker_path.name != prepare_source.DEPENDENCY_CACHE_MARKER:
+        raise PipelineError("preparation dependency cache-marker path mismatch")
+    try:
+        current_cache_marker = prepare_source.validate_dependency_cache_marker(
+            marker_path.parent, prepare_source.DEPENDENCY_CONTRACTS
+        )
+    except prepare_source.PreparationError as exc:
+        raise PipelineError(str(exc)) from exc
+    if cache_marker != current_cache_marker:
+        raise PipelineError("preparation dependency cache-marker provenance mismatch")
+    expected_install = {
+        "ownership_roots": list(prepare_source.DEPENDENCY_OWNERSHIP_ROOTS),
+        "regular_files": prepare_source.DEPENDENCY_INSTALL_REGULAR_FILES,
+        "logical_bytes": prepare_source.DEPENDENCY_INSTALL_LOGICAL_BYTES,
+        "sha256": prepare_source.DEPENDENCY_INSTALL_SHA256,
+        "installed_symlinks": 0,
+        "installed_special_files": 0,
+        "components": list(prepare_source.DEPENDENCY_CONTRACTS),
+        "omitted_symlinks": {
+            "onboarding": {
+                "count": prepare_source.SHARED_DEPENDENCY_CONTRACTS["onboarding"][
+                    "omitted_symlink_count"
+                ],
+                "sha256": prepare_source.SHARED_DEPENDENCY_CONTRACTS["onboarding"][
+                    "omitted_symlink_sha256"
+                ],
+            }
+        },
+    }
+    if dependency.get("install_inventory") != expected_install:
+        raise PipelineError("preparation dependency install inventory mismatch")
+    post_prepare_tree = dependency.get("post_prepare_tree")
+    expected_post_keys = {
+        "ownership_roots",
+        "regular_files",
+        "logical_bytes",
+        "sha256",
+        "installed_symlinks",
+        "installed_special_files",
+    }
+    if (
+        not isinstance(post_prepare_tree, dict)
+        or set(post_prepare_tree) != expected_post_keys
+        or post_prepare_tree.get("ownership_roots")
+        != list(prepare_source.DEPENDENCY_OWNERSHIP_ROOTS)
+        or type(post_prepare_tree.get("regular_files")) is not int
+        or post_prepare_tree.get("regular_files", 0) <= 0
+        or type(post_prepare_tree.get("logical_bytes")) is not int
+        or post_prepare_tree.get("logical_bytes", 0) <= 0
+        or not isinstance(post_prepare_tree.get("sha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", post_prepare_tree.get("sha256", ""))
+        or post_prepare_tree.get("installed_symlinks") != 0
+        or post_prepare_tree.get("installed_special_files") != 0
+    ):
+        raise PipelineError("preparation post-transform dependency tree schema mismatch")
+    try:
+        installed = prepare_source.installed_dependency_tree(
+            source, prepare_source.DEPENDENCY_CONTRACTS
+        )
+    except prepare_source.PreparationError as exc:
+        raise PipelineError(str(exc)) from exc
+    if installed != post_prepare_tree:
+        raise PipelineError("installed dependency tree changed after preparation")
+    localized = receipt.get("localized_strings_contract")
+    if not isinstance(localized, dict) or set(localized) != {
+        "generator",
+        "generator_sha256",
+        "node",
+        "output",
+        "baseline_bytes",
+        "baseline_sha256",
+        "output_bytes",
+        "output_sha256",
+        "runs",
+        "byte_identical",
+        "network_operations",
+    }:
+        raise PipelineError("localized strings preparation contract schema mismatch")
+    try:
+        current_node = prepare_source.onboarding_node_contract(source)
+    except prepare_source.PreparationError as exc:
+        raise PipelineError(str(exc)) from exc
+    generator = in_source(
+        source,
+        prepare_source.ONBOARDING_GENERATOR,
+        "onboarding strings generator",
+        must_exist=True,
+    )
+    output = in_source(
+        source,
+        prepare_source.ONBOARDING_STRINGS_OUTPUT,
+        "generated onboarding strings",
+        must_exist=True,
+    )
+    if (
+        localized.get("generator") != prepare_source.ONBOARDING_GENERATOR
+        or localized.get("generator_sha256")
+        != prepare_source.ONBOARDING_GENERATOR_SHA256
+        or sha256_file(generator) != prepare_source.ONBOARDING_GENERATOR_SHA256
+        or localized.get("node") != current_node
+        or localized.get("output") != prepare_source.ONBOARDING_STRINGS_OUTPUT
+        or localized.get("baseline_bytes")
+        != prepare_source.ONBOARDING_STRINGS_BASELINE_BYTES
+        or localized.get("baseline_sha256")
+        != prepare_source.ONBOARDING_STRINGS_BASELINE_SHA256
+        or localized.get("output_bytes")
+        != prepare_source.ONBOARDING_STRINGS_BASELINE_BYTES
+        or localized.get("output_sha256")
+        != prepare_source.ONBOARDING_STRINGS_BASELINE_SHA256
+        or localized.get("output_bytes") != output.stat().st_size
+        or localized.get("output_sha256") != sha256_file(output)
+        or localized.get("runs") != 2
+        or localized.get("byte_identical") is not True
+        or localized.get("network_operations") != 0
+    ):
+        raise PipelineError("localized strings preparation contract mismatch")
     if receipt.get("pruning_contract") != {
         "manifest_sha256": prepare_source.PRUNING_LIST_SHA256,
         "listed_files": prepare_source.PRUNING_ENTRY_COUNT,
+        "files_removed": prepare_source.PRUNING_EXPECTED_REMOVAL_COUNT,
+        "already_absent_files": prepare_source.PRUNING_ALREADY_ABSENT_COUNT,
+        "already_absent_sha256": prepare_source.PRUNING_ALREADY_ABSENT_SHA256,
         "contingent_paths_pruned": False,
         "directory_pruning_executed": False,
     }:
@@ -483,6 +712,7 @@ def preparation_contract(source, allow_reclaimed_arm=False):
         "chrome/app/theme/chromium/BRANDING": "chrome/app/theme/chromium/BRANDING",
         "chrome/VERSION": "chrome/VERSION",
         prepare_source.MAC_ICON_DESTINATION: prepare_source.MAC_ICON_DESTINATION,
+        "onboarding/strings.ts": prepare_source.ONBOARDING_STRINGS_OUTPUT,
         "args_gn/arm64": ARM_OUT + "/args.gn",
         "args_gn/x64": X64_OUT + "/args.gn",
     }
@@ -601,6 +831,8 @@ def slice_receipt_contract(source, out, architecture):
         in_source(source, PREPARATION_RECEIPT, "preparation receipt", must_exist=True)
     ):
         raise PipelineError("{} preparation receipt mismatch".format(architecture))
+    if receipt.get("ninja") != ninja_contract(source):
+        raise PipelineError("{} Ninja provenance mismatch".format(architecture))
     return receipt_path, receipt
 
 
@@ -791,6 +1023,7 @@ def build_plan(source, developer_dir, architecture):
         reclaim_contract(source)
     preparation_contract(source, allow_reclaimed_arm=(architecture == "x64"))
     tools = tool_paths(source)
+    ninja = ninja_contract(source)
     if architecture == "arm64":
         out_relative = ARM_OUT
     elif architecture == "x64":
@@ -825,6 +1058,7 @@ def build_plan(source, developer_dir, architecture):
         "commands": commands,
         "receipt": str(build_receipt),
         "developer_dir": str(developer_dir),
+        "ninja": ninja,
     }
 
 
@@ -837,7 +1071,12 @@ def execute_build(source, developer_dir, plan):
         projected = max(int(first_out * 1.2), first_out + 5 * GIB)
         required = SOFT_FLOOR_GIB + projected / GIB
         require_free(source, required, "x86_64 projected build start")
-    environment = safe_environment(source, developer_dir)
+    current_ninja = ninja_contract(source)
+    if plan.get("ninja") != current_ninja:
+        raise PipelineError("build plan Ninja provenance changed before execution")
+    environment = safe_environment(
+        source, developer_dir, build_ninja=Path(current_ninja["path"])
+    )
     for command in plan["commands"]:
         run_monitored(command, source, environment)
     expected = ("arm64",) if plan["architecture"] == "arm64" else ("x86_64",)
@@ -861,6 +1100,7 @@ def execute_build(source, developer_dir, plan):
             in_source(source, PREPARATION_RECEIPT, "preparation receipt", must_exist=True)
         ),
         "tool_receipt_sha256": sha256_file(source.parent / TOOL_RECEIPT),
+        "ninja": current_ninja,
         "sign_chrome_sha256": SIGN_CHROME_SHA256,
         "build_complete": True,
     }

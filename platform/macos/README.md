@@ -184,17 +184,20 @@ test image.
 
 The implemented order is:
 
-1. `acquire_chromium.py`: exact macOS-only Chromium/depot_tools sync plus the
-   three hash-pinned project archives; network use requires
-   `--execute-acquisition`.
+1. `acquire_chromium.py`: exact macOS-only Chromium/depot_tools sync plus ten
+   hash-pinned cache archives (three shared Focus inputs and seven arm64/x64
+   Mac host-tool inputs); network use requires `--execute-acquisition`.
 2. `build_pipeline.py bootstrap-tools`: clean-revision proof and Chromium hooks
    before any source pruning.
 3. `prepare_source.py`: offline cache extraction, file-only pruning, 321 common
    plus three macOS patches, substitutions, RU/EN, filtered overlay, resources,
-   Focus 1.0.5.0 metadata, ICNS, and both `args.gn` files.
+   Focus 1.0.5.0 metadata, ICNS, deterministic onboarding `strings.ts`, and
+   both `args.gn` files. The exact ten-entry cache marker, pre-patch archive
+   union, and final transformed dependency tree are bound into the receipt.
 4. `build_pipeline.py`: arm64 build, verified thin-app staging, exact arm64
    output reclamation, x86_64 build, universalization, nested ad-hoc signing,
-   and monitored local DMG packaging.
+   and monitored local DMG packaging. Local Ninja is the hash/architecture-
+   pinned Dawn CIPD binary already present in the checkout.
 
 All mutating stages require their explicit execution/confirmation flag and
 refuse to overwrite receipts or outputs. Read `CHROMIUM-ACQUISITION.md` and

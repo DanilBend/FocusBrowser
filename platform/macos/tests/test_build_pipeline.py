@@ -36,11 +36,105 @@ class BuildPipelineTests(unittest.TestCase):
             path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             path.chmod(0o755)
         self.developer = self.root / "Xcode.app/Contents/Developer"
+        self.generator = self.source / build_pipeline.prepare_source.ONBOARDING_GENERATOR
+        self.generator.parent.mkdir(parents=True)
+        self.generator.write_bytes(b"generator fixture\n")
+        self.generator_hash = build_pipeline.sha256_file(self.generator)
+        self.generator_hash_patch = mock.patch.object(
+            build_pipeline.prepare_source,
+            "ONBOARDING_GENERATOR_SHA256",
+            self.generator_hash,
+        )
+        self.generator_hash_patch.start()
+        self.generated_strings = (
+            self.source / build_pipeline.prepare_source.ONBOARDING_STRINGS_OUTPUT
+        )
+        self.generated_strings.parent.mkdir(parents=True)
+        self.generated_strings.write_bytes(
+            (
+                build_pipeline.prepare_source.REPO_ROOT
+                / "source_overrides"
+                / build_pipeline.prepare_source.ONBOARDING_STRINGS_OUTPUT
+            ).read_bytes()
+        )
+        self.ninja = self.source / build_pipeline.DAWN_NINJA_RELATIVE
+        self.ninja.parent.mkdir(parents=True)
+        self.ninja.write_text("#!/bin/sh\necho 1.12.1\n", encoding="utf-8")
+        self.ninja.chmod(0o755)
+        self.ninja_report = {
+            "path": str(self.ninja),
+            "relative_path": build_pipeline.DAWN_NINJA_RELATIVE,
+            "architecture": "arm64",
+            "sha256": "a" * 64,
+            "version": build_pipeline.NINJA_VERSION,
+            "cipd_package": "infra/3pp/tools/ninja/mac-arm64",
+            "cipd_version": build_pipeline.NINJA_CIPD_VERSION,
+            "cipd_instance": build_pipeline.NINJA_CIPD_INSTANCE_BY_HOST["arm64"],
+        }
+        self.real_ninja_contract = build_pipeline.ninja_contract
+        self.ninja_patch = mock.patch.object(
+            build_pipeline, "ninja_contract", return_value=self.ninja_report
+        )
+        self.ninja_patch.start()
+        self.cache_marker_report = {
+            "path": str(
+                self.root
+                / "dependency-cache"
+                / build_pipeline.prepare_source.DEPENDENCY_CACHE_MARKER
+            ),
+            "sha256": "d" * 64,
+            "archive_count": len(build_pipeline.prepare_source.DEPENDENCY_CONTRACTS),
+            "total_bytes": 143176580,
+            "archives": {
+                name: value["sha256"]
+                for name, value in build_pipeline.prepare_source.DEPENDENCY_CONTRACTS.items()
+            },
+        }
+        self.post_dependency_tree = {
+            "ownership_roots": list(
+                build_pipeline.prepare_source.DEPENDENCY_OWNERSHIP_ROOTS
+            ),
+            "regular_files": build_pipeline.prepare_source.DEPENDENCY_INSTALL_REGULAR_FILES,
+            "logical_bytes": build_pipeline.prepare_source.DEPENDENCY_INSTALL_LOGICAL_BYTES,
+            "sha256": build_pipeline.prepare_source.DEPENDENCY_INSTALL_SHA256,
+            "installed_symlinks": 0,
+            "installed_special_files": 0,
+        }
+        self.cache_marker_patch = mock.patch.object(
+            build_pipeline.prepare_source,
+            "validate_dependency_cache_marker",
+            return_value=self.cache_marker_report,
+        )
+        self.installed_tree_patch = mock.patch.object(
+            build_pipeline.prepare_source,
+            "installed_dependency_tree",
+            return_value=self.post_dependency_tree,
+        )
+        self.cache_marker_patch.start()
+        self.installed_tree_patch.start()
+        self.onboarding_node_report = {
+            "path": str(self.source / "third_party/node/mac_arm64/node"),
+            "relative_path": "third_party/node/mac_arm64/node",
+            "architecture": "arm64",
+            "version": build_pipeline.prepare_source.ONBOARDING_NODE_VERSION,
+            "sha256": "e" * 64,
+        }
+        self.onboarding_node_patch = mock.patch.object(
+            build_pipeline.prepare_source,
+            "onboarding_node_contract",
+            return_value=self.onboarding_node_report,
+        )
+        self.onboarding_node_patch.start()
         self.write_acquisition_marker()
         self.write_tool_receipt()
         self.write_preparation_receipt()
 
     def tearDown(self):
+        self.onboarding_node_patch.stop()
+        self.installed_tree_patch.stop()
+        self.cache_marker_patch.stop()
+        self.ninja_patch.stop()
+        self.generator_hash_patch.stop()
         self.temporary.cleanup()
 
     def write_json(self, path, value):
@@ -109,6 +203,7 @@ class BuildPipelineTests(unittest.TestCase):
             "chrome/app/theme/chromium/BRANDING": "chrome/app/theme/chromium/BRANDING",
             "chrome/VERSION": "chrome/VERSION",
             build_pipeline.prepare_source.MAC_ICON_DESTINATION: build_pipeline.prepare_source.MAC_ICON_DESTINATION,
+            "onboarding/strings.ts": build_pipeline.prepare_source.ONBOARDING_STRINGS_OUTPUT,
             "args_gn/arm64": build_pipeline.ARM_OUT + "/args.gn",
             "args_gn/x64": build_pipeline.X64_OUT + "/args.gn",
         }
@@ -150,10 +245,29 @@ class BuildPipelineTests(unittest.TestCase):
                         name: contract["sha256"]
                         for name, contract in build_pipeline.prepare_source.DEPENDENCY_CONTRACTS.items()
                     },
+                    "cache_marker": self.cache_marker_report,
+                    "install_inventory": {
+                        **self.post_dependency_tree,
+                        "components": list(
+                            build_pipeline.prepare_source.DEPENDENCY_CONTRACTS
+                        ),
+                        "omitted_symlinks": {
+                            "onboarding": {
+                                "count": 10,
+                                "sha256": build_pipeline.prepare_source.SHARED_DEPENDENCY_CONTRACTS[
+                                    "onboarding"
+                                ]["omitted_symlink_sha256"],
+                            }
+                        },
+                    },
+                    "post_prepare_tree": self.post_dependency_tree,
                 },
                 "pruning_contract": {
                     "manifest_sha256": build_pipeline.prepare_source.PRUNING_LIST_SHA256,
                     "listed_files": build_pipeline.prepare_source.PRUNING_ENTRY_COUNT,
+                    "files_removed": build_pipeline.prepare_source.PRUNING_EXPECTED_REMOVAL_COUNT,
+                    "already_absent_files": build_pipeline.prepare_source.PRUNING_ALREADY_ABSENT_COUNT,
+                    "already_absent_sha256": build_pipeline.prepare_source.PRUNING_ALREADY_ABSENT_SHA256,
                     "contingent_paths_pruned": False,
                     "directory_pruning_executed": False,
                 },
@@ -166,6 +280,23 @@ class BuildPipelineTests(unittest.TestCase):
                     "sha256": build_pipeline.prepare_source.RESOURCE_BODY_SHA256,
                 },
                 "icns_sha256": build_pipeline.focus_macos.FOCUS_ICNS_SHA256,
+                "localized_strings_contract": {
+                    "generator": build_pipeline.prepare_source.ONBOARDING_GENERATOR,
+                    "generator_sha256": self.generator_hash,
+                    "node": self.onboarding_node_report,
+                    "output": build_pipeline.prepare_source.ONBOARDING_STRINGS_OUTPUT,
+                    "baseline_bytes": build_pipeline.prepare_source.ONBOARDING_STRINGS_BASELINE_BYTES,
+                    "baseline_sha256": build_pipeline.prepare_source.ONBOARDING_STRINGS_BASELINE_SHA256,
+                    "output_bytes": (
+                        self.source / build_pipeline.prepare_source.ONBOARDING_STRINGS_OUTPUT
+                    ).stat().st_size,
+                    "output_sha256": build_pipeline.sha256_file(
+                        self.source / build_pipeline.prepare_source.ONBOARDING_STRINGS_OUTPUT
+                    ),
+                    "runs": 2,
+                    "byte_identical": True,
+                    "network_operations": 0,
+                },
                 "post_prepare_sha256": post_hashes,
                 "build_executed": False,
                 "signing_executed": False,
@@ -204,6 +335,7 @@ class BuildPipelineTests(unittest.TestCase):
                 "app": {"architectures": [expected]},
                 "args_gn_sha256": build_pipeline.sha256_file(args_path),
                 "preparation_receipt_sha256": build_pipeline.sha256_file(prep),
+                "ninja": self.ninja_report,
                 "build_complete": True,
             },
         )
@@ -225,6 +357,10 @@ class BuildPipelineTests(unittest.TestCase):
             "SDKROOT": "/iPhoneOS.sdk",
             "IPHONEOS_DEPLOYMENT_TARGET": "27.0",
             "GIT_CACHE_PATH": "/cache",
+            "MACOSX_DEPLOYMENT_TARGET": "99.0",
+            "NODE_OPTIONS": "--require=/tmp/inject.js",
+            "npm_config_arch": "ia32",
+            "DYLD_INSERT_LIBRARIES": "/tmp/inject.dylib",
             "KEEP": "yes",
         }
         developer = self.root / "Xcode.app/Contents/Developer"
@@ -232,9 +368,51 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertNotIn("SDKROOT", result)
         self.assertNotIn("IPHONEOS_DEPLOYMENT_TARGET", result)
         self.assertNotIn("GIT_CACHE_PATH", result)
+        self.assertNotIn("MACOSX_DEPLOYMENT_TARGET", result)
+        self.assertNotIn("NODE_OPTIONS", result)
+        self.assertNotIn("npm_config_arch", result)
+        self.assertNotIn("DYLD_INSERT_LIBRARIES", result)
         self.assertEqual("yes", result["KEEP"])
         self.assertEqual(str(developer), result["DEVELOPER_DIR"])
         self.assertTrue(result["PATH"].startswith(str(self.depot)))
+
+    def test_safe_environment_adds_pinned_ninja_after_depot_tools(self):
+        result = build_pipeline.safe_environment(
+            self.source,
+            self.developer,
+            {"PATH": "/bin"},
+            build_ninja=self.ninja,
+        )
+        self.assertEqual(
+            [str(self.depot), str(self.ninja.parent), "/bin"],
+            result["PATH"].split(":"),
+        )
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "pinned Dawn Ninja"):
+            build_pipeline.safe_environment(
+                self.source,
+                self.developer,
+                {"PATH": "/bin"},
+                build_ninja=self.source / "third_party/ninja/ninja",
+            )
+
+    def test_ninja_contract_binds_hash_arch_version_and_cipd_pin(self):
+        with mock.patch.object(
+            build_pipeline.platform, "machine", return_value="arm64"
+        ), mock.patch.object(
+            build_pipeline,
+            "sha256_file",
+            return_value=build_pipeline.NINJA_SHA256_BY_HOST["arm64"],
+        ), mock.patch.object(
+            build_pipeline, "capture", side_effect=("arm64", "1.12.1")
+        ) as capture:
+            report = self.real_ninja_contract(self.source)
+        self.assertEqual("arm64", report["architecture"])
+        self.assertEqual(build_pipeline.NINJA_CIPD_VERSION, report["cipd_version"])
+        self.assertEqual(
+            build_pipeline.NINJA_CIPD_INSTANCE_BY_HOST["arm64"],
+            report["cipd_instance"],
+        )
+        self.assertEqual(2, capture.call_count)
 
     def test_bootstrap_is_hook_only_and_must_precede_preparation(self):
         (self.checkout / build_pipeline.TOOL_RECEIPT).unlink()
@@ -299,6 +477,7 @@ class BuildPipelineTests(unittest.TestCase):
             self.source, self.developer, "arm64"
         )
         self.assertEqual("build-arm64", plan["stage"])
+        self.assertEqual(self.ninja_report, plan["ninja"])
         self.assertEqual("-j4", plan["commands"][1][1])
         self.assertEqual(
             ["chrome", "chrome/installer/mac:copies"], plan["commands"][1][-2:]
@@ -322,6 +501,7 @@ class BuildPipelineTests(unittest.TestCase):
             "out": str(out),
             "commands": [["gn", "gen"], ["autoninja", "chrome"]],
             "receipt": str(out / build_pipeline.SLICE_RECEIPT_NAME),
+            "ninja": self.ninja_report,
         }
         app_report = {
             "app": str(out / build_pipeline.APP_NAME),
@@ -342,6 +522,7 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertTrue(receipt["build_complete"])
         self.assertEqual("arm64", receipt["mach_o_architecture"])
         self.assertEqual(sign_hash, receipt["sign_chrome_sha256"])
+        self.assertEqual(self.ninja_report, receipt["ninja"])
 
     def test_stage_reclaims_only_exact_arm_output_after_verified_copy(self):
         arm_out = self.source / build_pipeline.ARM_OUT

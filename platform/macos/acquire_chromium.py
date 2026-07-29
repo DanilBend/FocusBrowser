@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import stat
@@ -50,7 +51,7 @@ DEPS_INI_SHA256 = "158806c990d70174a6f401ae488d03246d867e0272b753bfbcb7c1757633b
 MAX_DEPENDENCY_BYTES = 512 * 1024 * 1024
 PRE_DEPENDENCY_CACHE_GIB = HARD_FLOOR_GIB + 1
 
-PROJECT_DEPENDENCIES = (
+SHARED_PROJECT_DEPENDENCIES = (
     {
         "name": "search_engines_data",
         "url": (
@@ -82,6 +83,74 @@ PROJECT_DEPENDENCIES = (
         "sha256": "6ea10a863eb343ddcc317fdda9c65ccb2799c74d0de06ad75aded04d38d63dca",
     },
 )
+
+MAC_HOST_DEPENDENCIES = (
+    {
+        "name": "chromium_node_arm64",
+        "url": (
+            "https://storage.googleapis.com/chromium-nodejs/"
+            "6661e9b9bd7df6b45daf506c82d06d303597cb27"
+        ),
+        "filename": "node-darwin-arm64-150.0.7871.128.tar.gz",
+        "sha256": "b1be502d1635330ebf51d85f8d32a0d3dd92b35c6700def56ae6f903906ea825",
+    },
+    {
+        "name": "chromium_node_x64",
+        "url": (
+            "https://storage.googleapis.com/chromium-nodejs/"
+            "9202c05a8e7c67cb2bb2fec1e50fb6188d26f281"
+        ),
+        "filename": "node-darwin-x64-150.0.7871.128.tar.gz",
+        "sha256": "a25cd3ef35d8b4b5a59498a5a62b5b12cc271dc420ee809abaa76110d12c156e",
+    },
+    {
+        "name": "chromium_node_modules",
+        "url": (
+            "https://storage.googleapis.com/chromium-nodejs/"
+            "38df23cf794887ca7c81d57bf30f66c38c144e28"
+        ),
+        "filename": "chromium-node-modules-150.0.7871.128.tar.gz",
+        "sha256": "6781ef493aa77be4ca4824dc1d5f5157a2fbc56dacafe20914da4469f7a01b87",
+    },
+    {
+        "name": "esbuild_darwin_arm64",
+        "url": (
+            "https://registry.npmjs.org/@esbuild/darwin-arm64/-/"
+            "darwin-arm64-0.25.9.tgz"
+        ),
+        "filename": "esbuild-darwin-arm64-0.25.9.tgz",
+        "sha256": "dd1abc1f869ab57c5e1b76ddef546d53c473a0d06aecb77fe10af084c47ac7e6",
+    },
+    {
+        "name": "esbuild_darwin_x64",
+        "url": (
+            "https://registry.npmjs.org/@esbuild/darwin-x64/-/"
+            "darwin-x64-0.25.9.tgz"
+        ),
+        "filename": "esbuild-darwin-x64-0.25.9.tgz",
+        "sha256": "14a33c598fb04937a75efa88c5f58e2317bfd821e36b1e222bd040ff34828738",
+    },
+    {
+        "name": "rollup_darwin_arm64",
+        "url": (
+            "https://registry.npmjs.org/@rollup/rollup-darwin-arm64/-/"
+            "rollup-darwin-arm64-4.50.1.tgz"
+        ),
+        "filename": "rollup-darwin-arm64-4.50.1.tgz",
+        "sha256": "4fcf015726b2b857fae02a87e74c61db6021d578b5a93066871f585f4c2d449b",
+    },
+    {
+        "name": "rollup_darwin_x64",
+        "url": (
+            "https://registry.npmjs.org/@rollup/rollup-darwin-x64/-/"
+            "rollup-darwin-x64-4.50.1.tgz"
+        ),
+        "filename": "rollup-darwin-x64-4.50.1.tgz",
+        "sha256": "b3ca6f5e10f3ccd532b1dfc070b5845c2194e024e40ccaa30ec34f68e3f79da0",
+    },
+)
+
+PROJECT_DEPENDENCIES = SHARED_PROJECT_DEPENDENCIES + MAC_HOST_DEPENDENCIES
 
 
 class AcquisitionError(RuntimeError):
@@ -205,7 +274,7 @@ def sha256_file(path):
 
 
 def validate_dependency_manifest():
-    """Pin the repository manifest and its exact three macOS build inputs."""
+    """Pin the shared manifest plus the exact Mac host build inputs."""
     if DEPS_INI.is_symlink() or not DEPS_INI.is_file():
         raise AcquisitionError("missing real project dependency manifest: {}".format(DEPS_INI))
     observed_manifest_hash = sha256_file(DEPS_INI)
@@ -217,10 +286,46 @@ def validate_dependency_manifest():
         )
     parser = configparser.ConfigParser()
     parser.read(DEPS_INI, encoding="utf-8")
-    expected_names = [item["name"] for item in PROJECT_DEPENDENCIES]
+    expected_names = [item["name"] for item in SHARED_PROJECT_DEPENDENCIES]
     if parser.sections() != expected_names:
         raise AcquisitionError("deps.ini component inventory or order changed")
-    for expected in PROJECT_DEPENDENCIES:
+    combined = SHARED_PROJECT_DEPENDENCIES + MAC_HOST_DEPENDENCIES
+    seen_names = set()
+    seen_filenames = set()
+    for expected in combined:
+        if not isinstance(expected, dict) or set(expected) != {
+            "name",
+            "url",
+            "filename",
+            "sha256",
+        }:
+            raise AcquisitionError("project dependency entry schema mismatch")
+        name = expected["name"]
+        filename_value = expected["filename"]
+        if (
+            not isinstance(name, str)
+            or not name
+            or name in seen_names
+            or not isinstance(filename_value, str)
+            or not filename_value
+            or filename_value in seen_filenames
+        ):
+            raise AcquisitionError("duplicate or invalid project dependency identity")
+        seen_names.add(name)
+        seen_filenames.add(filename_value)
+        filename = Path(filename_value)
+        if filename.name != filename_value or len(filename.parts) != 1:
+            raise AcquisitionError("unsafe dependency cache filename")
+        if not isinstance(expected["url"], str) or not expected["url"].startswith(
+            "https://"
+        ):
+            raise AcquisitionError("dependency URL must use HTTPS")
+        if not isinstance(expected["sha256"], str) or not re.fullmatch(
+            r"[0-9a-f]{64}", expected["sha256"]
+        ):
+            raise AcquisitionError("dependency SHA-256 must be lowercase hexadecimal")
+
+    for expected in SHARED_PROJECT_DEPENDENCIES:
         section = parser[expected["name"]]
         observed = {
             "url": section.get("url"),
@@ -232,15 +337,12 @@ def validate_dependency_manifest():
                 raise AcquisitionError(
                     "deps.ini {} {} mismatch".format(expected["name"], key)
                 )
-        filename = Path(expected["filename"])
-        if filename.name != expected["filename"] or len(filename.parts) != 1:
-            raise AcquisitionError("unsafe dependency cache filename")
-        if not expected["url"].startswith("https://"):
-            raise AcquisitionError("dependency URL must use HTTPS")
     return {
         "path": str(DEPS_INI),
         "sha256": observed_manifest_hash,
-        "entries": [dict(item) for item in PROJECT_DEPENDENCIES],
+        "shared_entries": [dict(item) for item in SHARED_PROJECT_DEPENDENCIES],
+        "mac_host_entries": [dict(item) for item in MAC_HOST_DEPENDENCIES],
+        "entries": [dict(item) for item in combined],
     }
 
 

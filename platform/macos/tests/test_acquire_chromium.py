@@ -145,7 +145,10 @@ target_os_only = True
         dependencies = report["project_dependencies"]
         self.assertTrue(dependencies["enabled"])
         self.assertEqual(acquire.DEPS_INI_SHA256, dependencies["manifest"]["sha256"])
-        self.assertEqual(3, len(dependencies["commands"]))
+        self.assertEqual(10, len(dependencies["commands"]))
+        self.assertEqual(
+            7, len(dependencies["manifest"]["mac_host_entries"])
+        )
         self.assertFalse(dependencies["unpack_planned"])
         self.assertFalse(dependencies["source_mutation_planned"])
         for command, contract in zip(
@@ -158,6 +161,24 @@ target_os_only = True
                 str(dependency_cache / (contract["filename"] + ".part")), command
             )
             self.assertEqual(contract["url"], command[-1])
+
+    def test_mac_host_dependency_entries_receive_full_safety_validation(self):
+        cases = (
+            ({"url": "http://example.invalid/file"}, "HTTPS"),
+            ({"filename": "nested/file.tgz"}, "filename"),
+            ({"sha256": "A" * 64}, "SHA-256"),
+            ({"name": acquire.SHARED_PROJECT_DEPENDENCIES[0]["name"]}, "identity"),
+        )
+        original = acquire.MAC_HOST_DEPENDENCIES
+        for change, message in cases:
+            malformed = dict(original[0])
+            malformed.update(change)
+            with self.subTest(change=change), mock.patch.object(
+                acquire,
+                "MAC_HOST_DEPENDENCIES",
+                (malformed,) + original[1:],
+            ), self.assertRaisesRegex(acquire.AcquisitionError, message):
+                acquire.validate_dependency_manifest()
 
     def test_dependency_stage_requires_explicit_cache_and_flag_pair(self):
         with self.assertRaisesRegex(acquire.AcquisitionError, "dependency-cache"):

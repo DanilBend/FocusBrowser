@@ -327,11 +327,26 @@ class PrepareSourceTests(unittest.TestCase):
     def test_dependency_manifest_is_exact_and_offline(self):
         contracts = prepare_source.validate_dependency_manifest()
         self.assertEqual(
-            ["search_engines_data", "onboarding", "ublock_origin"], list(contracts)
+            [
+                "search_engines_data",
+                "onboarding",
+                "ublock_origin",
+                "chromium_node_arm64",
+                "chromium_node_x64",
+                "chromium_node_modules",
+                "esbuild_darwin_arm64",
+                "esbuild_darwin_x64",
+                "rollup_darwin_arm64",
+                "rollup_darwin_x64",
+            ],
+            list(contracts),
         )
         self.assertEqual(
             "ublock-origin-1.72.2.zip",
             contracts["ublock_origin"]["download_filename"],
+        )
+        self.assertEqual(
+            "package", contracts["esbuild_darwin_arm64"]["strip_leading_dirs"]
         )
 
     def test_offline_cache_accepts_exact_custom_hash(self):
@@ -420,7 +435,77 @@ class PrepareSourceTests(unittest.TestCase):
             info.type = tarfile.SYMTYPE
             info.linkname = "outside"
             stream.addfile(info)
-        with self.assertRaisesRegex(prepare_source.PreparationError, "regular"):
+        with self.assertRaisesRegex(prepare_source.PreparationError, "symbolic link"):
+            prepare_source.inspect_archive(
+                archive, {"kind": "tar", "strip_leading_dirs": None}
+            )
+
+    def test_tar_node_bin_symlink_is_validated_then_omitted(self):
+        archive = self.root / "node-bin.tar.gz"
+        with tarfile.open(archive, "w:gz") as stream:
+            payload = b"#!/usr/bin/env node\n"
+            target = tarfile.TarInfo("./package/node_modules/tool/bin/tool.js")
+            target.size = len(payload)
+            target.mode = 0o755
+            stream.addfile(target, io.BytesIO(payload))
+            link = tarfile.TarInfo("./package/node_modules/.bin/tool")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "../tool/bin/tool.js"
+            stream.addfile(link)
+        omitted = "node_modules/.bin/tool\t../tool/bin/tool.js\n"
+        contract = {
+            "kind": "tar",
+            "strip_leading_dirs": "package",
+            "omitted_symlink_count": 1,
+            "omitted_symlink_sha256": hashlib.sha256(
+                omitted.encode("utf-8")
+            ).hexdigest(),
+        }
+        entries = prepare_source.inspect_archive(
+            archive, contract
+        )
+        self.assertEqual(
+            ["node_modules/tool/bin/tool.js"], [item[0] for item in entries]
+        )
+        destination = self.root / "materialized"
+        prepare_source.extract_archive_to_stage(archive, contract, destination)
+        self.assertFalse((destination / "node_modules/.bin/tool").exists())
+        self.assertEqual(
+            payload,
+            (destination / "node_modules/tool/bin/tool.js").read_bytes(),
+        )
+
+    def test_tar_node_modules_hardlink_is_materialized(self):
+        archive = self.root / "hardlink.tar.gz"
+        with tarfile.open(archive, "w:gz") as stream:
+            payload = b"license\n"
+            target = tarfile.TarInfo("./node_modules/pkg/LICENSE")
+            target.size = len(payload)
+            target.mode = 0o644
+            stream.addfile(target, io.BytesIO(payload))
+            link = tarfile.TarInfo("./node_modules/pkg/COPYING")
+            link.type = tarfile.LNKTYPE
+            link.linkname = "./node_modules/pkg/LICENSE"
+            stream.addfile(link)
+        destination = self.root / "hardlink-materialized"
+        prepare_source.extract_archive_to_stage(
+            archive,
+            {"kind": "tar", "strip_leading_dirs": None},
+            destination,
+        )
+        copied = destination / "node_modules/pkg/COPYING"
+        self.assertTrue(copied.is_file())
+        self.assertFalse(copied.is_symlink())
+        self.assertEqual(payload, copied.read_bytes())
+
+    def test_tar_link_target_cannot_escape_archive_or_node_modules(self):
+        archive = self.root / "escaping-link.tar.gz"
+        with tarfile.open(archive, "w:gz") as stream:
+            link = tarfile.TarInfo("./node_modules/.bin/escape")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "../../../outside"
+            stream.addfile(link)
+        with self.assertRaises(prepare_source.PreparationError):
             prepare_source.inspect_archive(
                 archive, {"kind": "tar", "strip_leading_dirs": None}
             )
@@ -444,6 +529,126 @@ class PrepareSourceTests(unittest.TestCase):
             b"payload", (source / "third_party/example/file.txt").read_bytes()
         )
 
+    def test_dependency_merge_rejects_preexisting_extra_or_empty_child(self):
+        contract = OrderedDict(
+            (("dep", {"output_path": "third_party/example"}),)
+        )
+        source = self.root / "owned-src"
+        source.mkdir()
+        root = source / "third_party/example"
+        root.mkdir(parents=True)
+        (root / "extra.txt").write_text("extra", encoding="utf-8")
+        with self.assertRaisesRegex(prepare_source.PreparationError, "not empty"):
+            prepare_source.require_empty_dependency_roots(source, contract)
+        (root / "extra.txt").unlink()
+        (root / "empty-child").mkdir()
+        with self.assertRaisesRegex(prepare_source.PreparationError, "not empty"):
+            prepare_source.require_empty_dependency_roots(source, contract)
+
+    def test_dependency_merge_rejects_cross_contract_path_collision(self):
+        source = self.root / "collision-src"
+        source.mkdir()
+        stage = self.root / "collision-stage"
+        (stage / "first").mkdir(parents=True)
+        (stage / "second/child").mkdir(parents=True)
+        (stage / "first/file").write_bytes(b"one")
+        (stage / "second/child/file").write_bytes(b"two")
+        contracts = OrderedDict(
+            (
+                ("first", {"output_path": "third_party/example"}),
+                ("second", {"output_path": "third_party/example/file"}),
+            )
+        )
+        with self.assertRaisesRegex(prepare_source.PreparationError, "colliding"):
+            prepare_source.merge_staged_dependencies(source, stage, contracts)
+
+    def test_dependency_cache_marker_binds_exact_order_path_size_and_hash(self):
+        cache = self.root / "marker-cache"
+        cache.mkdir()
+        payload = b"archive"
+        archive = cache / "dep.tgz"
+        archive.write_bytes(payload)
+        contracts = OrderedDict(
+            (
+                (
+                    "dep",
+                    {
+                        "download_filename": "dep.tgz",
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                    },
+                ),
+            )
+        )
+        marker = cache / prepare_source.DEPENDENCY_CACHE_MARKER
+        marker.write_text(
+            json.dumps(
+                {
+                    "archives": [
+                        {
+                            "bytes": len(payload),
+                            "name": "dep",
+                            "path": str(archive.resolve()),
+                            "sha256": hashlib.sha256(payload).hexdigest(),
+                        }
+                    ],
+                    "deps_ini_sha256": prepare_source.DEPS_INI_SHA256,
+                    "source_mutated": False,
+                    "unpacked": False,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        report = prepare_source.validate_dependency_cache_marker(cache, contracts)
+        self.assertEqual(1, report["archive_count"])
+        changed = json.loads(marker.read_text(encoding="utf-8"))
+        changed["archives"][0]["bytes"] += 1
+        marker.write_text(json.dumps(changed) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(prepare_source.PreparationError, "inventory"):
+            prepare_source.validate_dependency_cache_marker(cache, contracts)
+
+    def test_onboarding_strings_are_generated_twice_byte_identically(self):
+        source = self.root / "generator-src"
+        generator = source / prepare_source.ONBOARDING_GENERATOR
+        generator.parent.mkdir(parents=True)
+        generator.write_bytes(b"generator fixture\n")
+        output = source / prepare_source.ONBOARDING_STRINGS_OUTPUT
+        output.parent.mkdir(parents=True)
+        output.write_bytes(b"deterministic output\n")
+        calls = []
+
+        def runner(*_args, **_kwargs):
+            calls.append(True)
+            output.write_bytes(b"deterministic output\n")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(
+            prepare_source,
+            "ONBOARDING_GENERATOR_SHA256",
+            hashlib.sha256(b"generator fixture\n").hexdigest(),
+        ), mock.patch.object(
+            prepare_source,
+            "ONBOARDING_STRINGS_BASELINE_BYTES",
+            len(b"deterministic output\n"),
+        ), mock.patch.object(
+            prepare_source,
+            "ONBOARDING_STRINGS_BASELINE_SHA256",
+            hashlib.sha256(b"deterministic output\n").hexdigest(),
+        ), mock.patch.object(
+            prepare_source,
+            "onboarding_node_contract",
+            return_value={"path": "/fixed/node", "architecture": "arm64"},
+        ):
+            report = prepare_source.generate_onboarding_strings(
+                source, runner=runner
+            )
+        self.assertEqual(2, len(calls))
+        self.assertTrue(report["byte_identical"])
+        self.assertEqual(
+            hashlib.sha256(b"deterministic output\n").hexdigest(),
+            report["output_sha256"],
+        )
+
     def write_pruning_manifest(self, text):
         manifest = self.root / "pruning.list"
         manifest.write_text(text, encoding="utf-8")
@@ -458,6 +663,16 @@ class PrepareSourceTests(unittest.TestCase):
         entries = [line for line in manifest.read_text(encoding="utf-8").splitlines() if line]
         self.assertEqual(prepare_source.PRUNING_ENTRY_COUNT, len(entries))
         self.assertEqual(len(entries), len(set(entries)))
+
+        absent = prepare_source.load_expected_absent_pruning()
+        self.assertEqual(prepare_source.PRUNING_ALREADY_ABSENT_COUNT, len(absent))
+        self.assertEqual(len(absent), len(set(absent)))
+        self.assertEqual(
+            prepare_source.PRUNING_ALREADY_ABSENT_SHA256,
+            prepare_source.sha256_file(
+                prepare_source.PRUNING_ALREADY_ABSENT_LIST
+            ),
+        )
 
     def test_pruning_removes_only_exact_prevalidated_files(self):
         source = self.root / "src"
@@ -485,6 +700,76 @@ class PrepareSourceTests(unittest.TestCase):
         with self.assertRaisesRegex(prepare_source.PreparationError, "missing regular"):
             prepare_source.build_prune_plan(
                 source, manifest=manifest, expected_hash=digest, expected_count=1
+            )
+
+    def test_pruning_preflight_allows_only_exact_archive_proven_path(self):
+        source = self.root / "src"
+        source.mkdir()
+        manifest, digest = self.write_pruning_manifest("future/remove.bin\n")
+        plan = prepare_source.build_prune_plan(
+            source,
+            manifest=manifest,
+            expected_hash=digest,
+            expected_count=1,
+            allowed_missing={"future/remove.bin"},
+        )
+        self.assertTrue(plan[0]["future_archive_file"])
+        with self.assertRaisesRegex(
+            prepare_source.PreparationError, "unmaterialized archive"
+        ):
+            prepare_source.apply_prune_plan(source, plan)
+        with self.assertRaisesRegex(prepare_source.PreparationError, "missing regular"):
+            prepare_source.build_prune_plan(
+                source,
+                manifest=manifest,
+                expected_hash=digest,
+                expected_count=1,
+                allowed_missing={"different/path.bin"},
+            )
+
+    def test_pruning_skips_only_exact_pinned_absence_set(self):
+        source = self.root / "src"
+        source.mkdir()
+        manifest, digest = self.write_pruning_manifest("expected/missing.bin\n")
+        plan = prepare_source.build_prune_plan(
+            source,
+            manifest=manifest,
+            expected_hash=digest,
+            expected_count=1,
+            expected_absent_paths=("expected/missing.bin",),
+        )
+        self.assertTrue(plan[0]["already_absent"])
+        with self.assertRaisesRegex(
+            prepare_source.PreparationError, "absence set changed"
+        ):
+            prepare_source.apply_prune_plan(source, plan)
+        report = prepare_source.apply_prune_plan(
+            source, plan, expected_absent_paths=("expected/missing.bin",)
+        )
+        self.assertEqual(0, report["files_removed"])
+        self.assertEqual(1, report["already_absent_files"])
+        self.assertEqual(
+            hashlib.sha256(b"expected/missing.bin\n").hexdigest(),
+            report["already_absent_sha256"],
+        )
+        with self.assertRaisesRegex(
+            prepare_source.PreparationError, "missing regular"
+        ):
+            prepare_source.build_prune_plan(
+                source,
+                manifest=manifest,
+                expected_hash=digest,
+                expected_count=1,
+                expected_absent_paths=("different/missing.bin",),
+            )
+        with self.assertRaisesRegex(prepare_source.PreparationError, "both future"):
+            prepare_source.build_prune_plan(
+                source,
+                manifest=manifest,
+                expected_hash=digest,
+                expected_count=1,
+                allowed_missing={"expected/missing.bin"},
+                expected_absent_paths=("expected/missing.bin",),
             )
 
     def test_pruning_fails_closed_on_symlink_target(self):
@@ -671,6 +956,11 @@ class PrepareSourceTests(unittest.TestCase):
             "chrome/app/theme/chromium/BRANDING": "brand\n",
             "chrome/VERSION": "version\n",
             prepare_source.MAC_ICON_DESTINATION: "icon\n",
+            prepare_source.ONBOARDING_STRINGS_OUTPUT: (
+                prepare_source.REPO_ROOT
+                / "source_overrides"
+                / prepare_source.ONBOARDING_STRINGS_OUTPUT
+            ).read_text(encoding="utf-8"),
             "out/Arm/args.gn": "arm\n",
             "out/X64/args.gn": "x64\n",
         }
@@ -678,9 +968,49 @@ class PrepareSourceTests(unittest.TestCase):
             path = source / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
-        report = prepare_source.write_preparation_receipt(
-            source,
-            {
+        dependency_report = {
+            "ownership_roots": list(prepare_source.DEPENDENCY_OWNERSHIP_ROOTS),
+            "regular_files": prepare_source.DEPENDENCY_INSTALL_REGULAR_FILES,
+            "logical_bytes": prepare_source.DEPENDENCY_INSTALL_LOGICAL_BYTES,
+            "sha256": prepare_source.DEPENDENCY_INSTALL_SHA256,
+            "installed_symlinks": 0,
+            "installed_special_files": 0,
+            "files_copied": prepare_source.DEPENDENCY_INSTALL_REGULAR_FILES,
+            "components": list(prepare_source.DEPENDENCY_CONTRACTS),
+            "omitted_symlinks": {
+                "onboarding": {
+                    "count": 10,
+                    "sha256": prepare_source.SHARED_DEPENDENCY_CONTRACTS[
+                        "onboarding"
+                    ]["omitted_symlink_sha256"],
+                }
+            },
+        }
+        post_tree = {
+            key: dependency_report[key]
+            for key in (
+                "ownership_roots",
+                "regular_files",
+                "logical_bytes",
+                "sha256",
+                "installed_symlinks",
+                "installed_special_files",
+            )
+        }
+        localized_report = {
+            "generator": prepare_source.ONBOARDING_GENERATOR,
+            "generator_sha256": prepare_source.ONBOARDING_GENERATOR_SHA256,
+            "node": {"architecture": "arm64"},
+            "output": prepare_source.ONBOARDING_STRINGS_OUTPUT,
+            "baseline_bytes": prepare_source.ONBOARDING_STRINGS_BASELINE_BYTES,
+            "baseline_sha256": prepare_source.ONBOARDING_STRINGS_BASELINE_SHA256,
+            "output_bytes": prepare_source.ONBOARDING_STRINGS_BASELINE_BYTES,
+            "output_sha256": prepare_source.ONBOARDING_STRINGS_BASELINE_SHA256,
+            "runs": 2,
+            "byte_identical": True,
+            "network_operations": 0,
+        }
+        preflight = {
                 "acquisition": {
                     "status": "acquisition_complete",
                     "sha256": "b" * 64,
@@ -690,12 +1020,35 @@ class PrepareSourceTests(unittest.TestCase):
                     "sha256": "c" * 64,
                 },
                 "upstream_baseline_sha256": {"chrome/BUILD.gn": "a" * 64},
-            },
+                "dependency_cache_marker": {
+                    "path": "/cache/.focus-project-dependencies.json",
+                    "sha256": "d" * 64,
+                    "archive_count": 10,
+                    "total_bytes": 1,
+                    "archives": {
+                        name: value["sha256"]
+                        for name, value in prepare_source.DEPENDENCY_CONTRACTS.items()
+                    },
+                },
+            }
+        with mock.patch.object(
+            prepare_source, "installed_dependency_tree", return_value=post_tree
+        ):
+            report = prepare_source.write_preparation_receipt(
+            source,
+            preflight,
             {
                 "arm64": str((source / "out/Arm/args.gn").resolve()),
                 "x64": str((source / "out/X64/args.gn").resolve()),
             },
-        )
+            {
+                "files_removed": prepare_source.PRUNING_EXPECTED_REMOVAL_COUNT,
+                "already_absent_files": prepare_source.PRUNING_ALREADY_ABSENT_COUNT,
+                "already_absent_sha256": prepare_source.PRUNING_ALREADY_ABSENT_SHA256,
+            },
+            dependency_report,
+            localized_report,
+            )
         receipt = Path(report["path"])
         payload = json.loads(receipt.read_text(encoding="utf-8"))
         self.assertEqual(1, payload["schema"])
@@ -718,6 +1071,13 @@ class PrepareSourceTests(unittest.TestCase):
                     "arm64": str(source / "out/Arm/args.gn"),
                     "x64": str(source / "out/X64/args.gn"),
                 },
+                {
+                    "files_removed": prepare_source.PRUNING_EXPECTED_REMOVAL_COUNT,
+                    "already_absent_files": prepare_source.PRUNING_ALREADY_ABSENT_COUNT,
+                    "already_absent_sha256": prepare_source.PRUNING_ALREADY_ABSENT_SHA256,
+                },
+                dependency_report,
+                localized_report,
             )
 
     def test_common_transformations_run_in_domain_name_i18n_order(self):
@@ -798,6 +1158,8 @@ class PrepareSourceTests(unittest.TestCase):
         ), mock.patch.object(
             prepare_source, "write_args_gn", return_value={}
         ), mock.patch.object(
+            prepare_source, "generate_onboarding_strings", return_value={}
+        ), mock.patch.object(
             prepare_source, "write_preparation_receipt", return_value={}
         ), mock.patch.object(
             prepare_source, "require_disk_floor", side_effect=fake_gate
@@ -816,6 +1178,7 @@ class PrepareSourceTests(unittest.TestCase):
                 "common resource copy",
                 "pinned ICNS install",
                 "arm64/x64 args.gn write",
+                "deterministic onboarding strings generation",
                 "preparation receipt write",
                 "post-preparation completion",
             ],

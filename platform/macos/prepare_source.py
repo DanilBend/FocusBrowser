@@ -11,6 +11,8 @@ import configparser
 import hashlib
 import json
 import os
+import platform
+import posixpath
 import re
 import shutil
 import stat
@@ -56,6 +58,12 @@ PREPARATION_RECEIPT = "out/FocusMacPreparation.json"
 PRUNING_LIST = REPO_ROOT / "focus-chromium" / "pruning.list"
 PRUNING_LIST_SHA256 = "bd08456aebb271572261a9c387cc4c8d4944264cfd8044c3f165b82e3a31b5d1"
 PRUNING_ENTRY_COUNT = 13800
+PRUNING_ALREADY_ABSENT_LIST = MACOS_DIR / "pruning-already-absent.list"
+PRUNING_ALREADY_ABSENT_COUNT = 125
+PRUNING_ALREADY_ABSENT_SHA256 = (
+    "183dd1c796cbbbb9ab11a74bb8a7d9b8c761999de65a8757a9a2a32883cb479c"
+)
+PRUNING_EXPECTED_REMOVAL_COUNT = PRUNING_ENTRY_COUNT - PRUNING_ALREADY_ABSENT_COUNT
 GIB = 1024 ** 3
 HARD_DISK_FLOOR_GIB = 30
 HARD_DISK_FLOOR_BYTES = HARD_DISK_FLOOR_GIB * GIB
@@ -68,6 +76,8 @@ ACQUISITION_GCLIENT_SPEC_SHA256 = (
 MAX_ACQUISITION_MARKER_BYTES = 1024 * 1024
 TOOL_BOOTSTRAP_MARKER = ".focus-macos-tool-bootstrap.json"
 MAX_TOOL_BOOTSTRAP_MARKER_BYTES = 1024 * 1024
+DEPENDENCY_CACHE_MARKER = ".focus-project-dependencies.json"
+MAX_DEPENDENCY_CACHE_MARKER_BYTES = 1024 * 1024
 BOOTSTRAP_POST_FREE_GIB = 70
 TOOL_BOOTSTRAP_KEYS = frozenset(
     (
@@ -86,7 +96,7 @@ TOOL_BOOTSTRAP_KEYS = frozenset(
     )
 )
 
-DEPENDENCY_CONTRACTS = OrderedDict(
+SHARED_DEPENDENCY_CONTRACTS = OrderedDict(
     (
         (
             "search_engines_data",
@@ -106,6 +116,10 @@ DEPENDENCY_CONTRACTS = OrderedDict(
                 "output_path": "components/focus_onboarding",
                 "strip_leading_dirs": None,
                 "kind": "tar",
+                "omitted_symlink_count": 10,
+                "omitted_symlink_sha256": (
+                    "d612dad748de693b7fd2bfbc5c7edf9781d75612fc96ae0bfe6dd92484dad42e"
+                ),
             },
         ),
         (
@@ -120,6 +134,128 @@ DEPENDENCY_CONTRACTS = OrderedDict(
         ),
     )
 )
+
+MAC_HOST_DEPENDENCY_CONTRACTS = OrderedDict(
+    (
+        (
+            "chromium_node_arm64",
+            {
+                "download_filename": "node-darwin-arm64-150.0.7871.128.tar.gz",
+                "sha256": "b1be502d1635330ebf51d85f8d32a0d3dd92b35c6700def56ae6f903906ea825",
+                "output_path": "third_party/node/mac_arm64",
+                "strip_leading_dirs": None,
+                "kind": "tar",
+            },
+        ),
+        (
+            "chromium_node_x64",
+            {
+                "download_filename": "node-darwin-x64-150.0.7871.128.tar.gz",
+                "sha256": "a25cd3ef35d8b4b5a59498a5a62b5b12cc271dc420ee809abaa76110d12c156e",
+                "output_path": "third_party/node/mac",
+                "strip_leading_dirs": None,
+                "kind": "tar",
+            },
+        ),
+        (
+            "chromium_node_modules",
+            {
+                "download_filename": "chromium-node-modules-150.0.7871.128.tar.gz",
+                "sha256": "6781ef493aa77be4ca4824dc1d5f5157a2fbc56dacafe20914da4469f7a01b87",
+                "output_path": "third_party/node/node_modules",
+                "strip_leading_dirs": None,
+                "kind": "tar",
+            },
+        ),
+        (
+            "esbuild_darwin_arm64",
+            {
+                "download_filename": "esbuild-darwin-arm64-0.25.9.tgz",
+                "sha256": "dd1abc1f869ab57c5e1b76ddef546d53c473a0d06aecb77fe10af084c47ac7e6",
+                "output_path": (
+                    "components/focus_onboarding/node_modules/"
+                    "@esbuild/darwin-arm64"
+                ),
+                "strip_leading_dirs": "package",
+                "kind": "tar",
+            },
+        ),
+        (
+            "esbuild_darwin_x64",
+            {
+                "download_filename": "esbuild-darwin-x64-0.25.9.tgz",
+                "sha256": "14a33c598fb04937a75efa88c5f58e2317bfd821e36b1e222bd040ff34828738",
+                "output_path": (
+                    "components/focus_onboarding/node_modules/@esbuild/darwin-x64"
+                ),
+                "strip_leading_dirs": "package",
+                "kind": "tar",
+            },
+        ),
+        (
+            "rollup_darwin_arm64",
+            {
+                "download_filename": "rollup-darwin-arm64-4.50.1.tgz",
+                "sha256": "4fcf015726b2b857fae02a87e74c61db6021d578b5a93066871f585f4c2d449b",
+                "output_path": (
+                    "components/focus_onboarding/node_modules/"
+                    "@rollup/rollup-darwin-arm64"
+                ),
+                "strip_leading_dirs": "package",
+                "kind": "tar",
+            },
+        ),
+        (
+            "rollup_darwin_x64",
+            {
+                "download_filename": "rollup-darwin-x64-4.50.1.tgz",
+                "sha256": "b3ca6f5e10f3ccd532b1dfc070b5845c2194e024e40ccaa30ec34f68e3f79da0",
+                "output_path": (
+                    "components/focus_onboarding/node_modules/"
+                    "@rollup/rollup-darwin-x64"
+                ),
+                "strip_leading_dirs": "package",
+                "kind": "tar",
+            },
+        ),
+    )
+)
+
+DEPENDENCY_CONTRACTS = OrderedDict(
+    tuple(SHARED_DEPENDENCY_CONTRACTS.items())
+    + tuple(MAC_HOST_DEPENDENCY_CONTRACTS.items())
+)
+DEPENDENCY_OWNERSHIP_ROOTS = (
+    "third_party/search_engines_data/resources_internal",
+    "components/focus_onboarding",
+    "third_party/ublock",
+    "third_party/node/mac_arm64",
+    "third_party/node/mac",
+    "third_party/node/node_modules",
+)
+DEPENDENCY_INSTALL_REGULAR_FILES = 13212
+DEPENDENCY_INSTALL_LOGICAL_BYTES = 527357876
+DEPENDENCY_INSTALL_SHA256 = (
+    "fae7c86705a88ebf63e8f320f0cea0191ae9119f94e78025ce832651bf00aa78"
+)
+ONBOARDING_GENERATOR = "components/focus_onboarding/util/generate-i18n.mts"
+ONBOARDING_GENERATOR_SHA256 = (
+    "05997f7204a7f720e71821d3523c189c4bd0ee8f98cb386ad61c4f555eb24fc6"
+)
+ONBOARDING_STRINGS_OUTPUT = "components/focus_onboarding/src/lib/strings.ts"
+ONBOARDING_STRINGS_BASELINE_BYTES = 22871
+ONBOARDING_STRINGS_BASELINE_SHA256 = (
+    "6c4b2ff902172bd71d666c0c34b4d37aa9e2ba858e0bd648198b45fb3fc5f683"
+)
+ONBOARDING_NODE_VERSION = "v24.12.0"
+ONBOARDING_NODE_RELATIVE_BY_HOST = {
+    "arm64": "third_party/node/mac_arm64/node-darwin-arm64/bin/node",
+    "x86_64": "third_party/node/mac/node-darwin-x64/bin/node",
+}
+ONBOARDING_NODE_SHA256_BY_HOST = {
+    "arm64": "90ee1d271eec831fd38d16c78c19cc36809548ac5cd034a6e0c10c4389c881ef",
+    "x86_64": "cdd4fee89f17b91fb473a03d50ebbdef4f955740a79f8a9d8382db432198b0b7",
+}
 
 
 class PreparationError(RuntimeError):
@@ -416,7 +552,7 @@ def validate_tool_bootstrap_marker(source_root, acquisition):
 
 
 def validate_dependency_manifest():
-    """Pin deps.ini and the three project dependencies used by the shared build."""
+    """Pin deps.ini plus the Mac-only host archives needed by the build."""
     if DEPS_INI.is_symlink() or not DEPS_INI.is_file():
         raise PreparationError("missing regular dependency manifest: {}".format(DEPS_INI))
     actual_hash = sha256_file(DEPS_INI)
@@ -426,9 +562,9 @@ def validate_dependency_manifest():
         )
     parser = configparser.ConfigParser()
     parser.read(DEPS_INI, encoding="utf-8")
-    if parser.sections() != list(DEPENDENCY_CONTRACTS):
+    if parser.sections() != list(SHARED_DEPENDENCY_CONTRACTS):
         raise PreparationError("deps.ini component order/inventory changed")
-    for name, expected in DEPENDENCY_CONTRACTS.items():
+    for name, expected in SHARED_DEPENDENCY_CONTRACTS.items():
         section = parser[name]
         observed = {
             "download_filename": section.get("download_filename"),
@@ -479,6 +615,79 @@ def validate_offline_cache(cache_root, contracts=None):
     return cache, report
 
 
+def validate_dependency_cache_marker(cache_root, contracts=None):
+    """Bind the additive Mac cache to the exact complete 10-archive inventory."""
+    cache = require_real_directory(cache_root, "offline cache")
+    contracts = contracts or validate_dependency_manifest()
+    marker = cache / DEPENDENCY_CACHE_MARKER
+    if marker.is_symlink() or not marker.is_file():
+        raise PreparationError("missing regular dependency cache marker: {}".format(marker))
+    if marker.stat().st_size <= 0 or marker.stat().st_size > MAX_DEPENDENCY_CACHE_MARKER_BYTES:
+        raise PreparationError("dependency cache marker size is invalid")
+    try:
+        payload = json.loads(
+            marker.read_text(encoding="utf-8"),
+            object_pairs_hook=_json_object_without_duplicates,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PreparationError("invalid dependency cache marker JSON") from exc
+    if not isinstance(payload, dict) or set(payload) != {
+        "archives",
+        "deps_ini_sha256",
+        "source_mutated",
+        "unpacked",
+    }:
+        raise PreparationError("dependency cache marker schema mismatch")
+    if (
+        payload["deps_ini_sha256"] != DEPS_INI_SHA256
+        or payload["source_mutated"] is not False
+        or payload["unpacked"] is not False
+    ):
+        raise PreparationError("dependency cache marker safety contract mismatch")
+    expected_archives = []
+    total_bytes = 0
+    allowed_entries = {DEPENDENCY_CACHE_MARKER}
+    for name, contract in contracts.items():
+        archive = require_regular_in_tree(
+            cache, contract["download_filename"], "cached dependency"
+        )
+        allowed_entries.add(contract["download_filename"])
+        size = archive.stat().st_size
+        total_bytes += size
+        if sha256_file(archive) != contract["sha256"]:
+            raise PreparationError(
+                "dependency cache archive hash changed: {}".format(archive)
+            )
+        expected_archives.append(
+            {
+                "bytes": size,
+                "name": name,
+                "path": str(archive),
+                "sha256": contract["sha256"],
+            }
+        )
+    if payload["archives"] != expected_archives:
+        raise PreparationError("dependency cache marker archive inventory mismatch")
+    observed_entries = set()
+    for entry in cache.iterdir():
+        if entry.is_symlink() or not entry.is_file():
+            raise PreparationError(
+                "dependency cache contains a non-regular entry: {}".format(entry)
+            )
+        observed_entries.add(entry.name)
+    if observed_entries != allowed_entries:
+        raise PreparationError("dependency cache contains an unexpected or partial file")
+    return {
+        "path": str(marker),
+        "sha256": sha256_file(marker),
+        "archive_count": len(expected_archives),
+        "total_bytes": total_bytes,
+        "archives": {
+            name: contract["sha256"] for name, contract in contracts.items()
+        },
+    }
+
+
 def _stripped_archive_path(name, prefix, label):
     raw = name.rstrip("/")
     # Reproducible tar tools conventionally prefix every member with exactly
@@ -503,6 +712,90 @@ def _stripped_archive_path(name, prefix, label):
     if not relative.parts:
         return None
     return relative
+
+
+def _normalized_link_target(member_path, linkname):
+    """Resolve an archive link target without permitting an archive-root escape."""
+    if not isinstance(linkname, str) or not linkname or "\\" in linkname:
+        raise PreparationError("tar link target is invalid")
+    link = PurePosixPath(linkname)
+    if link.is_absolute():
+        raise PreparationError("tar link target must be relative")
+    combined = posixpath.normpath(
+        posixpath.join(PurePosixPath(member_path).parent.as_posix(), linkname)
+    )
+    if combined in ("", ".") or combined == ".." or combined.startswith("../"):
+        raise PreparationError("tar link target escapes archive root")
+    return safe_relative(combined, "tar link target")
+
+
+def _tar_member_inventory(stream):
+    """Build a duplicate-free normalized inventory for safe link resolution."""
+    inventory = {}
+    for member in stream.getmembers():
+        relative = _stripped_archive_path(member.name, None, "tar member")
+        if relative is None:
+            if not member.isdir():
+                raise PreparationError("tar non-directory resolves to archive root")
+            continue
+        name = relative.as_posix()
+        if name in inventory:
+            raise PreparationError("duplicate normalized tar member: {}".format(name))
+        inventory[name] = member
+    return inventory
+
+
+def _resolve_materialized_tar_member(
+    member_path, inventory, prefix=None, stack=None
+):
+    """Resolve an approved in-node_modules link to its regular-file payload."""
+    stack = set() if stack is None else set(stack)
+    if member_path in stack:
+        raise PreparationError("tar link cycle at {}".format(member_path))
+    stack.add(member_path)
+    member = inventory.get(member_path)
+    if member is None:
+        raise PreparationError("tar link target is missing: {}".format(member_path))
+    if member.isfile():
+        return member
+    destination = _stripped_archive_path(
+        member_path, prefix, "tar link destination"
+    )
+    if destination is None:
+        raise PreparationError("tar link destination resolves to archive root")
+    if member.issym():
+        if not (
+            destination.parts
+            and destination.parts[0] == "node_modules"
+            and ".bin" in destination.parts
+        ):
+            raise PreparationError(
+                "tar symbolic link is outside approved node_modules/.bin: {}".format(
+                    member.name
+                )
+            )
+        target = _normalized_link_target(member_path, member.linkname)
+    elif member.islnk():
+        if not (destination.parts and destination.parts[0] == "node_modules"):
+            raise PreparationError(
+                "tar hard link is outside node_modules: {}".format(member.name)
+            )
+        target_path = _stripped_archive_path(
+            member.linkname, None, "tar hard-link target"
+        )
+        if target_path is None:
+            raise PreparationError("tar hard link targets archive root")
+        target = target_path.as_posix()
+    else:
+        raise PreparationError("tar member is not materializable: {}".format(member.name))
+    logical_target = _stripped_archive_path(target, prefix, "tar link target")
+    if logical_target is None or not (
+        logical_target.parts and logical_target.parts[0] == "node_modules"
+    ):
+        raise PreparationError("tar link target leaves node_modules: {}".format(target))
+    return _resolve_materialized_tar_member(
+        target, inventory, prefix=prefix, stack=stack
+    )
 
 
 def inspect_archive(archive, contract):
@@ -538,22 +831,70 @@ def inspect_archive(archive, contract):
                 entries.append((value, member.filename, member.file_size, mode & 0o777))
     elif contract["kind"] == "tar":
         with tarfile.open(archive, "r:*") as stream:
+            inventory = _tar_member_inventory(stream)
+            omitted_symlinks = []
             for member in stream.getmembers():
                 if member.isdir():
                     _stripped_archive_path(member.name, prefix, "tar member")
                     continue
-                if not member.isfile():
-                    raise PreparationError(
-                        "tar member is not a regular file: {}".format(member.name)
-                    )
                 relative = _stripped_archive_path(member.name, prefix, "tar member")
                 if relative is None:
                     raise PreparationError("tar regular file resolves to archive root")
+                normalized_member = _stripped_archive_path(
+                    member.name, None, "tar member"
+                ).as_posix()
+                payload_member = _resolve_materialized_tar_member(
+                    normalized_member, inventory, prefix=prefix
+                )
+                # npm's node_modules/.bin symbolic links are developer shims.
+                # Copying their target bytes changes relative-import semantics;
+                # the Chromium GN action invokes Vite's real script directly.
+                # Validate each link and target above, then intentionally omit it.
+                if member.issym():
+                    omitted_symlinks.append(
+                        "{}\t{}".format(relative.as_posix(), member.linkname)
+                    )
+                    continue
                 value = relative.as_posix()
                 if value in seen:
                     raise PreparationError("duplicate archive destination: {}".format(value))
                 seen.add(value)
-                entries.append((value, member.name, member.size, member.mode & 0o777))
+                entries.append(
+                    (
+                        value,
+                        payload_member.name,
+                        payload_member.size,
+                        payload_member.mode & 0o777,
+                    )
+                )
+            expected_omitted_count = contract.get("omitted_symlink_count", 0)
+            expected_omitted_hash = contract.get(
+                "omitted_symlink_sha256", hashlib.sha256(b"").hexdigest()
+            )
+            if (
+                type(expected_omitted_count) is not int
+                or expected_omitted_count < 0
+                or not isinstance(expected_omitted_hash, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", expected_omitted_hash)
+            ):
+                raise PreparationError("tar omitted-symlink contract is invalid")
+            omitted_body = "".join(
+                "{}\n".format(value) for value in omitted_symlinks
+            ).encode("utf-8")
+            omitted_hash = hashlib.sha256(omitted_body).hexdigest()
+            if (
+                len(omitted_symlinks) != expected_omitted_count
+                or omitted_hash != expected_omitted_hash
+            ):
+                raise PreparationError(
+                    "tar omitted-symlink inventory mismatch: expected {} / {}, "
+                    "got {} / {}".format(
+                        expected_omitted_count,
+                        expected_omitted_hash,
+                        len(omitted_symlinks),
+                        omitted_hash,
+                    )
+                )
     else:
         raise PreparationError("unsupported dependency archive kind: {}".format(contract["kind"]))
     if not entries:
@@ -614,10 +955,123 @@ def atomic_copy(source, destination):
             temporary.unlink()
 
 
-def merge_staged_dependencies(source_root, stage_root, contracts):
-    """Copy staged dependency regular files into their declared source paths."""
+def dependency_output_roots(contracts):
+    """Return the stable, non-overlapping roots owned entirely by the archives."""
+    declared = [
+        PurePosixPath(safe_relative(value["output_path"], "dependency output"))
+        for value in contracts.values()
+    ]
+    roots = []
+    for candidate in declared:
+        if any(candidate.parts[: len(root.parts)] == root.parts for root in roots):
+            continue
+        roots = [
+            root
+            for root in roots
+            if root.parts[: len(candidate.parts)] != candidate.parts
+        ]
+        roots.append(candidate)
+    return tuple(root.as_posix() for root in roots)
+
+
+def require_empty_dependency_roots(source_root, contracts=None):
+    """Require archive-owned roots to be absent or real and completely empty."""
     source_root = require_real_directory(source_root, "Chromium source")
+    contracts = contracts or DEPENDENCY_CONTRACTS
+    roots = dependency_output_roots(contracts)
+    for relative_root in roots:
+        root = reject_symlink_ancestors(source_root, relative_root)
+        if not root.exists() and not root.is_symlink():
+            continue
+        if root.is_symlink() or not root.is_dir():
+            raise PreparationError("unsafe dependency output root: {}".format(root))
+        if any(root.iterdir()):
+            raise PreparationError(
+                "dependency output root is not empty before merge: {}".format(root)
+            )
+    return roots
+
+
+def _dependency_inventory_report(roots, directories, files):
+    implied_directories = set(roots)
+    for relative in files:
+        parent = PurePosixPath(relative).parent
+        while parent.as_posix() not in ("", "."):
+            implied_directories.add(parent.as_posix())
+            if parent.as_posix() in roots:
+                break
+            parent = parent.parent
+    if directories != implied_directories:
+        raise PreparationError("installed dependency directory inventory mismatch")
+    lines = []
+    total_bytes = 0
+    for relative in sorted(files):
+        entry = files[relative]
+        total_bytes += entry["bytes"]
+        lines.append(
+            "{}\0{:04o}\0{}\0{}\n".format(
+                relative, entry["mode"], entry["bytes"], entry["sha256"]
+            )
+        )
+    body = "".join(lines).encode("utf-8")
+    return {
+        "ownership_roots": list(roots),
+        "regular_files": len(files),
+        "logical_bytes": total_bytes,
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "installed_symlinks": 0,
+        "installed_special_files": 0,
+    }
+
+
+def installed_dependency_tree(source_root, contracts=None):
+    """Hash every directory and regular file under the archive-owned roots."""
+    source_root = require_real_directory(source_root, "Chromium source")
+    contracts = contracts or DEPENDENCY_CONTRACTS
+    roots = dependency_output_roots(contracts)
+    directories = set()
+    files = {}
+    for relative_root in roots:
+        root = reject_symlink_ancestors(source_root, relative_root)
+        if root.is_symlink() or not root.is_dir():
+            raise PreparationError(
+                "missing real installed dependency root: {}".format(root)
+            )
+        directories.add(relative_root)
+        for current, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+            current_path = Path(current)
+            for name in sorted(dirnames):
+                path = current_path / name
+                if path.is_symlink() or not path.is_dir():
+                    raise PreparationError(
+                        "installed dependency contains unsafe directory: {}".format(path)
+                    )
+                directories.add(path.relative_to(source_root).as_posix())
+            for name in sorted(filenames):
+                path = current_path / name
+                if path.is_symlink() or not path.is_file():
+                    raise PreparationError(
+                        "installed dependency contains unsafe file: {}".format(path)
+                    )
+                relative = path.relative_to(source_root).as_posix()
+                metadata = path.stat()
+                files[relative] = {
+                    "mode": stat.S_IMODE(metadata.st_mode),
+                    "bytes": metadata.st_size,
+                    "sha256": sha256_file(path),
+                }
+    return _dependency_inventory_report(roots, directories, files)
+
+
+def merge_staged_dependencies(source_root, stage_root, contracts):
+    """Install a deterministic archive tree into initially empty owned roots."""
+    source_root = require_real_directory(source_root, "Chromium source")
+    roots = require_empty_dependency_roots(source_root, contracts)
+
     plan = []
+    destinations = set()
+    expected_directories = set(roots)
+    expected_files = {}
     for name, contract in contracts.items():
         staged = require_real_directory(Path(stage_root) / name, "staged dependency")
         output = safe_relative(contract["output_path"], "dependency output")
@@ -630,15 +1084,230 @@ def merge_staged_dependencies(source_root, stage_root, contracts):
                 raise PreparationError("staged dependency contains special file: {}".format(source))
             relative = source.relative_to(staged).as_posix()
             destination_relative = PurePosixPath(output, relative).as_posix()
+            candidate = PurePosixPath(destination_relative)
+            if destination_relative in destinations or any(
+                parent.as_posix() in destinations for parent in candidate.parents
+            ) or any(
+                PurePosixPath(existing).parts[: len(candidate.parts)] == candidate.parts
+                for existing in destinations
+            ):
+                raise PreparationError(
+                    "duplicate or colliding dependency destination: {}".format(
+                        destination_relative
+                    )
+                )
+            destinations.add(destination_relative)
             destination = reject_symlink_ancestors(
                 source_root, destination_relative, include_leaf=False
             )
-            if destination.is_symlink() or (destination.exists() and not destination.is_file()):
-                raise PreparationError("unsafe dependency destination: {}".format(destination))
+            if destination.is_symlink() or destination.exists():
+                raise PreparationError(
+                    "dependency destination exists before merge: {}".format(destination)
+                )
+            metadata = source.stat()
+            expected_files[destination_relative] = {
+                "mode": stat.S_IMODE(metadata.st_mode),
+                "bytes": metadata.st_size,
+                "sha256": sha256_file(source),
+            }
+            parent = PurePosixPath(destination_relative).parent
+            while parent.as_posix() not in ("", "."):
+                expected_directories.add(parent.as_posix())
+                if parent.as_posix() in roots:
+                    break
+                parent = parent.parent
             plan.append((name, source, destination))
+    expected = _dependency_inventory_report(
+        roots, expected_directories, expected_files
+    )
+    if list(contracts) == list(DEPENDENCY_CONTRACTS) and expected != {
+        "ownership_roots": list(DEPENDENCY_OWNERSHIP_ROOTS),
+        "regular_files": DEPENDENCY_INSTALL_REGULAR_FILES,
+        "logical_bytes": DEPENDENCY_INSTALL_LOGICAL_BYTES,
+        "sha256": DEPENDENCY_INSTALL_SHA256,
+        "installed_symlinks": 0,
+        "installed_special_files": 0,
+    }:
+        raise PreparationError("staged dependency inventory does not match pinned union")
     for _, source, destination in plan:
         atomic_copy(source, destination)
-    return {"files_copied": len(plan), "components": list(contracts)}
+    observed = installed_dependency_tree(source_root, contracts)
+    if observed != expected:
+        raise PreparationError("installed dependency tree inventory mismatch")
+    return {
+        **observed,
+        "files_copied": len(plan),
+        "components": list(contracts),
+        "omitted_symlinks": {
+            "onboarding": {
+                "count": SHARED_DEPENDENCY_CONTRACTS["onboarding"][
+                    "omitted_symlink_count"
+                ],
+                "sha256": SHARED_DEPENDENCY_CONTRACTS["onboarding"][
+                    "omitted_symlink_sha256"
+                ],
+            }
+        },
+    }
+
+
+def onboarding_node_contract(source_root):
+    """Validate the exact native Node used for deterministic source generation."""
+    source_root = require_real_directory(source_root, "Chromium source")
+    machine = platform.machine().lower()
+    if machine == "aarch64":
+        machine = "arm64"
+    elif machine == "amd64":
+        machine = "x86_64"
+    if machine not in ONBOARDING_NODE_RELATIVE_BY_HOST:
+        raise PreparationError(
+            "unsupported Mac host architecture for onboarding Node: {}".format(machine)
+        )
+    relative = ONBOARDING_NODE_RELATIVE_BY_HOST[machine]
+    node = require_regular_in_tree(source_root, relative, "onboarding Node")
+    if not os.access(node, os.X_OK):
+        raise PreparationError("onboarding Node is not executable")
+    observed_hash = sha256_file(node)
+    if observed_hash != ONBOARDING_NODE_SHA256_BY_HOST[machine]:
+        raise PreparationError("onboarding Node hash mismatch")
+    environment = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "TZ": "UTC"}
+    architecture = subprocess.run(
+        ["/usr/bin/lipo", "-archs", str(node)],
+        cwd=str(source_root),
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if architecture.returncode or architecture.stdout.strip().split() != [machine]:
+        raise PreparationError("onboarding Node architecture mismatch")
+    version = subprocess.run(
+        [str(node), "--version"],
+        cwd=str(source_root),
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if version.returncode or version.stdout.strip() != ONBOARDING_NODE_VERSION:
+        raise PreparationError("onboarding Node version mismatch")
+    return {
+        "path": str(node),
+        "relative_path": relative,
+        "architecture": machine,
+        "version": ONBOARDING_NODE_VERSION,
+        "sha256": observed_hash,
+    }
+
+
+def generate_onboarding_strings(source_root, runner=subprocess.run):
+    """Generate strings.ts twice and require byte-identical offline output."""
+    source_root = require_real_directory(source_root, "Chromium source")
+    node = onboarding_node_contract(source_root)
+    generator = require_regular_in_tree(
+        source_root, ONBOARDING_GENERATOR, "onboarding i18n generator"
+    )
+    if sha256_file(generator) != ONBOARDING_GENERATOR_SHA256:
+        raise PreparationError("onboarding i18n generator hash mismatch")
+    output = reject_symlink_ancestors(
+        source_root, ONBOARDING_STRINGS_OUTPUT, include_leaf=False
+    )
+    baseline = require_regular_in_tree(
+        source_root, ONBOARDING_STRINGS_OUTPUT, "overlay onboarding strings baseline"
+    )
+    baseline_hash = sha256_file(baseline)
+    if (
+        baseline.stat().st_size != ONBOARDING_STRINGS_BASELINE_BYTES
+        or baseline_hash != ONBOARDING_STRINGS_BASELINE_SHA256
+    ):
+        raise PreparationError("overlay onboarding strings baseline mismatch")
+    environment = {
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "TZ": "UTC",
+        "NO_COLOR": "1",
+    }
+    command = [node["path"], str(generator)]
+    hashes = []
+    for _ in range(2):
+        result = runner(
+            command,
+            cwd=str(generator.parent.parent),
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        if result.returncode:
+            detail = (result.stderr or result.stdout).strip()[-2000:]
+            raise PreparationError(
+                "onboarding strings generation failed: {}".format(detail)
+            )
+        generated = require_regular_in_tree(
+            source_root, ONBOARDING_STRINGS_OUTPUT, "generated onboarding strings"
+        )
+        if generated.stat().st_size <= 0:
+            raise PreparationError("generated onboarding strings are empty")
+        hashes.append(sha256_file(generated))
+    if hashes != [baseline_hash, baseline_hash]:
+        raise PreparationError(
+            "onboarding strings generator differs from its pinned overlay baseline"
+        )
+    return {
+        "generator": ONBOARDING_GENERATOR,
+        "generator_sha256": ONBOARDING_GENERATOR_SHA256,
+        "node": node,
+        "output": ONBOARDING_STRINGS_OUTPUT,
+        "baseline_bytes": ONBOARDING_STRINGS_BASELINE_BYTES,
+        "baseline_sha256": ONBOARDING_STRINGS_BASELINE_SHA256,
+        "output_bytes": output.stat().st_size,
+        "output_sha256": hashes[0],
+        "runs": 2,
+        "byte_identical": True,
+        "network_operations": 0,
+    }
+
+
+def load_expected_absent_pruning(path=PRUNING_ALREADY_ABSENT_LIST):
+    """Load the exact host-conditional pruning entries absent from the Mac checkout."""
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        raise PreparationError(
+            "expected-absent pruning list is not a regular file: {}".format(path)
+        )
+    actual_hash = sha256_file(path)
+    if actual_hash != PRUNING_ALREADY_ABSENT_SHA256:
+        raise PreparationError(
+            "expected-absent pruning hash mismatch: expected {}, got {}".format(
+                PRUNING_ALREADY_ABSENT_SHA256, actual_hash
+            )
+        )
+    entries = []
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line or line != line.strip() or line.startswith("#"):
+            raise PreparationError(
+                "invalid expected-absent pruning entry at {}:{}: {!r}".format(
+                    path, number, line
+                )
+            )
+        entries.append(safe_relative(line, "expected-absent pruning entry"))
+    if len(entries) != PRUNING_ALREADY_ABSENT_COUNT:
+        raise PreparationError(
+            "expected-absent pruning count mismatch: expected {}, got {}".format(
+                PRUNING_ALREADY_ABSENT_COUNT, len(entries)
+            )
+        )
+    if len(entries) != len(set(entries)):
+        raise PreparationError("duplicate expected-absent pruning entry")
+    return tuple(entries)
 
 
 def build_prune_plan(
@@ -646,8 +1315,10 @@ def build_prune_plan(
     manifest=PRUNING_LIST,
     expected_hash=PRUNING_LIST_SHA256,
     expected_count=PRUNING_ENTRY_COUNT,
+    allowed_missing=None,
+    expected_absent_paths=None,
 ):
-    """Prevalidate the exact file-only binary pruning plan."""
+    """Prevalidate the exact file-only binary pruning plan and absence set."""
     source_root = require_real_directory(source_root, "Chromium source")
     manifest = Path(manifest)
     if manifest.is_symlink() or not manifest.is_file():
@@ -659,7 +1330,26 @@ def build_prune_plan(
                 expected_hash, actual_hash
             )
         )
+    allowed_missing = {
+        safe_relative(value, "future archive pruning target")
+        for value in (allowed_missing or ())
+    }
+    expected_absent = tuple(
+        safe_relative(value, "expected absent pruning target")
+        for value in (expected_absent_paths or ())
+    )
+    if len(expected_absent) != len(set(expected_absent)):
+        raise PreparationError("duplicate expected absent pruning target")
+    expected_absent_set = set(expected_absent)
+    overlap = expected_absent_set.intersection(allowed_missing)
+    if overlap:
+        raise PreparationError(
+            "pruning targets cannot be both future and already absent: {}".format(
+                sorted(overlap)[0]
+            )
+        )
     entries = []
+    absent = []
     seen = set()
     for number, line in enumerate(manifest.read_text(encoding="utf-8").splitlines(), 1):
         if not line:
@@ -672,7 +1362,32 @@ def build_prune_plan(
         if relative in seen:
             raise PreparationError("duplicate pruning entry: {}".format(relative))
         seen.add(relative)
-        target = require_regular_in_tree(source_root, relative, "pruning target")
+        target = reject_symlink_ancestors(source_root, relative)
+        if target.is_symlink():
+            raise PreparationError("pruning target is a symlink: {}".format(target))
+        if not target.exists():
+            future_archive_file = relative in allowed_missing
+            already_absent = relative in expected_absent_set
+            if not future_archive_file and not already_absent:
+                raise PreparationError(
+                    "missing regular pruning target: {}".format(target)
+                )
+            if already_absent:
+                absent.append(relative)
+            entries.append(
+                {
+                    "relative": relative,
+                    "path": target,
+                    "future_archive_file": future_archive_file,
+                    "already_absent": already_absent,
+                    "device": None,
+                    "inode": None,
+                    "size": None,
+                }
+            )
+            continue
+        if not target.is_file():
+            raise PreparationError("pruning target is not a regular file: {}".format(target))
         metadata = target.lstat()
         if not stat.S_ISREG(metadata.st_mode):
             raise PreparationError("pruning target is not a regular file: {}".format(target))
@@ -683,6 +1398,8 @@ def build_prune_plan(
                 "device": metadata.st_dev,
                 "inode": metadata.st_ino,
                 "size": metadata.st_size,
+                "future_archive_file": False,
+                "already_absent": False,
             }
         )
     if len(entries) != expected_count:
@@ -691,15 +1408,42 @@ def build_prune_plan(
                 expected_count, len(entries)
             )
         )
+    if tuple(absent) != expected_absent:
+        raise PreparationError(
+            "missing regular pruning targets do not match the exact expected absence set"
+        )
     return entries
 
 
-def apply_prune_plan(source_root, plan):
+def apply_prune_plan(source_root, plan, expected_absent_paths=None):
     """Delete only prevalidated listed files; retain all contingent directories."""
     source_root = require_real_directory(source_root, "Chromium source")
+    expected_absent = tuple(
+        safe_relative(value, "expected absent pruning target")
+        for value in (expected_absent_paths or ())
+    )
+    if len(expected_absent) != len(set(expected_absent)):
+        raise PreparationError("duplicate expected absent pruning target")
     checked = []
+    absent = []
     for entry in plan:
+        if entry.get("future_archive_file"):
+            raise PreparationError(
+                "pruning plan still contains an unmaterialized archive file: {}".format(
+                    entry.get("relative")
+                )
+            )
         relative = safe_relative(entry["relative"], "pruning entry")
+        if entry.get("already_absent"):
+            target = reject_symlink_ancestors(source_root, relative)
+            if target.exists() or target.is_symlink():
+                raise PreparationError(
+                    "pinned-absent pruning target appeared after preflight: {}".format(
+                        target
+                    )
+                )
+            absent.append(relative)
+            continue
         target = require_regular_in_tree(source_root, relative, "pruning target")
         metadata = target.lstat()
         identity = (metadata.st_dev, metadata.st_ino, metadata.st_size)
@@ -707,12 +1451,21 @@ def apply_prune_plan(source_root, plan):
         if identity != expected:
             raise PreparationError("pruning target changed after preflight: {}".format(target))
         checked.append(target)
+    if tuple(absent) != expected_absent:
+        raise PreparationError(
+            "pruning plan absence set changed before deletion"
+        )
     for target in checked:
         target.unlink()
+    absent_hash = hashlib.sha256(
+        "".join("{}\n".format(relative) for relative in absent).encode("utf-8")
+    ).hexdigest()
     return {
         "manifest_sha256": PRUNING_LIST_SHA256,
-        "listed_files": len(checked),
+        "listed_files": len(plan),
         "files_removed": len(checked),
+        "already_absent_files": len(absent),
+        "already_absent_sha256": absent_hash,
         "contingent_paths_pruned": False,
         "directory_pruning_executed": False,
     }
@@ -1154,9 +1907,95 @@ def write_args_gn(source_root, plan=None):
     return {architecture: str(destination) for architecture, destination, _ in destinations}
 
 
-def write_preparation_receipt(source_root, preflight_report, args_paths):
+def write_preparation_receipt(
+    source_root,
+    preflight_report,
+    args_paths,
+    pruning_report,
+    dependency_report,
+    localized_strings_report,
+):
     """Write the deterministic post-preparation provenance receipt once."""
     source_root = require_real_directory(source_root, "Chromium source")
+    expected_pruning = {
+        "files_removed": PRUNING_EXPECTED_REMOVAL_COUNT,
+        "already_absent_files": PRUNING_ALREADY_ABSENT_COUNT,
+        "already_absent_sha256": PRUNING_ALREADY_ABSENT_SHA256,
+    }
+    if not isinstance(pruning_report, dict):
+        raise PreparationError("pruning result must be an object")
+    if {
+        key: pruning_report.get(key) for key in expected_pruning
+    } != expected_pruning:
+        raise PreparationError("pruning result does not match the pinned Mac inventory")
+    expected_dependency_install = {
+        "ownership_roots": list(DEPENDENCY_OWNERSHIP_ROOTS),
+        "regular_files": DEPENDENCY_INSTALL_REGULAR_FILES,
+        "logical_bytes": DEPENDENCY_INSTALL_LOGICAL_BYTES,
+        "sha256": DEPENDENCY_INSTALL_SHA256,
+        "installed_symlinks": 0,
+        "installed_special_files": 0,
+        "files_copied": DEPENDENCY_INSTALL_REGULAR_FILES,
+        "components": list(DEPENDENCY_CONTRACTS),
+        "omitted_symlinks": {
+            "onboarding": {
+                "count": SHARED_DEPENDENCY_CONTRACTS["onboarding"][
+                    "omitted_symlink_count"
+                ],
+                "sha256": SHARED_DEPENDENCY_CONTRACTS["onboarding"][
+                    "omitted_symlink_sha256"
+                ],
+            }
+        },
+    }
+    if dependency_report != expected_dependency_install:
+        raise PreparationError("dependency install result does not match pinned inventory")
+    if not isinstance(localized_strings_report, dict) or set(localized_strings_report) != {
+        "generator",
+        "generator_sha256",
+        "node",
+        "output",
+        "baseline_bytes",
+        "baseline_sha256",
+        "output_bytes",
+        "output_sha256",
+        "runs",
+        "byte_identical",
+        "network_operations",
+    }:
+        raise PreparationError("localized strings generation report schema mismatch")
+    if (
+        localized_strings_report["generator"] != ONBOARDING_GENERATOR
+        or localized_strings_report["generator_sha256"] != ONBOARDING_GENERATOR_SHA256
+        or localized_strings_report["output"] != ONBOARDING_STRINGS_OUTPUT
+        or localized_strings_report["baseline_bytes"]
+        != ONBOARDING_STRINGS_BASELINE_BYTES
+        or localized_strings_report["baseline_sha256"]
+        != ONBOARDING_STRINGS_BASELINE_SHA256
+        or localized_strings_report["output_bytes"]
+        != ONBOARDING_STRINGS_BASELINE_BYTES
+        or localized_strings_report["output_sha256"]
+        != ONBOARDING_STRINGS_BASELINE_SHA256
+        or type(localized_strings_report["output_bytes"]) is not int
+        or localized_strings_report["output_bytes"] <= 0
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", localized_strings_report["output_sha256"]
+        )
+        or localized_strings_report["runs"] != 2
+        or localized_strings_report["byte_identical"] is not True
+        or localized_strings_report["network_operations"] != 0
+        or not isinstance(localized_strings_report["node"], dict)
+    ):
+        raise PreparationError("localized strings generation report mismatch")
+    generated_strings = require_regular_in_tree(
+        source_root, ONBOARDING_STRINGS_OUTPUT, "generated onboarding strings"
+    )
+    if (
+        generated_strings.stat().st_size != localized_strings_report["output_bytes"]
+        or sha256_file(generated_strings)
+        != localized_strings_report["output_sha256"]
+    ):
+        raise PreparationError("generated onboarding strings changed before receipt")
     receipt_relative = safe_relative(PREPARATION_RECEIPT, "preparation receipt")
     receipt_path = reject_symlink_ancestors(
         source_root, receipt_relative, include_leaf=False
@@ -1174,6 +2013,7 @@ def write_preparation_receipt(source_root, preflight_report, args_paths):
             ),
             ("chrome/VERSION", "chrome/VERSION"),
             (MAC_ICON_DESTINATION, MAC_ICON_DESTINATION),
+            ("onboarding/strings.ts", ONBOARDING_STRINGS_OUTPUT),
         )
     )
     for architecture, absolute in args_paths.items():
@@ -1191,6 +2031,9 @@ def write_preparation_receipt(source_root, preflight_report, args_paths):
         )
 
     platform_patches = focus_macos.validate_platform_patch_series()
+    post_prepare_dependency_tree = installed_dependency_tree(
+        source_root, DEPENDENCY_CONTRACTS
+    )
     receipt = OrderedDict(
         (
             ("schema", 1),
@@ -1217,6 +2060,21 @@ def write_preparation_receipt(source_root, preflight_report, args_paths):
                         name: contract["sha256"]
                         for name, contract in DEPENDENCY_CONTRACTS.items()
                     },
+                    "cache_marker": preflight_report["dependency_cache_marker"],
+                    "install_inventory": {
+                        key: dependency_report[key]
+                        for key in (
+                            "ownership_roots",
+                            "regular_files",
+                            "logical_bytes",
+                            "sha256",
+                            "installed_symlinks",
+                            "installed_special_files",
+                            "components",
+                            "omitted_symlinks",
+                        )
+                    },
+                    "post_prepare_tree": post_prepare_dependency_tree,
                 },
             ),
             (
@@ -1224,6 +2082,11 @@ def write_preparation_receipt(source_root, preflight_report, args_paths):
                 {
                     "manifest_sha256": PRUNING_LIST_SHA256,
                     "listed_files": PRUNING_ENTRY_COUNT,
+                    "files_removed": pruning_report["files_removed"],
+                    "already_absent_files": pruning_report["already_absent_files"],
+                    "already_absent_sha256": pruning_report[
+                        "already_absent_sha256"
+                    ],
                     "contingent_paths_pruned": False,
                     "directory_pruning_executed": False,
                 },
@@ -1241,6 +2104,7 @@ def write_preparation_receipt(source_root, preflight_report, args_paths):
             ),
             ("icns_sha256", focus_macos.FOCUS_ICNS_SHA256),
             ("post_prepare_sha256", post_hashes),
+            ("localized_strings_contract", localized_strings_report),
             ("build_executed", False),
             ("signing_executed", False),
             ("packaging_executed", False),
@@ -1274,16 +2138,34 @@ def preflight(source_root, cache_root):
     repository = focus_macos.validate_repository_contract()
     contracts = validate_dependency_manifest()
     cache, cache_report = validate_offline_cache(cache_root, contracts)
+    dependency_cache_marker = validate_dependency_cache_marker(cache, contracts)
+    require_empty_dependency_roots(source, contracts)
     archives = {}
     archive_files = 0
+    future_dependency_paths = set()
     for name, contract in contracts.items():
         archive = cache / contract["download_filename"]
         entries = inspect_archive(archive, contract)
         archives[name] = str(archive)
         archive_files += len(entries)
+        output = PurePosixPath(contract["output_path"])
+        future_dependency_paths.update(
+            PurePosixPath(output, relative).as_posix()
+            for relative, _, _, _ in entries
+        )
     patch_plan = build_patch_plan()
     validate_patch_tool()
-    prune_plan = build_prune_plan(source)
+    expected_absent_pruning = load_expected_absent_pruning()
+    prune_plan = build_prune_plan(
+        source,
+        allowed_missing=future_dependency_paths,
+        expected_absent_paths=expected_absent_pruning,
+    )
+    pruning_present = sum(
+        not entry["future_archive_file"] and not entry["already_absent"]
+        for entry in prune_plan
+    )
+    pruning_future = sum(entry["future_archive_file"] for entry in prune_plan)
     overlay_files, cleanup_paths, _ = build_overlay_plan()
     resource_plan = parse_resource_plan()
     gn_plan = args_gn_plan()
@@ -1304,10 +2186,15 @@ def preflight(source_root, cache_root):
         "network_operations": 0,
         "upstream_baseline_sha256": upstream_baseline,
         "dependencies": cache_report,
+        "dependency_cache_marker": dependency_cache_marker,
         "dependency_archive_files": archive_files,
         "pruning": {
             "manifest_sha256": PRUNING_LIST_SHA256,
             "listed_files": len(prune_plan),
+            "files_present": pruning_present,
+            "future_archive_files": pruning_future,
+            "already_absent_files": PRUNING_ALREADY_ABSENT_COUNT,
+            "already_absent_sha256": PRUNING_ALREADY_ABSENT_SHA256,
             "contingent_paths_pruned": False,
             "directory_pruning_executed": False,
         },
@@ -1349,9 +2236,15 @@ def prepare(source_root, cache_root, workers=None):
         gate("dependency merge")
         dependency_report = merge_staged_dependencies(source, stage, contracts)
 
-    prune_plan = build_prune_plan(source)
+    expected_absent_pruning = load_expected_absent_pruning()
+    prune_plan = build_prune_plan(
+        source,
+        expected_absent_paths=expected_absent_pruning,
+    )
     gate("file-only binary pruning")
-    pruning_report = apply_prune_plan(source, prune_plan)
+    pruning_report = apply_prune_plan(
+        source, prune_plan, expected_absent_paths=expected_absent_pruning
+    )
     patch_plan = build_patch_plan()
     gate("324-patch batch")
     applied = apply_patch_plan(source, patch_plan)
@@ -1369,8 +2262,17 @@ def prepare(source_root, cache_root, workers=None):
     icon = install_focus_icns(source)
     gate("arm64/x64 args.gn write")
     args_paths = write_args_gn(source)
+    gate("deterministic onboarding strings generation")
+    localized_strings = generate_onboarding_strings(source)
     gate("preparation receipt write")
-    receipt = write_preparation_receipt(source, report, args_paths)
+    receipt = write_preparation_receipt(
+        source,
+        report,
+        args_paths,
+        pruning_report,
+        dependency_report,
+        localized_strings,
+    )
     gate("post-preparation completion")
     report.update(
         {
@@ -1384,6 +2286,7 @@ def prepare(source_root, cache_root, workers=None):
             "resources_copied": resource_count,
             "icns_installed": icon,
             "args_gn_written": args_paths,
+            "localized_strings": localized_strings,
             "preparation_receipt": receipt,
             "disk_gates": disk_gates,
             "hard_disk_floor_gib": HARD_DISK_FLOOR_GIB,

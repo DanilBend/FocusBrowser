@@ -61,8 +61,10 @@ python3 platform/macos/acquire_chromium.py \
 This prints the complete plan as JSON and performs no network or filesystem
 mutation. Supplying paths alone is never permission to download.
 
-To include the three archives declared by the repository's hash-pinned
-`focus-chromium/deps.ini`, add both options during preflight:
+To include all ten archives required by the offline Mac preparation (the three
+entries declared by the repository's hash-pinned `focus-chromium/deps.ini`
+plus seven pinned Node/esbuild/Rollup host inputs for arm64 and x86_64), add
+both options during preflight:
 
 ```sh
 python3 platform/macos/acquire_chromium.py \
@@ -89,7 +91,7 @@ If project dependencies were opted in during preflight, keep
 well. Each archive is downloaded to a `.part` filename with HTTPS-only curl, a
 512 MiB per-file ceiling, and the runtime disk monitor. It becomes visible at
 its final name only after its repository-pinned SHA-256 matches. The cache gets
-its own atomic verification marker after all three pass. Archives are never
+its own atomic verification marker after all ten pass. Archives are never
 unpacked by this tool and the Chromium source is not touched by this optional
 stage. In particular, the root Windows `downloads.ini` is never read or used.
 
@@ -146,3 +148,9 @@ executable checkout tools `gclient`, `gn`, and `autoninja`. It also requires at
 least 70 GiB recorded after hooks and `build_executed=false`. Missing, copied,
 extended, stale-tool, or tampered markers fail before dependency merge, binary
 pruning, patching, or any other source write.
+
+The later additive `.focus-project-dependencies.json` cache marker is separate
+from the honest earlier source-acquisition receipt. Source preparation requires
+that additive marker to list all ten archives in exact order with current
+absolute paths, sizes, and SHA-256 values, and requires both `unpacked` and
+`source_mutated` to remain false.
