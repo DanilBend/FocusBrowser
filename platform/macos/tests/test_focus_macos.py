@@ -871,6 +871,10 @@ class FocusMacPlannerTests(unittest.TestCase):
             "is_component_build=false\n"
             "is_debug=false\n"
             "is_official_build=true\n"
+            "enable_updater=false\n"
+            "include_branded_entitlements=false\n"
+            "use_siso=false\n"
+            "use_remoteexec=false\n"
             "symbol_level=0\n"
         )
         composed, names = focus_macos.parse_gn_assignments((path,))
@@ -888,7 +892,11 @@ class FocusMacPlannerTests(unittest.TestCase):
                 + "use_system_xcode=true\n"
                 + "is_component_build=false\n"
                 + "is_debug=false\n"
-                + "is_official_build=true\n",
+                + "is_official_build=true\n"
+                + "enable_updater=false\n"
+                + "include_branded_entitlements=false\n"
+                + "use_siso=false\n"
+                + "use_remoteexec=false\n",
                 "invalid-{}.gn".format(index),
             )
             with self.subTest(suffix=suffix):
@@ -904,7 +912,11 @@ class FocusMacPlannerTests(unittest.TestCase):
             "use_system_xcode=true\n"
             "is_component_build=false\n"
             "is_debug=false\n"
-            "is_official_build=true\n",
+            "is_official_build=true\n"
+            "enable_updater=false\n"
+            "include_branded_entitlements=false\n"
+            "use_siso=false\n"
+            "use_remoteexec=false\n",
             "first.gn",
         )
         second = self.write_gn_fixture('target_cpu="arm64"\n', "second.gn")
@@ -921,6 +933,10 @@ class FocusMacPlannerTests(unittest.TestCase):
             "is_component_build=false\n"
             "is_debug=false\n"
             "is_official_build=true\n"
+            "enable_updater=false\n"
+            "include_branded_entitlements=false\n"
+            "use_siso=false\n"
+            "use_remoteexec=false\n"
         )
         with self.assertRaisesRegex(focus_macos.ContractError, "target_cpu"):
             focus_macos.parse_gn_assignments((path,))
@@ -936,6 +952,10 @@ class FocusMacPlannerTests(unittest.TestCase):
             "is_component_build=false\n"
             "is_debug=false\n"
             "is_official_build=true\n"
+            "enable_updater=false\n"
+            "include_branded_entitlements=false\n"
+            "use_siso=false\n"
+            "use_remoteexec=false\n"
             "symbol_level={}\n"
         )
         arm64 = self.write_gn_fixture(base.format("arm64", 0), "arm64.gn")
@@ -952,6 +972,19 @@ class FocusMacPlannerTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(focus_macos.ContractError, "symbol_level"):
                 focus_macos.validate_gn_profiles()
+
+    def test_repository_profiles_disable_updater_and_remote_build_services(self):
+        for architecture, flags_path in focus_macos.MACOS_FLAGS.items():
+            with self.subTest(architecture=architecture):
+                _, _, values = focus_macos.parse_gn_assignments(
+                    (focus_macos.COMMON_FLAGS, flags_path),
+                    expected_target_cpu=architecture,
+                    include_values=True,
+                )
+                self.assertEqual("false", values["enable_updater"])
+                self.assertEqual("false", values["include_branded_entitlements"])
+                self.assertEqual("false", values["use_siso"])
+                self.assertEqual("false", values["use_remoteexec"])
 
     def test_validate_parser_requires_explicit_source_root(self):
         parser = focus_macos.build_parser()

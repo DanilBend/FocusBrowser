@@ -12,6 +12,10 @@ is_component_build=false
 is_debug=false
 is_official_build=true
 dcheck_always_on=false
+enable_updater=false
+include_branded_entitlements=false
+use_siso=false
+use_remoteexec=false
 
 enable_rust=true
 enable_swiftshader=false

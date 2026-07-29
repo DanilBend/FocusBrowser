@@ -2124,6 +2124,10 @@ def parse_gn_assignments(paths, expected_target_cpu="arm64", include_values=Fals
         "is_component_build": "false",
         "is_debug": "false",
         "is_official_build": "true",
+        "enable_updater": "false",
+        "include_branded_entitlements": "false",
+        "use_siso": "false",
+        "use_remoteexec": "false",
     }
     for name, expected_value in required.items():
         actual_value = assignments.get(name, {}).get("value")

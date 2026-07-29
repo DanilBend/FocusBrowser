@@ -1,7 +1,8 @@
 # Focus Browser for macOS (Intel and Apple Silicon)
 
-This directory is a small planning and validation layer for a native
-Chromium/Views macOS port. `focus_macos.py` is strictly read-only: it does
+This directory contains the planning, acquisition, offline preparation,
+sequential universal build, and local-DMG layers for a native Chromium/Views
+macOS port. `focus_macos.py` itself is strictly read-only: it does
 **not** download Chromium, patch or copy into a Chromium tree, invoke
 Xcode/GN/Ninja, publish artifacts, sign code, notarize an app, or configure an
 updater. `generate_icns.py --generate` is a separate explicit small write that
@@ -11,16 +12,32 @@ creates one new local DMG without overwriting. The Windows build remains
 outside this workflow.
 
 See `INCOGNITO.md` for the native private-mode contract and runtime acceptance
-matrix, `UNIVERSAL.md` for Intel/Apple Silicon and macOS 12+ compatibility, and
-`LOCAL-DMG.md` for the local ad-hoc `.app`/DMG boundary.
+matrix, `UNIVERSAL.md` for Intel/Apple Silicon and macOS 12+ compatibility,
+`LOCAL-DMG.md` for the local ad-hoc `.app`/DMG boundary, and
+`BUILD-PIPELINE.md` for the exact executable stage order.
+
+The writable macOS sequence is provenance-gated: `acquire_chromium.py` must
+first produce a completed pinned acquisition marker, then
+`build_pipeline.py bootstrap-tools --execute` must run Chromium hooks and write
+the exact `.focus-macos-tool-bootstrap.json` receipt beside `src`. Only then may
+`prepare_source.py prepare --confirm-source-mutation` install verified cached
+dependencies, prune listed binaries, apply patches and overlays, and write GN
+arguments. The receipt binds the canonical Xcode Developer directory and
+current hashes of `gclient`, `gn`, and `autoninja`; source preparation rejects
+a missing, tampered, or stale-tool marker before its first source-tree mutation.
 
 ## Fixed contracts
 
 - Chromium must already exist locally and must be exactly `150.0.7871.128`.
 - Supported architectures are native macOS `arm64` and `x64`. Each has a
-  separate GN output and the only planned Ninja target is `chrome` (never
-  `setup` or `mini_installer`). The exact Chromium 150 universalizer merges the
+  separate GN output and builds only `chrome` plus the required
+  `chrome/installer/mac:copies` signing support (never `setup` or
+  `mini_installer`). The exact Chromium 150 universalizer merges the
   accepted x86_64 and arm64 app trees into one universal app.
+- Both slices explicitly disable the Chromium updater, Google-identity-bound
+  entitlements, Siso, and remote execution. The local build uses the same
+  bounded Ninja workflow for both architectures and does not contact a remote
+  compilation service.
 - The pinned Chromium 150 minimum is macOS 12.0. Both GN profiles explicitly
   pin `mac_deployment_target` and `mac_min_system_version` to `12.0`; macOS 11
   and older, 32-bit Intel, and PowerPC are not supported.
@@ -121,12 +138,11 @@ The deterministic gate is:
 free bytes on the Chromium source filesystem >= --min-free-gib * 1024^3
 ```
 
-Set the threshold to the measured peak growth of the checkout, both native
-`out/` builds, universal staging, packaging/profile space, and an explicit
-safety reserve. Do not start a checkout or build merely because the current
-machine reports 117 GiB free: the repository does not contain enough data to
-derive a trustworthy Chromium + toolchain + two outputs + universal merge
-peak. A failed gate makes `plan` exit non-zero.
+Set this generic planner threshold to the capacity policy chosen for a manual
+workflow. The executable low-space workflow does not keep both native output
+trees: it uses the fixed pre/post-sync gates, runtime 35/30 GiB floors, measured
+arm64 reclamation, and projected x86_64/merge growth documented in
+`BUILD-PIPELINE.md`. A failed gate makes either workflow exit non-zero.
 
 Both commands are dry runs. `--dry-run` is accepted as an explicit assertion;
 neither command has a write mode. `--json` emits a machine-readable report.
@@ -164,48 +180,23 @@ link before atomically placing the output and reporting its size and SHA-256.
 Omit `--require-universal` only for an explicitly architecture-specific local
 test image.
 
-## Planned production pipeline (not executed here)
+## Executable production pipeline
 
-1. Acquire Chromium/depot_tools by an approved external process; keep the
-   checkout outside this repository and verify the exact version.
-2. Apply `focus-chromium/patches/series`, excluding the audited Windows-only
-   entries `focus/core/windows-first-run-locale.patch` and
-   `focus/ui/fix-windows-ui-position.patch` until they are proven portable.
-3. Apply this directory's three patches in series order: FocusBlock,
-   FocusYoutube, then `native-incognito-contract.patch`. Never apply the root
-   Windows series.
-4. Run the common domain/name substitutions and common RU/EN i18n workflow.
-5. Apply `source_overrides/` through a filtered overlay that skips
-   `overlay-excludes.txt`. Treat `source_overrides/delete.txt` as a separate
-   cleanup manifest: this CLI validates and displays its safe, platform-neutral
-   relative paths but does not delete them. A future explicit write mode must
-   filter them again and constrain every target inside the Chromium root.
-6. Verify and copy only common Focus resources plus the already-generated,
-   hash-pinned macOS `.icns`. Regenerate it only via the explicit command above
-   when the output is deliberately absent.
-7. Append Focus version metadata and write architecture-specific composed GN
-   args to `out/FocusMacArm64/args.gn` and `out/FocusMacX64/args.gn`.
-8. After the disk gate and human review, run the displayed `gn gen` and
-   `autoninja ... chrome` command for each architecture with the validated
-   full-Xcode `DEVELOPER_DIR`; do not rely on the global Command Line Tools
-   selector.
-9. Merge the two same-source app trees, x64 first and arm64 second, with the
-   exact hash-pinned Chromium 150 `chrome/installer/mac/universalizer.py`.
-10. Apply the reviewed nested ad-hoc signing workflow while preserving helper
-   entitlements, then validate the universal app natively on Apple Silicon and
-   Intel. The source gate is not a substitute for runtime checks: exercise
-   Incognito, FocusBlock, FocusYoutube, history, session restore, custom NTP,
-   policy, and the permanent private identity marker on macOS 12 and current
-   macOS acceptance hosts.
-11. Create a local drag-and-drop DMG with `package_local_dmg.py` only after the
-   complete app passes nested signature and launch checks. Do not redistribute
-   it while any GPL/uBlock/filter-list, Ghostery/MPL, Unhook permission/App
-   Store, codec/FFmpeg, or Widevine gate is unresolved.
-   Signing/notarization/updater work needs a separate reviewed implementation
-   and credentials; it is not implied by an installed Xcode or Apple Developer
-   account.
+The implemented order is:
 
-The planning CLI reports commands and paths only. It intentionally contains no
-network, copy, delete, patch-application, build, or publishing operation. The
-icon generator and local DMG packager are separate, explicit tools constrained
-to their documented output operations.
+1. `acquire_chromium.py`: exact macOS-only Chromium/depot_tools sync plus the
+   three hash-pinned project archives; network use requires
+   `--execute-acquisition`.
+2. `build_pipeline.py bootstrap-tools`: clean-revision proof and Chromium hooks
+   before any source pruning.
+3. `prepare_source.py`: offline cache extraction, file-only pruning, 321 common
+   plus three macOS patches, substitutions, RU/EN, filtered overlay, resources,
+   Focus 1.0.5.0 metadata, ICNS, and both `args.gn` files.
+4. `build_pipeline.py`: arm64 build, verified thin-app staging, exact arm64
+   output reclamation, x86_64 build, universalization, nested ad-hoc signing,
+   and monitored local DMG packaging.
+
+All mutating stages require their explicit execution/confirmation flag and
+refuse to overwrite receipts or outputs. Read `CHROMIUM-ACQUISITION.md` and
+`BUILD-PIPELINE.md` before running them. No stage publishes, notarizes, uses a
+Developer ID, modifies `xcode-select`, or touches the Windows/Android tree.
