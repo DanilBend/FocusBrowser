@@ -126,6 +126,44 @@ XCODE27_SEATBELT_FILES = {
         "post_sha256": "56d67b2b333ef2cefaf8f1f609f3ca6c9dcfa745fd93c16ad0ad6baef8302691",
     },
 }
+SCREEN_AI_DISABLED_RECEIPT = "out/FocusMacScreenAIDisabledCompatibility.json"
+SCREEN_AI_DISABLED_RECEIPT_SCHEMA = 2
+SCREEN_AI_DISABLED_PATCH = MACOS_DIR / "patches/screen-ai-disabled-link.patch"
+SCREEN_AI_DISABLED_PATCH_SHA256 = (
+    "58fc6459a40e1bf6b732a8055d58376e811ffdff6604f7af87ef13d39f95de03"
+)
+SCREEN_AI_DISABLED_UPSTREAM = {
+    "known_good_commit": "50ec1394c5b291e34376e4f8daa77052653713ee",
+    "introduced_commit": "c5de29a7cd701daec46a7bf042dd0551e5e8c5c3",
+    "regression_commit": "4ee66d6d1eb2b630a9e30f52f08e3233e23c5864",
+    "change_id": "Iba8cd5583026a993e3236f1fe4bb48e822368b54",
+    "change_number": 5762356,
+    "commit_position": "refs/heads/main@{#1337465}",
+    "bug": "353628440",
+    "url": (
+        "https://chromium.googlesource.com/chromium/src/+"
+        "/4ee66d6d1eb2b630a9e30f52f08e3233e23c5864%5E%21/"
+        "chrome/browser/chrome_content_browser_client.cc"
+    ),
+}
+# The first local receipt was published before the review distinguished
+# Gerrit's Change-Id from its numeric change number. Keep that exact byte-level
+# shape readable so already-built slices remain verifiable; new receipts always
+# use the corrected canonical metadata above.
+SCREEN_AI_DISABLED_LEGACY_UPSTREAM = dict(SCREEN_AI_DISABLED_UPSTREAM)
+SCREEN_AI_DISABLED_LEGACY_UPSTREAM.pop("change_number")
+SCREEN_AI_DISABLED_LEGACY_UPSTREAM["change_id"] = "5762356"
+SCREEN_AI_DISABLED_FILES = {
+    "chrome/browser/chrome_content_browser_client.cc": {
+        "pre_sha256": "ad2e820a3e194e98110159417b4a5f334dc3ce7b66e852c9384572f4b9e6ba4b",
+        "post_sha256": "974c24cc412b9b0017325f978c80f0d1e8b74dfbb22953764e503b4c3ecddd11",
+    }
+}
+SCREEN_AI_DISABLED_CONFIG_FILES = {
+    "services/screen_ai/buildflags/features.gni": (
+        "ffcd36b688338f311810db3ade6e4862d9bff524de52bd09e64c16ef7fedfc05"
+    )
+}
 
 DAWN_NINJA_RELATIVE = "third_party/dawn/third_party/ninja/ninja"
 NINJA_VERSION = "1.12.1"
@@ -209,6 +247,15 @@ def atomic_json(path, value):
             temporary.unlink()
         raise
     return {"path": str(path), "sha256": sha256_file(path)}
+
+
+def best_effort_remove_tree(path):
+    """Remove rollback scratch without turning a committed result into failure."""
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        return False
+    return True
 
 
 def load_json(path, label):
@@ -764,9 +811,13 @@ def xcode27_toolchain_identity(report):
         raise PipelineError("Xcode 27 toolchain identity is incomplete") from exc
 
 
-def xcode27_provenance_links(source, developer_dir=None):
+def xcode27_provenance_links(
+    source, developer_dir=None, allow_reclaimed_arm=False
+):
     """Resolve the exact preparation, optional GN fix, and tool receipts."""
-    preparation_path, _ = preparation_contract(source)
+    preparation_path, _ = preparation_contract(
+        source, allow_reclaimed_arm=allow_reclaimed_arm
+    )
     tool_path, _ = tool_receipt_contract(source, developer_dir)
     gn_path = in_source(source, GN_COMPAT_RECEIPT, "GN compatibility receipt")
     if gn_path.exists():
@@ -789,7 +840,9 @@ def xcode27_provenance_links(source, developer_dir=None):
     }
 
 
-def xcode27_compat_receipt_contract(source, developer_dir=None, required=True):
+def xcode27_compat_receipt_contract(
+    source, developer_dir=None, required=True, allow_reclaimed_arm=False
+):
     """Validate the exact upstream explicit-module fix for Xcode 27."""
     receipt_path = in_source(
         source, XCODE27_COMPAT_RECEIPT, "Xcode 27 compatibility receipt"
@@ -815,7 +868,9 @@ def xcode27_compat_receipt_contract(source, developer_dir=None, required=True):
         "signing_executed",
         "packaging_executed",
     }
-    links = xcode27_provenance_links(source, developer_dir)
+    links = xcode27_provenance_links(
+        source, developer_dir, allow_reclaimed_arm=allow_reclaimed_arm
+    )
     if set(receipt) != expected_keys or receipt.get("schema") != 1:
         raise PipelineError("Xcode 27 compatibility receipt schema mismatch")
     if (
@@ -1000,10 +1055,15 @@ def execute_xcode27_compat(source, developer_dir, plan):
     }
 
 
-def xcode27_seatbelt_provenance_link(source, developer_dir=None):
+def xcode27_seatbelt_provenance_link(
+    source, developer_dir=None, allow_reclaimed_arm=False
+):
     """Bind the sandbox fix to the already-validated module compatibility fix."""
     receipt_path, _ = xcode27_compat_receipt_contract(
-        source, developer_dir, required=True
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
     )
     return {
         "path": str(receipt_path),
@@ -1011,7 +1071,9 @@ def xcode27_seatbelt_provenance_link(source, developer_dir=None):
     }
 
 
-def xcode27_seatbelt_receipt_contract(source, developer_dir=None, required=True):
+def xcode27_seatbelt_receipt_contract(
+    source, developer_dir=None, required=True, allow_reclaimed_arm=False
+):
     """Validate Chromium's exact macOS 27 Seatbelt source backport."""
     receipt_path = in_source(
         source, XCODE27_SEATBELT_RECEIPT, "Xcode 27 Seatbelt receipt"
@@ -1035,7 +1097,9 @@ def xcode27_seatbelt_receipt_contract(source, developer_dir=None, required=True)
         "signing_executed",
         "packaging_executed",
     }
-    module_link = xcode27_seatbelt_provenance_link(source, developer_dir)
+    module_link = xcode27_seatbelt_provenance_link(
+        source, developer_dir, allow_reclaimed_arm=allow_reclaimed_arm
+    )
     if set(receipt) != expected_keys or receipt.get("schema") != 1:
         raise PipelineError("Xcode 27 Seatbelt compatibility receipt schema mismatch")
     if (
@@ -1205,6 +1269,284 @@ def execute_xcode27_seatbelt(source, developer_dir, plan):
         "receipt": receipt_report,
         "files": XCODE27_SEATBELT_FILES,
         "upstream": XCODE27_SEATBELT_UPSTREAM,
+        "offline": True,
+        "network_operations": 0,
+        "build_executed": False,
+    }
+
+
+def screen_ai_disabled_provenance_link(
+    source, developer_dir=None, allow_reclaimed_arm=False
+):
+    """Bind the disabled-ScreenAI guard to validated toolchain fixes."""
+    receipt_path, _ = xcode27_seatbelt_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+    )
+    return {"path": str(receipt_path), "sha256": sha256_file(receipt_path)}
+
+
+def screen_ai_disabled_config_contract(source):
+    """Pin the Focus profile input that resolves ScreenAI to disabled."""
+    observed = {}
+    for relative, expected_hash in SCREEN_AI_DISABLED_CONFIG_FILES.items():
+        path = in_source(
+            source, relative, "disabled ScreenAI config", must_exist=True
+        )
+        if sha256_file(path) != expected_hash:
+            raise PipelineError(
+                "disabled ScreenAI config hash mismatch: {}".format(relative)
+            )
+        text = path.read_text(encoding="utf-8")
+        if text.count("enable_screen_ai_service = false") != 1:
+            raise PipelineError("ScreenAI is not explicitly disabled")
+        observed[relative] = expected_hash
+    return observed
+
+
+def screen_ai_disabled_receipt_contract(
+    source, developer_dir=None, required=True, allow_reclaimed_arm=False
+):
+    """Validate the exact disabled-ScreenAI macOS link compatibility fix."""
+    receipt_path = in_source(
+        source, SCREEN_AI_DISABLED_RECEIPT, "disabled ScreenAI receipt"
+    )
+    if not receipt_path.exists():
+        if required:
+            raise PipelineError("disabled ScreenAI compatibility receipt is required")
+        return None
+    receipt = load_json(receipt_path, "disabled ScreenAI compatibility receipt")
+    legacy_keys = {
+        "schema",
+        "source_root",
+        "xcode27_seatbelt_compatibility_receipt",
+        "upstream",
+        "patch",
+        "files",
+        "enable_screen_ai_service",
+        "offline",
+        "network_operations",
+        "build_executed",
+        "signing_executed",
+        "packaging_executed",
+    }
+    current_keys = legacy_keys | {"config_files"}
+    seatbelt_link = screen_ai_disabled_provenance_link(
+        source, developer_dir, allow_reclaimed_arm=allow_reclaimed_arm
+    )
+    legacy_receipt = (
+        receipt.get("schema") == 1
+        and receipt.get("upstream") == SCREEN_AI_DISABLED_LEGACY_UPSTREAM
+    )
+    current_receipt = (
+        receipt.get("schema") == SCREEN_AI_DISABLED_RECEIPT_SCHEMA
+        and receipt.get("upstream") == SCREEN_AI_DISABLED_UPSTREAM
+    )
+    if not (
+        (legacy_receipt and set(receipt) == legacy_keys)
+        or (current_receipt and set(receipt) == current_keys)
+    ):
+        raise PipelineError("disabled ScreenAI compatibility receipt schema mismatch")
+    config_files = screen_ai_disabled_config_contract(source)
+    if (
+        receipt.get("source_root") != str(source)
+        or receipt.get("xcode27_seatbelt_compatibility_receipt") != seatbelt_link
+        or receipt.get("patch")
+        != {
+            "path": str(SCREEN_AI_DISABLED_PATCH),
+            "sha256": SCREEN_AI_DISABLED_PATCH_SHA256,
+        }
+        or receipt.get("files") != SCREEN_AI_DISABLED_FILES
+        or (current_receipt and receipt.get("config_files") != config_files)
+        or receipt.get("enable_screen_ai_service") is not False
+        or receipt.get("offline") is not True
+        or receipt.get("network_operations") != 0
+        or receipt.get("build_executed") is not False
+        or receipt.get("signing_executed") is not False
+        or receipt.get("packaging_executed") is not False
+    ):
+        raise PipelineError("disabled ScreenAI compatibility provenance mismatch")
+    if sha256_file(SCREEN_AI_DISABLED_PATCH) != SCREEN_AI_DISABLED_PATCH_SHA256:
+        raise PipelineError("disabled ScreenAI compatibility patch hash mismatch")
+    for relative, hashes in SCREEN_AI_DISABLED_FILES.items():
+        current = in_source(
+            source, relative, "disabled ScreenAI source", must_exist=True
+        )
+        if sha256_file(current) != hashes["post_sha256"]:
+            raise PipelineError(
+                "disabled ScreenAI source hash mismatch: {}".format(relative)
+            )
+    return receipt_path, receipt
+
+
+def screen_ai_disabled_plan(source, developer_dir):
+    """Validate the exact pre-fix caller and patch boundary without mutation."""
+    seatbelt_link = screen_ai_disabled_provenance_link(source, developer_dir)
+    receipt_path = in_source(
+        source, SCREEN_AI_DISABLED_RECEIPT, "disabled ScreenAI receipt"
+    )
+    if receipt_path.exists() or receipt_path.is_symlink():
+        raise PipelineError("disabled ScreenAI compatibility receipt already exists")
+    if SCREEN_AI_DISABLED_PATCH.is_symlink() or not SCREEN_AI_DISABLED_PATCH.is_file():
+        raise PipelineError("disabled ScreenAI patch is not a regular file")
+    if sha256_file(SCREEN_AI_DISABLED_PATCH) != SCREEN_AI_DISABLED_PATCH_SHA256:
+        raise PipelineError("disabled ScreenAI compatibility patch hash mismatch")
+    files = {}
+    source_states = set()
+    for relative, hashes in SCREEN_AI_DISABLED_FILES.items():
+        path = in_source(
+            source, relative, "disabled ScreenAI source", must_exist=True
+        )
+        observed_hash = sha256_file(path)
+        if observed_hash == hashes["pre_sha256"]:
+            source_states.add("pre")
+        elif observed_hash == hashes["post_sha256"]:
+            source_states.add("post")
+        else:
+            raise PipelineError(
+                "disabled ScreenAI source state mismatch: {}".format(relative)
+            )
+        files[relative] = dict(hashes)
+    if len(source_states) != 1:
+        raise PipelineError("disabled ScreenAI source state is mixed")
+    source_state = source_states.pop()
+    try:
+        boundary = prepare_source.check_patch_boundary(
+            source, SCREEN_AI_DISABLED_PATCH, reverse=(source_state == "post")
+        )
+    except prepare_source.PreparationError as exc:
+        raise PipelineError(str(exc)) from exc
+    return {
+        "stage": "apply-screen-ai-disabled-compat",
+        "source_root": str(source),
+        "xcode27_seatbelt_compatibility_receipt": seatbelt_link,
+        "upstream": SCREEN_AI_DISABLED_UPSTREAM,
+        "patch": boundary,
+        "files": files,
+        "config_files": screen_ai_disabled_config_contract(source),
+        "source_state": source_state,
+        "enable_screen_ai_service": False,
+        "receipt": str(receipt_path),
+        "offline": True,
+        "network_operations": 0,
+    }
+
+
+def execute_screen_ai_disabled(source, developer_dir, plan):
+    """Guard the caller, or finalize an exact post-image after interruption."""
+    expected = screen_ai_disabled_plan(source, developer_dir)
+    if plan != expected:
+        raise PipelineError("disabled ScreenAI plan changed before execution")
+    require_free(source, SOFT_FLOOR_GIB, "disabled ScreenAI compatibility fix")
+    snapshot_root = None
+    backups = {}
+    snapshot_cleanup_complete = True
+    try:
+        if expected["source_state"] == "pre":
+            snapshot_root = Path(
+                tempfile.mkdtemp(prefix="focus-screen-ai-disabled-rollback-")
+            ).resolve()
+            patch_snapshot = snapshot_root / "screen-ai-disabled-link.patch"
+            prepare_source.atomic_copy(SCREEN_AI_DISABLED_PATCH, patch_snapshot)
+            if sha256_file(patch_snapshot) != SCREEN_AI_DISABLED_PATCH_SHA256:
+                raise PipelineError("disabled ScreenAI patch snapshot hash mismatch")
+            try:
+                prepare_source.check_patch_boundary(source, patch_snapshot)
+            except prepare_source.PreparationError as exc:
+                raise PipelineError(str(exc)) from exc
+            for position, relative in enumerate(SCREEN_AI_DISABLED_FILES, 1):
+                current = in_source(
+                    source, relative, "disabled ScreenAI snapshot", must_exist=True
+                )
+                backup = snapshot_root / "{:02d}.backup".format(position)
+                prepare_source.atomic_copy(current, backup)
+                backups[relative] = backup
+            prepare_source.apply_patch_plan(
+                source, [patch_snapshot], total_patches=1
+            )
+        for relative, hashes in SCREEN_AI_DISABLED_FILES.items():
+            current = in_source(
+                source, relative, "disabled ScreenAI result", must_exist=True
+            )
+            if sha256_file(current) != hashes["post_sha256"]:
+                raise PipelineError(
+                    "disabled ScreenAI post-fix hash mismatch: {}".format(relative)
+                )
+        receipt_value = {
+            "schema": SCREEN_AI_DISABLED_RECEIPT_SCHEMA,
+            "source_root": str(source),
+            "xcode27_seatbelt_compatibility_receipt": expected[
+                "xcode27_seatbelt_compatibility_receipt"
+            ],
+            "upstream": SCREEN_AI_DISABLED_UPSTREAM,
+            "patch": {
+                "path": str(SCREEN_AI_DISABLED_PATCH),
+                "sha256": SCREEN_AI_DISABLED_PATCH_SHA256,
+            },
+            "files": SCREEN_AI_DISABLED_FILES,
+            "config_files": expected["config_files"],
+            "enable_screen_ai_service": False,
+            "offline": True,
+            "network_operations": 0,
+            "build_executed": False,
+            "signing_executed": False,
+            "packaging_executed": False,
+        }
+        receipt_report = atomic_json(expected["receipt"], receipt_value)
+        screen_ai_disabled_receipt_contract(source, developer_dir, required=True)
+    except BaseException as original_error:
+        try:
+            receipt_path = Path(expected["receipt"])
+            if receipt_path.is_symlink() or (
+                receipt_path.exists() and not receipt_path.is_file()
+            ):
+                raise PipelineError(
+                    "unsafe disabled ScreenAI receipt during rollback"
+                )
+            if receipt_path.is_file():
+                receipt_path.unlink()
+            if expected["source_state"] == "pre":
+                for relative, backup in backups.items():
+                    target = in_source(
+                        source,
+                        relative,
+                        "disabled ScreenAI rollback",
+                        must_exist=True,
+                    )
+                    prepare_source.atomic_copy(backup, target)
+                    if sha256_file(target) != SCREEN_AI_DISABLED_FILES[relative][
+                        "pre_sha256"
+                    ]:
+                        raise PipelineError(
+                            "disabled ScreenAI rollback hash mismatch: {}".format(
+                                relative
+                            )
+                        )
+        except BaseException as rollback_error:
+            raise PipelineError(
+                "disabled ScreenAI fix failed and rollback failed; snapshot "
+                "retained at {}: original={!r}; rollback={!r}".format(
+                    snapshot_root or "not-created", original_error, rollback_error
+                )
+            ) from original_error
+        if snapshot_root is not None:
+            best_effort_remove_tree(snapshot_root)
+        if isinstance(original_error, prepare_source.PreparationError):
+            raise PipelineError(str(original_error)) from original_error
+        raise
+    else:
+        if snapshot_root is not None:
+            snapshot_cleanup_complete = best_effort_remove_tree(snapshot_root)
+    return {
+        "stage": "apply-screen-ai-disabled-compat",
+        "applied": True,
+        "resumed_from_exact_post_image": expected["source_state"] == "post",
+        "snapshot_cleanup_complete": snapshot_cleanup_complete,
+        "receipt": receipt_report,
+        "files": SCREEN_AI_DISABLED_FILES,
+        "upstream": SCREEN_AI_DISABLED_UPSTREAM,
         "offline": True,
         "network_operations": 0,
         "build_executed": False,
@@ -1596,6 +1938,18 @@ def slice_receipt_contract(source, out, architecture):
         raise PipelineError(
             "{} Xcode 27 Seatbelt receipt mismatch".format(architecture)
         )
+    screen_ai_receipt = in_source(
+        source,
+        SCREEN_AI_DISABLED_RECEIPT,
+        "disabled ScreenAI compatibility receipt",
+        must_exist=True,
+    )
+    if receipt.get(
+        "screen_ai_disabled_compatibility_receipt_sha256"
+    ) != sha256_file(screen_ai_receipt):
+        raise PipelineError(
+            "{} disabled ScreenAI receipt mismatch".format(architecture)
+        )
     if receipt.get("ninja") != ninja_contract(source):
         raise PipelineError("{} Ninja provenance mismatch".format(architecture))
     return receipt_path, receipt
@@ -1787,11 +2141,24 @@ def build_plan(source, developer_dir, architecture):
     if architecture == "x64":
         reclaim_contract(source)
     preparation_contract(source, allow_reclaimed_arm=(architecture == "x64"))
+    allow_reclaimed_arm = architecture == "x64"
     xcode27_path, _ = xcode27_compat_receipt_contract(
-        source, developer_dir, required=True
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
     )
     seatbelt_path, _ = xcode27_seatbelt_receipt_contract(
-        source, developer_dir, required=True
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+    )
+    screen_ai_path, _ = screen_ai_disabled_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
     )
     tools = tool_paths(source)
     ninja = ninja_contract(source)
@@ -1838,6 +2205,10 @@ def build_plan(source, developer_dir, architecture):
             "path": str(seatbelt_path),
             "sha256": sha256_file(seatbelt_path),
         },
+        "screen_ai_disabled_compatibility": {
+            "path": str(screen_ai_path),
+            "sha256": sha256_file(screen_ai_path),
+        },
     }
 
 
@@ -1853,8 +2224,12 @@ def execute_build(source, developer_dir, plan):
     current_ninja = ninja_contract(source)
     if plan.get("ninja") != current_ninja:
         raise PipelineError("build plan Ninja provenance changed before execution")
+    allow_reclaimed_arm = plan["architecture"] == "x64"
     xcode27_path, _ = xcode27_compat_receipt_contract(
-        source, developer_dir, required=True
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
     )
     current_xcode27 = {
         "path": str(xcode27_path),
@@ -1865,7 +2240,10 @@ def execute_build(source, developer_dir, plan):
             "build plan Xcode 27 compatibility provenance changed before execution"
         )
     seatbelt_path, _ = xcode27_seatbelt_receipt_contract(
-        source, developer_dir, required=True
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
     )
     current_seatbelt = {
         "path": str(seatbelt_path),
@@ -1874,6 +2252,20 @@ def execute_build(source, developer_dir, plan):
     if plan.get("xcode27_seatbelt_compatibility") != current_seatbelt:
         raise PipelineError(
             "build plan Xcode 27 Seatbelt provenance changed before execution"
+        )
+    screen_ai_path, _ = screen_ai_disabled_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+    )
+    current_screen_ai = {
+        "path": str(screen_ai_path),
+        "sha256": sha256_file(screen_ai_path),
+    }
+    if plan.get("screen_ai_disabled_compatibility") != current_screen_ai:
+        raise PipelineError(
+            "build plan disabled ScreenAI provenance changed before execution"
         )
     environment = safe_environment(
         source, developer_dir, build_ninja=Path(current_ninja["path"])
@@ -1902,6 +2294,9 @@ def execute_build(source, developer_dir, plan):
         ),
         "xcode27_compatibility_receipt_sha256": current_xcode27["sha256"],
         "xcode27_seatbelt_compatibility_receipt_sha256": current_seatbelt[
+            "sha256"
+        ],
+        "screen_ai_disabled_compatibility_receipt_sha256": current_screen_ai[
             "sha256"
         ],
         "tool_receipt_sha256": sha256_file(source.parent / TOOL_RECEIPT),
@@ -2209,6 +2604,7 @@ def parser():
         "apply-gn-compat",
         "apply-xcode27-compat",
         "apply-xcode27-seatbelt-compat",
+        "apply-screen-ai-disabled-compat",
         "build-arm64",
         "stage-arm64",
         "build-x64",
@@ -2252,6 +2648,13 @@ def main(argv=None):
             plan = xcode27_seatbelt_plan(source, developer_dir)
             result = (
                 execute_xcode27_seatbelt(source, developer_dir, plan)
+                if args.execute
+                else plan
+            )
+        elif args.command == "apply-screen-ai-disabled-compat":
+            plan = screen_ai_disabled_plan(source, developer_dir)
+            result = (
+                execute_screen_ai_disabled(source, developer_dir, plan)
                 if args.execute
                 else plan
             )

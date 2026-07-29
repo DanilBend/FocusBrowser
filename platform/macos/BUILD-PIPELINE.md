@@ -115,6 +115,9 @@ python3 platform/macos/build_pipeline.py apply-xcode27-compat \
 
 python3 platform/macos/build_pipeline.py apply-xcode27-seatbelt-compat \
   --source-root "$SRC" --developer-dir "$XCODE" --execute --json
+
+python3 platform/macos/build_pipeline.py apply-screen-ai-disabled-compat \
+  --source-root "$SRC" --developer-dir "$XCODE" --execute --json
 ```
 
 The first command gates Chromium GN dependencies that are absent when the
@@ -123,9 +126,16 @@ Chromium upstream commit `f0ccfb5933f7daa9545159afbb35bdf8951efcc4`'s
 one-file `_Builtin_float` dependency fix for Xcode 27 explicit modules. The
 third applies canonical Chromium commit
 `6c0a651f9cf91d07c87be8feba854a38a311aba6`, which removes the unused
-`kSBXProfilePureComputation` SDK dependency deleted by macOS SDK 27. All three
-commands are offline, hash-pinned, transactional, and publish immutable
-receipts only after the exact post-images are verified.
+`kSBXProfilePureComputation` SDK dependency deleted by macOS SDK 27. The
+fourth restores Chromium's canonical `ENABLE_SCREEN_AI_SERVICE` guards around
+the macOS `ScreenAIInstallState` caller. Chromium introduced that guarded
+caller in `c5de29a7cd701daec46a7bf042dd0551e5e8c5c3`, then removed the guards in
+`4ee66d6d1eb2b630a9e30f52f08e3233e23c5864` after declaring ScreenAI always
+enabled on desktop. Focus deliberately keeps the service disabled and its GN
+implementation dependency absent, so the guards are required; the pipeline
+does not enable or download ScreenAI. All four commands are offline,
+hash-pinned, transactional, and publish immutable receipts only after the
+exact post-images are verified.
 
 ### 4. Build and preserve arm64
 
@@ -152,7 +162,9 @@ python3 platform/macos/build_pipeline.py build-x64 \
 
 The x86_64 start gate uses the measured allocation of the reclaimed arm64
 output. It also revalidates the staged app, receipts, tool hashes, preparation
-hashes, and absence of `out/FocusMacArm64`.
+hashes, and absence of `out/FocusMacArm64`. Receipt validation explicitly
+accepts the recorded reclaimed arm64 `args.gn` hash while keeping every other
+preparation and compatibility input immutable.
 
 ### 6. Merge, ad-hoc sign, and create the local DMG
 

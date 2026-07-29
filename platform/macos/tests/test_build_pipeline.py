@@ -335,6 +335,9 @@ class BuildPipelineTests(unittest.TestCase):
         seatbelt = self.source / build_pipeline.XCODE27_SEATBELT_RECEIPT
         if not seatbelt.exists():
             self.write_json(seatbelt, {"fixture": True})
+        screen_ai = self.source / build_pipeline.SCREEN_AI_DISABLED_RECEIPT
+        if not screen_ai.exists():
+            self.write_json(screen_ai, {"fixture": True})
         return self.write_json(
             out / build_pipeline.SLICE_RECEIPT_NAME,
             {
@@ -350,6 +353,9 @@ class BuildPipelineTests(unittest.TestCase):
                 ),
                 "xcode27_seatbelt_compatibility_receipt_sha256": (
                     build_pipeline.sha256_file(seatbelt)
+                ),
+                "screen_ai_disabled_compatibility_receipt_sha256": (
+                    build_pipeline.sha256_file(screen_ai)
                 ),
                 "ninja": self.ninja_report,
                 "build_complete": True,
@@ -554,6 +560,423 @@ class BuildPipelineTests(unittest.TestCase):
             self.assertEqual(
                 files[relative]["pre_sha256"], build_pipeline.sha256_file(target)
             )
+
+    def test_screen_ai_disabled_patch_is_pinned_scoped_and_guard_only(self):
+        patch = build_pipeline.SCREEN_AI_DISABLED_PATCH
+        self.assertEqual(
+            build_pipeline.SCREEN_AI_DISABLED_PATCH_SHA256,
+            build_pipeline.sha256_file(patch),
+        )
+        text = patch.read_text(encoding="utf-8")
+        self.assertEqual(
+            {"chrome/browser/chrome_content_browser_client.cc"},
+            {
+                line.removeprefix("--- a/")
+                for line in text.splitlines()
+                if line.startswith("--- a/")
+            },
+        )
+        self.assertIn(
+            '+#include "services/screen_ai/buildflags/buildflags.h"', text
+        )
+        self.assertEqual(
+            2, text.count("+#if BUILDFLAG(ENABLE_SCREEN_AI_SERVICE)")
+        )
+        self.assertEqual(2, text.count("+#endif"))
+        self.assertNotIn("enable_screen_ai_service=true", text)
+        self.assertEqual(
+            "c5de29a7cd701daec46a7bf042dd0551e5e8c5c3",
+            build_pipeline.SCREEN_AI_DISABLED_UPSTREAM["introduced_commit"],
+        )
+        self.assertEqual(
+            "Iba8cd5583026a993e3236f1fe4bb48e822368b54",
+            build_pipeline.SCREEN_AI_DISABLED_UPSTREAM["change_id"],
+        )
+        self.assertEqual(
+            5762356,
+            build_pipeline.SCREEN_AI_DISABLED_UPSTREAM["change_number"],
+        )
+        self.assertEqual(2, build_pipeline.SCREEN_AI_DISABLED_RECEIPT_SCHEMA)
+        self.assertEqual(
+            "5762356",
+            build_pipeline.SCREEN_AI_DISABLED_LEGACY_UPSTREAM["change_id"],
+        )
+
+    def test_screen_ai_disabled_config_pins_hash_and_explicit_false(self):
+        relative = "services/screen_ai/buildflags/features.gni"
+        target = self.source / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        disabled = b"declare_args() {\n  enable_screen_ai_service = false\n}\n"
+        enabled = b"declare_args() {\n  enable_screen_ai_service = true\n}\n"
+        target.write_bytes(disabled)
+        disabled_hash = hashlib.sha256(disabled).hexdigest()
+        with mock.patch.object(
+            build_pipeline,
+            "SCREEN_AI_DISABLED_CONFIG_FILES",
+            {relative: disabled_hash},
+        ):
+            self.assertEqual(
+                {relative: disabled_hash},
+                build_pipeline.screen_ai_disabled_config_contract(self.source),
+            )
+            target.write_bytes(enabled)
+            with self.assertRaisesRegex(
+                build_pipeline.PipelineError, "config hash mismatch"
+            ):
+                build_pipeline.screen_ai_disabled_config_contract(self.source)
+
+        enabled_hash = hashlib.sha256(enabled).hexdigest()
+        with mock.patch.object(
+            build_pipeline,
+            "SCREEN_AI_DISABLED_CONFIG_FILES",
+            {relative: enabled_hash},
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "not explicitly disabled"
+        ):
+            build_pipeline.screen_ai_disabled_config_contract(self.source)
+
+    def test_screen_ai_disabled_receipt_schema_matrix_and_legacy_config_gate(self):
+        patch = self.root / "fixture-screen-ai.patch"
+        patch.write_text("fixture\n", encoding="utf-8")
+        patch_hash = build_pipeline.sha256_file(patch)
+        relative = "chrome/browser/chrome_content_browser_client.cc"
+        target = self.source / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        post = b"post screen ai\n"
+        target.write_bytes(post)
+        files = {
+            relative: {
+                "pre_sha256": hashlib.sha256(b"pre screen ai\n").hexdigest(),
+                "post_sha256": hashlib.sha256(post).hexdigest(),
+            }
+        }
+        config_relative = "services/screen_ai/buildflags/features.gni"
+        config = self.source / config_relative
+        config.parent.mkdir(parents=True, exist_ok=True)
+        disabled = b"enable_screen_ai_service = false\n"
+        config.write_bytes(disabled)
+        config_files = {config_relative: hashlib.sha256(disabled).hexdigest()}
+        seatbelt_link = {"path": "fixture-seatbelt.json", "sha256": "a" * 64}
+        receipt_path = self.source / build_pipeline.SCREEN_AI_DISABLED_RECEIPT
+
+        def receipt_value(schema, upstream):
+            value = {
+                "schema": schema,
+                "source_root": str(self.source),
+                "xcode27_seatbelt_compatibility_receipt": seatbelt_link,
+                "upstream": upstream,
+                "patch": {"path": str(patch), "sha256": patch_hash},
+                "files": files,
+                "enable_screen_ai_service": False,
+                "offline": True,
+                "network_operations": 0,
+                "build_executed": False,
+                "signing_executed": False,
+                "packaging_executed": False,
+            }
+            if schema == build_pipeline.SCREEN_AI_DISABLED_RECEIPT_SCHEMA:
+                value["config_files"] = config_files
+            return value
+
+        def publish(value):
+            receipt_path.parent.mkdir(parents=True, exist_ok=True)
+            receipt_path.write_text(
+                json.dumps(value, sort_keys=True) + "\n", encoding="utf-8"
+            )
+
+        with mock.patch.object(
+            build_pipeline, "SCREEN_AI_DISABLED_PATCH", patch
+        ), mock.patch.object(
+            build_pipeline, "SCREEN_AI_DISABLED_PATCH_SHA256", patch_hash
+        ), mock.patch.object(
+            build_pipeline, "SCREEN_AI_DISABLED_FILES", files
+        ), mock.patch.object(
+            build_pipeline, "SCREEN_AI_DISABLED_CONFIG_FILES", config_files
+        ), mock.patch.object(
+            build_pipeline,
+            "screen_ai_disabled_provenance_link",
+            return_value=seatbelt_link,
+        ):
+            publish(
+                receipt_value(1, build_pipeline.SCREEN_AI_DISABLED_LEGACY_UPSTREAM)
+            )
+            build_pipeline.screen_ai_disabled_receipt_contract(
+                self.source, self.developer
+            )
+
+            publish(
+                receipt_value(
+                    build_pipeline.SCREEN_AI_DISABLED_RECEIPT_SCHEMA,
+                    build_pipeline.SCREEN_AI_DISABLED_UPSTREAM,
+                )
+            )
+            build_pipeline.screen_ai_disabled_receipt_contract(
+                self.source, self.developer
+            )
+
+            publish(receipt_value(1, build_pipeline.SCREEN_AI_DISABLED_UPSTREAM))
+            with self.assertRaisesRegex(
+                build_pipeline.PipelineError, "receipt schema mismatch"
+            ):
+                build_pipeline.screen_ai_disabled_receipt_contract(
+                    self.source, self.developer
+                )
+
+            publish(
+                receipt_value(
+                    build_pipeline.SCREEN_AI_DISABLED_RECEIPT_SCHEMA,
+                    build_pipeline.SCREEN_AI_DISABLED_LEGACY_UPSTREAM,
+                )
+            )
+            with self.assertRaisesRegex(
+                build_pipeline.PipelineError, "receipt schema mismatch"
+            ):
+                build_pipeline.screen_ai_disabled_receipt_contract(
+                    self.source, self.developer
+                )
+
+            publish(
+                receipt_value(1, build_pipeline.SCREEN_AI_DISABLED_LEGACY_UPSTREAM)
+            )
+            config.write_text(
+                "enable_screen_ai_service = true\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                build_pipeline.PipelineError, "config hash mismatch"
+            ):
+                build_pipeline.screen_ai_disabled_receipt_contract(
+                    self.source, self.developer
+                )
+
+    def test_screen_ai_disabled_execution_restores_caller_on_failure(self):
+        patch = self.root / "fixture-screen-ai.patch"
+        patch.write_text("fixture\n", encoding="utf-8")
+        pinned_patch_hash = build_pipeline.sha256_file(patch)
+        relative = "chrome/browser/chrome_content_browser_client.cc"
+        target = self.source / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        pre = b"pre screen ai\n"
+        post = b"post screen ai\n"
+        target.write_bytes(pre)
+        files = {
+            relative: {
+                "pre_sha256": hashlib.sha256(pre).hexdigest(),
+                "post_sha256": hashlib.sha256(post).hexdigest(),
+            }
+        }
+        receipt = self.source / build_pipeline.SCREEN_AI_DISABLED_RECEIPT
+        plan = {
+            "stage": "apply-screen-ai-disabled-compat",
+            "source_root": str(self.source),
+            "source_state": "pre",
+            "config_files": {},
+            "receipt": str(receipt),
+        }
+
+        def fail_after_mutation(_source, patch_plan, **_kwargs):
+            self.assertNotEqual(patch, patch_plan[0])
+            patch.write_text("mutated canonical fixture\n", encoding="utf-8")
+            self.assertEqual(
+                pinned_patch_hash,
+                build_pipeline.sha256_file(patch_plan[0]),
+            )
+            target.write_bytes(post)
+            raise build_pipeline.prepare_source.PreparationError(
+                "forced ScreenAI failure"
+            )
+
+        with mock.patch.object(
+            build_pipeline, "SCREEN_AI_DISABLED_PATCH", patch
+        ), mock.patch.object(
+            build_pipeline,
+            "SCREEN_AI_DISABLED_PATCH_SHA256",
+            pinned_patch_hash,
+        ), mock.patch.object(
+            build_pipeline, "SCREEN_AI_DISABLED_FILES", files
+        ), mock.patch.object(
+            build_pipeline, "screen_ai_disabled_plan", return_value=plan
+        ), mock.patch.object(
+            build_pipeline, "require_free"
+        ), mock.patch.object(
+            build_pipeline.prepare_source,
+            "check_patch_boundary",
+            return_value={"applicable": True},
+        ), mock.patch.object(
+            build_pipeline.prepare_source,
+            "apply_patch_plan",
+            side_effect=fail_after_mutation,
+        ), self.assertRaisesRegex(build_pipeline.PipelineError, "forced ScreenAI"):
+            build_pipeline.execute_screen_ai_disabled(
+                self.source, self.developer, plan
+            )
+
+        self.assertFalse(receipt.exists())
+        self.assertEqual(
+            files[relative]["pre_sha256"], build_pipeline.sha256_file(target)
+        )
+
+    def test_screen_ai_disabled_real_planner_recovers_exact_post_image(self):
+        patch = self.root / "fixture-screen-ai.patch"
+        patch.write_text("fixture\n", encoding="utf-8")
+        relative = "chrome/browser/chrome_content_browser_client.cc"
+        target = self.source / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        pre = b"pre screen ai\n"
+        post = b"post screen ai\n"
+        target.write_bytes(post)
+        files = {
+            relative: {
+                "pre_sha256": hashlib.sha256(pre).hexdigest(),
+                "post_sha256": hashlib.sha256(post).hexdigest(),
+            }
+        }
+        boundary = {"patch": str(patch), "reverse": True}
+        with mock.patch.object(
+            build_pipeline, "SCREEN_AI_DISABLED_PATCH", patch
+        ), mock.patch.object(
+            build_pipeline,
+            "SCREEN_AI_DISABLED_PATCH_SHA256",
+            build_pipeline.sha256_file(patch),
+        ), mock.patch.object(
+            build_pipeline, "SCREEN_AI_DISABLED_FILES", files
+        ), mock.patch.object(
+            build_pipeline,
+            "screen_ai_disabled_provenance_link",
+            return_value={"fixture": True},
+        ), mock.patch.object(
+            build_pipeline,
+            "screen_ai_disabled_config_contract",
+            return_value={},
+        ), mock.patch.object(
+            build_pipeline.prepare_source,
+            "check_patch_boundary",
+            return_value=boundary,
+        ) as check_boundary:
+            plan = build_pipeline.screen_ai_disabled_plan(
+                self.source, self.developer
+            )
+
+        self.assertEqual("post", plan["source_state"])
+        self.assertEqual(boundary, plan["patch"])
+        check_boundary.assert_called_once_with(self.source, patch, reverse=True)
+
+    def test_screen_ai_disabled_exact_post_image_finalizes_without_reapply(self):
+        relative = "chrome/browser/chrome_content_browser_client.cc"
+        target = self.source / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        pre = b"pre screen ai\n"
+        post = b"post screen ai\n"
+        target.write_bytes(post)
+        files = {
+            relative: {
+                "pre_sha256": hashlib.sha256(pre).hexdigest(),
+                "post_sha256": hashlib.sha256(post).hexdigest(),
+            }
+        }
+        receipt = self.source / build_pipeline.SCREEN_AI_DISABLED_RECEIPT
+        plan = {
+            "stage": "apply-screen-ai-disabled-compat",
+            "source_root": str(self.source),
+            "source_state": "post",
+            "config_files": {},
+            "xcode27_seatbelt_compatibility_receipt": {"fixture": True},
+            "receipt": str(receipt),
+        }
+        receipt_report = {"path": str(receipt), "sha256": "f" * 64}
+        with mock.patch.object(
+            build_pipeline, "SCREEN_AI_DISABLED_FILES", files
+        ), mock.patch.object(
+            build_pipeline, "screen_ai_disabled_plan", return_value=plan
+        ), mock.patch.object(
+            build_pipeline, "require_free"
+        ), mock.patch.object(
+            build_pipeline, "atomic_json", return_value=receipt_report
+        ) as publish, mock.patch.object(
+            build_pipeline, "screen_ai_disabled_receipt_contract"
+        ), mock.patch.object(
+            build_pipeline.prepare_source, "apply_patch_plan"
+        ) as apply_patch:
+            report = build_pipeline.execute_screen_ai_disabled(
+                self.source, self.developer, plan
+            )
+
+        apply_patch.assert_not_called()
+        publish.assert_called_once()
+        self.assertTrue(report["resumed_from_exact_post_image"])
+
+    def test_screen_ai_disabled_cleanup_failure_is_nonfatal_after_commit(self):
+        patch = self.root / "fixture-screen-ai.patch"
+        patch.write_text("fixture\n", encoding="utf-8")
+        relative = "chrome/browser/chrome_content_browser_client.cc"
+        target = self.source / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        pre = b"pre screen ai\n"
+        post = b"post screen ai\n"
+        target.write_bytes(pre)
+        files = {
+            relative: {
+                "pre_sha256": hashlib.sha256(pre).hexdigest(),
+                "post_sha256": hashlib.sha256(post).hexdigest(),
+            }
+        }
+        receipt = self.source / build_pipeline.SCREEN_AI_DISABLED_RECEIPT
+        plan = {
+            "stage": "apply-screen-ai-disabled-compat",
+            "source_root": str(self.source),
+            "source_state": "pre",
+            "config_files": {},
+            "xcode27_seatbelt_compatibility_receipt": {"fixture": True},
+            "receipt": str(receipt),
+        }
+
+        def apply_success(_source, patch_plan, **_kwargs):
+            self.assertNotEqual(patch, patch_plan[0])
+            target.write_bytes(post)
+
+        with mock.patch.object(
+            build_pipeline, "SCREEN_AI_DISABLED_PATCH", patch
+        ), mock.patch.object(
+            build_pipeline,
+            "SCREEN_AI_DISABLED_PATCH_SHA256",
+            build_pipeline.sha256_file(patch),
+        ), mock.patch.object(
+            build_pipeline, "SCREEN_AI_DISABLED_FILES", files
+        ), mock.patch.object(
+            build_pipeline, "screen_ai_disabled_plan", return_value=plan
+        ), mock.patch.object(
+            build_pipeline, "require_free"
+        ), mock.patch.object(
+            build_pipeline.prepare_source,
+            "check_patch_boundary",
+            return_value={"applicable": True},
+        ), mock.patch.object(
+            build_pipeline.prepare_source,
+            "apply_patch_plan",
+            side_effect=apply_success,
+        ), mock.patch.object(
+            build_pipeline,
+            "atomic_json",
+            return_value={"path": str(receipt), "sha256": "f" * 64},
+        ), mock.patch.object(
+            build_pipeline, "screen_ai_disabled_receipt_contract"
+        ), mock.patch.object(
+            build_pipeline, "best_effort_remove_tree", return_value=False
+        ):
+            report = build_pipeline.execute_screen_ai_disabled(
+                self.source, self.developer, plan
+            )
+
+        self.assertFalse(report["snapshot_cleanup_complete"])
+        self.assertFalse(report["resumed_from_exact_post_image"])
+        self.assertEqual(files[relative]["post_sha256"], build_pipeline.sha256_file(target))
+
+    def test_best_effort_remove_tree_handles_permission_error(self):
+        with mock.patch.object(
+            build_pipeline.shutil,
+            "rmtree",
+            side_effect=PermissionError("fixture cleanup denied"),
+        ):
+            self.assertFalse(build_pipeline.best_effort_remove_tree(self.root))
 
     def test_disabled_profiles_require_gn_compat_receipt(self):
         for relative in (
@@ -774,6 +1197,10 @@ class BuildPipelineTests(unittest.TestCase):
             self.source / build_pipeline.XCODE27_SEATBELT_RECEIPT,
             {"fixture": True},
         )
+        screen_ai = self.write_json(
+            self.source / build_pipeline.SCREEN_AI_DISABLED_RECEIPT,
+            {"fixture": True},
+        )
         with mock.patch.object(
             build_pipeline,
             "xcode27_compat_receipt_contract",
@@ -782,6 +1209,10 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline,
             "xcode27_seatbelt_receipt_contract",
             return_value=(seatbelt, {"fixture": True}),
+        ), mock.patch.object(
+            build_pipeline,
+            "screen_ai_disabled_receipt_contract",
+            return_value=(screen_ai, {"fixture": True}),
         ):
             plan = build_pipeline.build_plan(
                 self.source, self.developer, "arm64"
@@ -795,6 +1226,48 @@ class BuildPipelineTests(unittest.TestCase):
         flattened = "\n".join(" ".join(command) for command in plan["commands"])
         for forbidden in ("android", "iphone", "windows", "remoteexec", "siso"):
             self.assertNotIn(forbidden, flattened.lower())
+
+    def test_x64_build_plan_threads_reclaimed_arm_through_receipt_chain(self):
+        xcode27 = self.write_json(
+            self.source / build_pipeline.XCODE27_COMPAT_RECEIPT, {"fixture": True}
+        )
+        seatbelt = self.write_json(
+            self.source / build_pipeline.XCODE27_SEATBELT_RECEIPT,
+            {"fixture": True},
+        )
+        screen_ai = self.write_json(
+            self.source / build_pipeline.SCREEN_AI_DISABLED_RECEIPT,
+            {"fixture": True},
+        )
+        with mock.patch.object(
+            build_pipeline, "acquisition_contract"
+        ), mock.patch.object(
+            build_pipeline, "tool_receipt_contract"
+        ), mock.patch.object(
+            build_pipeline, "reclaim_contract"
+        ), mock.patch.object(
+            build_pipeline, "preparation_contract"
+        ) as preparation, mock.patch.object(
+            build_pipeline,
+            "xcode27_compat_receipt_contract",
+            return_value=(xcode27, {"fixture": True}),
+        ) as module_contract, mock.patch.object(
+            build_pipeline,
+            "xcode27_seatbelt_receipt_contract",
+            return_value=(seatbelt, {"fixture": True}),
+        ) as seatbelt_contract, mock.patch.object(
+            build_pipeline,
+            "screen_ai_disabled_receipt_contract",
+            return_value=(screen_ai, {"fixture": True}),
+        ) as screen_contract:
+            plan = build_pipeline.build_plan(self.source, self.developer, "x64")
+
+        self.assertEqual("build-x64", plan["stage"])
+        preparation.assert_called_once_with(
+            self.source, allow_reclaimed_arm=True
+        )
+        for contract in (module_contract, seatbelt_contract, screen_contract):
+            self.assertTrue(contract.call_args.kwargs["allow_reclaimed_arm"])
 
     def test_execute_build_writes_a_provenance_receipt(self):
         out = self.source / build_pipeline.ARM_OUT
@@ -814,6 +1287,10 @@ class BuildPipelineTests(unittest.TestCase):
             self.source / build_pipeline.XCODE27_SEATBELT_RECEIPT,
             {"fixture": True},
         )
+        screen_ai = self.write_json(
+            self.source / build_pipeline.SCREEN_AI_DISABLED_RECEIPT,
+            {"fixture": True},
+        )
         plan = {
             "architecture": "arm64",
             "out": str(out),
@@ -827,6 +1304,10 @@ class BuildPipelineTests(unittest.TestCase):
             "xcode27_seatbelt_compatibility": {
                 "path": str(seatbelt),
                 "sha256": build_pipeline.sha256_file(seatbelt),
+            },
+            "screen_ai_disabled_compatibility": {
+                "path": str(screen_ai),
+                "sha256": build_pipeline.sha256_file(screen_ai),
             },
         }
         app_report = {
@@ -847,6 +1328,10 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline,
             "xcode27_seatbelt_receipt_contract",
             return_value=(seatbelt, {"fixture": True}),
+        ), mock.patch.object(
+            build_pipeline,
+            "screen_ai_disabled_receipt_contract",
+            return_value=(screen_ai, {"fixture": True}),
         ):
             report = build_pipeline.execute_build(
                 self.source, self.developer, plan
@@ -864,6 +1349,10 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertEqual(
             build_pipeline.sha256_file(seatbelt),
             receipt["xcode27_seatbelt_compatibility_receipt_sha256"],
+        )
+        self.assertEqual(
+            build_pipeline.sha256_file(screen_ai),
+            receipt["screen_ai_disabled_compatibility_receipt_sha256"],
         )
 
     def test_stage_reclaims_only_exact_arm_output_after_verified_copy(self):
