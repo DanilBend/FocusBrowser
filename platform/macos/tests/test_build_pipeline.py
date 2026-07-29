@@ -365,6 +365,107 @@ class BuildPipelineTests(unittest.TestCase):
         ):
             build_pipeline.preparation_contract(self.source)
 
+    def test_gn_compat_patch_is_hash_pinned_scoped_and_semantic(self):
+        patch = build_pipeline.GN_COMPAT_PATCH
+        self.assertEqual(
+            build_pipeline.GN_COMPAT_PATCH_SHA256,
+            build_pipeline.sha256_file(patch),
+        )
+        text = patch.read_text(encoding="utf-8")
+        self.assertEqual(
+            {
+                "chrome/BUILD.gn",
+                "content/shell/BUILD.gn",
+                "chrome/test/BUILD.gn",
+            },
+            {
+                line.removeprefix("--- a/")
+                for line in text.splitlines()
+                if line.startswith("--- a/")
+            },
+        )
+        self.assertEqual(4, text.count("if (enable_swiftshader)"))
+        self.assertEqual(1, text.count("if (safe_browsing_mode != 0)"))
+        self.assertNotIn("safe_browsing_mode=1", text)
+
+    def test_disabled_profiles_require_gn_compat_receipt(self):
+        for relative in (
+            build_pipeline.ARM_OUT + "/args.gn",
+            build_pipeline.X64_OUT + "/args.gn",
+        ):
+            path = self.source / relative
+            path.write_text(
+                "enable_swiftshader=false\nsafe_browsing_mode=0\n",
+                encoding="utf-8",
+            )
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "GN compatibility receipt is required"
+        ):
+            build_pipeline.preparation_contract(self.source)
+
+    def test_gn_compat_execution_restores_pre_fix_files_on_apply_failure(self):
+        patch = self.root / "fixture-compat.patch"
+        patch.write_text("fixture\n", encoding="utf-8")
+        files = {}
+        post_bodies = {}
+        for relative in (
+            "chrome/BUILD.gn",
+            "content/shell/BUILD.gn",
+            "chrome/test/BUILD.gn",
+        ):
+            path = self.source / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pre = ("pre " + relative + "\n").encode("utf-8")
+            post = ("post " + relative + "\n").encode("utf-8")
+            path.write_bytes(pre)
+            files[relative] = {
+                "pre_sha256": hashlib.sha256(pre).hexdigest(),
+                "post_sha256": hashlib.sha256(post).hexdigest(),
+            }
+            post_bodies[relative] = post
+        receipt = self.source / build_pipeline.GN_COMPAT_RECEIPT
+        prep = self.source / build_pipeline.PREPARATION_RECEIPT
+        plan = {
+            "stage": "apply-gn-compat",
+            "source_root": str(self.source),
+            "preparation_receipt": {
+                "path": str(prep),
+                "sha256": build_pipeline.sha256_file(prep),
+            },
+            "patch": {"path": str(patch)},
+            "files": files,
+            "receipt": str(receipt),
+            "offline": True,
+            "network_operations": 0,
+        }
+
+        def fail_after_mutation(*_args, **_kwargs):
+            for relative, body in post_bodies.items():
+                (self.source / relative).write_bytes(body)
+            raise build_pipeline.prepare_source.PreparationError("forced patch failure")
+
+        with mock.patch.object(
+            build_pipeline, "GN_COMPAT_PATCH", patch
+        ), mock.patch.object(
+            build_pipeline, "GN_COMPAT_FILES", files
+        ), mock.patch.object(
+            build_pipeline, "gn_compat_plan", return_value=plan
+        ), mock.patch.object(
+            build_pipeline, "require_free"
+        ), mock.patch.object(
+            build_pipeline.prepare_source,
+            "apply_patch_plan",
+            side_effect=fail_after_mutation,
+        ), self.assertRaisesRegex(build_pipeline.PipelineError, "forced patch failure"):
+            build_pipeline.execute_gn_compat(self.source, plan)
+
+        self.assertFalse(receipt.exists())
+        for relative, hashes in files.items():
+            self.assertEqual(
+                hashes["pre_sha256"],
+                build_pipeline.sha256_file(self.source / relative),
+            )
+
     def test_safe_environment_is_child_only_and_macos_only(self):
         inherited = {
             "PATH": "/bin",

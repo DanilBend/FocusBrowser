@@ -19,6 +19,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -53,6 +54,25 @@ RECLAIM_RECEIPT = STAGING_ROOT + "/arm64-reclaim-complete.json"
 UNSIGNED_ROOT = "out/FocusMacUnsignedUniversal"
 SIGNED_ROOT = "out/FocusMacSignedUniversal"
 SLICE_RECEIPT_NAME = "FocusMacBuild.json"
+GN_COMPAT_RECEIPT = "out/FocusMacGnCompatibility.json"
+GN_COMPAT_PATCH = MACOS_DIR / "patches/gn-disabled-feature-compat.patch"
+GN_COMPAT_PATCH_SHA256 = (
+    "38f26860f0696b42d4fa4bdd0ecd9b1d845b7efb934ec4c1fe686c6d56e89946"
+)
+GN_COMPAT_FILES = {
+    "chrome/BUILD.gn": {
+        "pre_sha256": "7ba0e1514324ede6c1fd6eccf99f5353cd84ecc5975b57db7524771c8e74c568",
+        "post_sha256": "e5fb9f6c7c09a8c452d70e57ffce40372d9846750a23f0ef5382062d1115944c",
+    },
+    "content/shell/BUILD.gn": {
+        "pre_sha256": "0d2d9301245d9a95f2cd82f79ff200d2bbfefbe9c645be5a8b73fde96f61aeb8",
+        "post_sha256": "c1633186735a85ee533b871a8b10133f3ef093364a1f012866fca5ac48fc348e",
+    },
+    "chrome/test/BUILD.gn": {
+        "pre_sha256": "3c646a781cfb05291945565e8dee931b78f064c1b0cd8e5e701368107d3295a0",
+        "post_sha256": "95176a7d97703e8574f05b5872b9e12d633c7cee5faa6be1467032bf72aa01a1",
+    },
+}
 
 DAWN_NINJA_RELATIVE = "third_party/dawn/third_party/ninja/ninja"
 NINJA_VERSION = "1.12.1"
@@ -463,7 +483,216 @@ def developer_contract(value):
         raise PipelineError(str(exc)) from exc
 
 
-def preparation_contract(source, allow_reclaimed_arm=False):
+def gn_compat_is_required(source, allow_missing_arm=False):
+    """Return whether both prepared profiles disable the guarded features."""
+    states = []
+    for relative in (ARM_OUT + "/args.gn", X64_OUT + "/args.gn"):
+        path = in_source(source, relative, "GN compatibility args")
+        if not path.is_file() and allow_missing_arm and relative.startswith(ARM_OUT + "/"):
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise PipelineError("missing GN compatibility args: {}".format(path))
+        text = path.read_text(encoding="utf-8")
+        swiftshader = text.count("enable_swiftshader=false")
+        safe_browsing = text.count("safe_browsing_mode=0")
+        if swiftshader not in (0, 1) or safe_browsing not in (0, 1):
+            raise PipelineError("GN compatibility flags are duplicated")
+        if bool(swiftshader) != bool(safe_browsing):
+            raise PipelineError("GN compatibility flags are only partially disabled")
+        states.append(bool(swiftshader))
+    if len(states) == 2 and states[0] != states[1]:
+        raise PipelineError("arm64/x64 GN compatibility flags differ")
+    if not states:
+        raise PipelineError("no GN compatibility args were available")
+    return states[0]
+
+
+def gn_compat_receipt_contract(source, preparation_receipt_path, required=True):
+    """Validate the audited post-preparation fix for disabled GN features."""
+    receipt_path = in_source(source, GN_COMPAT_RECEIPT, "GN compatibility receipt")
+    if not receipt_path.exists():
+        if required:
+            raise PipelineError("GN compatibility receipt is required")
+        return None
+    receipt = load_json(receipt_path, "GN compatibility receipt")
+    expected_keys = {
+        "schema",
+        "source_root",
+        "preparation_receipt",
+        "patch",
+        "files",
+        "offline",
+        "network_operations",
+        "build_executed",
+        "signing_executed",
+        "packaging_executed",
+    }
+    if set(receipt) != expected_keys or receipt.get("schema") != 1:
+        raise PipelineError("GN compatibility receipt schema mismatch")
+    expected_preparation = {
+        "path": str(preparation_receipt_path),
+        "sha256": sha256_file(preparation_receipt_path),
+    }
+    expected_patch = {
+        "path": str(GN_COMPAT_PATCH),
+        "sha256": GN_COMPAT_PATCH_SHA256,
+    }
+    if (
+        receipt.get("source_root") != str(source)
+        or receipt.get("preparation_receipt") != expected_preparation
+        or receipt.get("patch") != expected_patch
+        or receipt.get("files") != GN_COMPAT_FILES
+        or receipt.get("offline") is not True
+        or receipt.get("network_operations") != 0
+        or receipt.get("build_executed") is not False
+        or receipt.get("signing_executed") is not False
+        or receipt.get("packaging_executed") is not False
+    ):
+        raise PipelineError("GN compatibility provenance mismatch")
+    if sha256_file(GN_COMPAT_PATCH) != GN_COMPAT_PATCH_SHA256:
+        raise PipelineError("GN compatibility patch hash mismatch")
+    for relative, hashes in GN_COMPAT_FILES.items():
+        current = in_source(
+            source, relative, "GN compatibility source", must_exist=True
+        )
+        if sha256_file(current) != hashes["post_sha256"]:
+            raise PipelineError(
+                "GN compatibility source hash mismatch: {}".format(relative)
+            )
+    return receipt_path, receipt
+
+
+def gn_compat_plan(source):
+    """Validate the exact pre-fix state without changing the checkout."""
+    preparation_path, _ = preparation_contract(
+        source, allow_missing_gn_compat=True
+    )
+    if not gn_compat_is_required(source):
+        raise PipelineError("prepared profiles do not require the GN compatibility fix")
+    receipt_path = in_source(source, GN_COMPAT_RECEIPT, "GN compatibility receipt")
+    if receipt_path.exists() or receipt_path.is_symlink():
+        raise PipelineError("GN compatibility receipt already exists")
+    if GN_COMPAT_PATCH.is_symlink() or not GN_COMPAT_PATCH.is_file():
+        raise PipelineError("GN compatibility patch is not a regular file")
+    if sha256_file(GN_COMPAT_PATCH) != GN_COMPAT_PATCH_SHA256:
+        raise PipelineError("GN compatibility patch hash mismatch")
+    files = {}
+    for relative, hashes in GN_COMPAT_FILES.items():
+        path = in_source(source, relative, "GN compatibility source", must_exist=True)
+        observed = sha256_file(path)
+        if observed != hashes["pre_sha256"]:
+            raise PipelineError(
+                "GN compatibility pre-fix hash mismatch: {}".format(relative)
+            )
+        files[relative] = dict(hashes)
+    try:
+        boundary = prepare_source.check_patch_boundary(source, GN_COMPAT_PATCH)
+    except prepare_source.PreparationError as exc:
+        raise PipelineError(str(exc)) from exc
+    return {
+        "stage": "apply-gn-compat",
+        "source_root": str(source),
+        "preparation_receipt": {
+            "path": str(preparation_path),
+            "sha256": sha256_file(preparation_path),
+        },
+        "patch": boundary,
+        "files": files,
+        "receipt": str(receipt_path),
+        "offline": True,
+        "network_operations": 0,
+    }
+
+
+def execute_gn_compat(source, plan):
+    """Apply the three-file GN fix transactionally and publish its receipt."""
+    expected = gn_compat_plan(source)
+    if plan != expected:
+        raise PipelineError("GN compatibility plan changed before execution")
+    require_free(source, SOFT_FLOOR_GIB, "GN compatibility fix")
+    snapshot_root = Path(tempfile.mkdtemp(prefix="focus-gn-compat-rollback-")).resolve()
+    backups = {}
+    try:
+        for position, relative in enumerate(GN_COMPAT_FILES, 1):
+            current = in_source(
+                source, relative, "GN compatibility snapshot", must_exist=True
+            )
+            backup = snapshot_root / "{:02d}.backup".format(position)
+            prepare_source.atomic_copy(current, backup)
+            backups[relative] = backup
+        prepare_source.apply_patch_plan(source, [GN_COMPAT_PATCH], total_patches=1)
+        for relative, hashes in GN_COMPAT_FILES.items():
+            current = in_source(
+                source, relative, "GN compatibility result", must_exist=True
+            )
+            if sha256_file(current) != hashes["post_sha256"]:
+                raise PipelineError(
+                    "GN compatibility post-fix hash mismatch: {}".format(relative)
+                )
+        receipt_value = {
+            "schema": 1,
+            "source_root": str(source),
+            "preparation_receipt": expected["preparation_receipt"],
+            "patch": {
+                "path": str(GN_COMPAT_PATCH),
+                "sha256": GN_COMPAT_PATCH_SHA256,
+            },
+            "files": GN_COMPAT_FILES,
+            "offline": True,
+            "network_operations": 0,
+            "build_executed": False,
+            "signing_executed": False,
+            "packaging_executed": False,
+        }
+        receipt_report = atomic_json(expected["receipt"], receipt_value)
+        gn_compat_receipt_contract(
+            source, Path(expected["preparation_receipt"]["path"]), required=True
+        )
+    except BaseException as original_error:
+        try:
+            receipt_path = Path(expected["receipt"])
+            if receipt_path.is_symlink() or (
+                receipt_path.exists() and not receipt_path.is_file()
+            ):
+                raise PipelineError("unsafe GN compatibility receipt during rollback")
+            if receipt_path.is_file():
+                receipt_path.unlink()
+            for relative, backup in backups.items():
+                target = in_source(
+                    source, relative, "GN compatibility rollback", must_exist=True
+                )
+                prepare_source.atomic_copy(backup, target)
+                if sha256_file(target) != GN_COMPAT_FILES[relative]["pre_sha256"]:
+                    raise PipelineError(
+                        "GN compatibility rollback hash mismatch: {}".format(relative)
+                    )
+        except BaseException as rollback_error:
+            raise PipelineError(
+                "GN compatibility fix failed and rollback failed; snapshot retained "
+                "at {}: original={!r}; rollback={!r}".format(
+                    snapshot_root, original_error, rollback_error
+                )
+            ) from original_error
+        shutil.rmtree(snapshot_root)
+        if isinstance(original_error, prepare_source.PreparationError):
+            raise PipelineError(str(original_error)) from original_error
+        raise
+    else:
+        shutil.rmtree(snapshot_root)
+    return {
+        "stage": "apply-gn-compat",
+        "applied": True,
+        "receipt": receipt_report,
+        "files": GN_COMPAT_FILES,
+        "offline": True,
+        "network_operations": 0,
+        "build_executed": False,
+    }
+
+
+def preparation_contract(
+    source, allow_reclaimed_arm=False, allow_missing_gn_compat=False
+):
     receipt_path = in_source(
         source, PREPARATION_RECEIPT, "preparation receipt", must_exist=True
     )
@@ -695,6 +924,14 @@ def preparation_contract(source, allow_reclaimed_arm=False):
     }
     if not isinstance(post, dict) or set(post) != set(expected_labels):
         raise PipelineError("preparation post-hash inventory mismatch")
+    compat_path = in_source(source, GN_COMPAT_RECEIPT, "GN compatibility receipt")
+    compat = None
+    if compat_path.exists():
+        compat = gn_compat_receipt_contract(source, receipt_path, required=True)
+    elif gn_compat_is_required(
+        source, allow_missing_arm=allow_reclaimed_arm
+    ) and not allow_missing_gn_compat:
+        raise PipelineError("GN compatibility receipt is required")
     for label, relative in expected_labels.items():
         current = in_source(source, relative, "prepared {}".format(label))
         if current.is_file() and not current.is_symlink():
@@ -707,7 +944,13 @@ def preparation_contract(source, allow_reclaimed_arm=False):
             observed = reclaim.get("arm_args_gn_sha256")
         else:
             raise PipelineError("prepared receipt input is missing: {}".format(current))
-        if observed != post[label]:
+        expected_hash = post[label]
+        if label == "chrome/BUILD.gn" and compat is not None:
+            compat_files = compat[1]["files"]
+            if compat_files[label]["pre_sha256"] != expected_hash:
+                raise PipelineError("GN compatibility pre-hash is not preparation-bound")
+            expected_hash = compat_files[label]["post_sha256"]
+        if observed != expected_hash:
             raise PipelineError("prepared input hash changed: {}".format(label))
     return receipt_path, receipt
 
@@ -1378,6 +1621,7 @@ def parser():
     subparsers = root.add_subparsers(dest="command", required=True)
     for name in (
         "bootstrap-tools",
+        "apply-gn-compat",
         "build-arm64",
         "stage-arm64",
         "build-x64",
@@ -1387,7 +1631,7 @@ def parser():
         child.add_argument("--source-root", required=True)
         child.add_argument("--execute", action="store_true")
         child.add_argument("--json", action="store_true")
-        if name not in ("stage-arm64",):
+        if name not in ("apply-gn-compat", "stage-arm64"):
             child.add_argument("--developer-dir", required=True)
         if name == "stage-arm64":
             child.add_argument("--allow-reclaim-arm64-out", action="store_true")
@@ -1407,6 +1651,9 @@ def main(argv=None):
         if args.command == "bootstrap-tools":
             plan = bootstrap_plan(source, developer_dir)
             result = execute_bootstrap(source, developer_dir, plan) if args.execute else plan
+        elif args.command == "apply-gn-compat":
+            plan = gn_compat_plan(source)
+            result = execute_gn_compat(source, plan) if args.execute else plan
         elif args.command == "build-arm64":
             plan = build_plan(source, developer_dir, "arm64")
             result = execute_build(source, developer_dir, plan) if args.execute else plan
