@@ -329,6 +329,9 @@ class BuildPipelineTests(unittest.TestCase):
         expected = "arm64" if architecture == "arm64" else "x86_64"
         args_path = out / "args.gn"
         prep = self.source / build_pipeline.PREPARATION_RECEIPT
+        xcode27 = self.source / build_pipeline.XCODE27_COMPAT_RECEIPT
+        if not xcode27.exists():
+            self.write_json(xcode27, {"fixture": True})
         return self.write_json(
             out / build_pipeline.SLICE_RECEIPT_NAME,
             {
@@ -339,6 +342,9 @@ class BuildPipelineTests(unittest.TestCase):
                 "app": {"architectures": [expected]},
                 "args_gn_sha256": build_pipeline.sha256_file(args_path),
                 "preparation_receipt_sha256": build_pipeline.sha256_file(prep),
+                "xcode27_compatibility_receipt_sha256": (
+                    build_pipeline.sha256_file(xcode27)
+                ),
                 "ninja": self.ninja_report,
                 "build_complete": True,
             },
@@ -387,6 +393,73 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertEqual(4, text.count("if (enable_swiftshader)"))
         self.assertEqual(1, text.count("if (safe_browsing_mode != 0)"))
         self.assertNotIn("safe_browsing_mode=1", text)
+
+    def test_xcode27_patch_is_upstream_pinned_scoped_and_semantic(self):
+        patch = build_pipeline.XCODE27_COMPAT_PATCH
+        self.assertEqual(
+            build_pipeline.XCODE27_COMPAT_PATCH_SHA256,
+            build_pipeline.sha256_file(patch),
+        )
+        text = patch.read_text(encoding="utf-8")
+        self.assertEqual(
+            {"buildtools/third_party/libc++/BUILD.gn"},
+            {
+                line.removeprefix("--- a/")
+                for line in text.splitlines()
+                if line.startswith("--- a/")
+            },
+        )
+        self.assertEqual(1, text.count('+        ":_Builtin_float",'))
+        self.assertEqual(
+            "f0ccfb5933f7daa9545159afbb35bdf8951efcc4",
+            build_pipeline.XCODE27_COMPAT_UPSTREAM["commit"],
+        )
+
+    def test_xcode27_execution_restores_pre_fix_file_on_apply_failure(self):
+        patch = self.root / "fixture-xcode27.patch"
+        patch.write_text("fixture\n", encoding="utf-8")
+        relative = "buildtools/third_party/libc++/BUILD.gn"
+        target = self.source / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        pre = b"pre xcode27\n"
+        post = b"post xcode27\n"
+        target.write_bytes(pre)
+        files = {
+            relative: {
+                "pre_sha256": hashlib.sha256(pre).hexdigest(),
+                "post_sha256": hashlib.sha256(post).hexdigest(),
+            }
+        }
+        receipt = self.source / build_pipeline.XCODE27_COMPAT_RECEIPT
+        plan = {
+            "stage": "apply-xcode27-compat",
+            "source_root": str(self.source),
+            "receipt": str(receipt),
+        }
+
+        def fail_after_mutation(*_args, **_kwargs):
+            target.write_bytes(post)
+            raise build_pipeline.prepare_source.PreparationError("forced patch failure")
+
+        with mock.patch.object(
+            build_pipeline, "XCODE27_COMPAT_PATCH", patch
+        ), mock.patch.object(
+            build_pipeline, "XCODE27_COMPAT_FILES", files
+        ), mock.patch.object(
+            build_pipeline, "xcode27_compat_plan", return_value=plan
+        ), mock.patch.object(
+            build_pipeline, "require_free"
+        ), mock.patch.object(
+            build_pipeline.prepare_source,
+            "apply_patch_plan",
+            side_effect=fail_after_mutation,
+        ), self.assertRaisesRegex(build_pipeline.PipelineError, "forced patch failure"):
+            build_pipeline.execute_xcode27_compat(
+                self.source, self.developer, plan
+            )
+
+        self.assertFalse(receipt.exists())
+        self.assertEqual(files[relative]["pre_sha256"], build_pipeline.sha256_file(target))
 
     def test_disabled_profiles_require_gn_compat_receipt(self):
         for relative in (
@@ -599,9 +672,18 @@ class BuildPipelineTests(unittest.TestCase):
     def test_build_plan_is_sequential_local_and_four_jobs(self):
         out = self.source / build_pipeline.ARM_OUT
         out.mkdir(parents=True, exist_ok=True)
-        plan = build_pipeline.build_plan(
-            self.source, self.developer, "arm64"
+        xcode27 = self.write_json(
+            self.source / build_pipeline.XCODE27_COMPAT_RECEIPT,
+            {"fixture": True},
         )
+        with mock.patch.object(
+            build_pipeline,
+            "xcode27_compat_receipt_contract",
+            return_value=(xcode27, {"fixture": True}),
+        ):
+            plan = build_pipeline.build_plan(
+                self.source, self.developer, "arm64"
+            )
         self.assertEqual("build-arm64", plan["stage"])
         self.assertEqual(self.ninja_report, plan["ninja"])
         self.assertEqual("-j4", plan["commands"][1][1])
@@ -622,12 +704,20 @@ class BuildPipelineTests(unittest.TestCase):
         sign = packaging / "sign_chrome.py"
         sign.write_bytes(b"sign")
         sign_hash = hashlib.sha256(b"sign").hexdigest()
+        xcode27 = self.write_json(
+            self.source / build_pipeline.XCODE27_COMPAT_RECEIPT,
+            {"fixture": True},
+        )
         plan = {
             "architecture": "arm64",
             "out": str(out),
             "commands": [["gn", "gen"], ["autoninja", "chrome"]],
             "receipt": str(out / build_pipeline.SLICE_RECEIPT_NAME),
             "ninja": self.ninja_report,
+            "xcode27_compatibility": {
+                "path": str(xcode27),
+                "sha256": build_pipeline.sha256_file(xcode27),
+            },
         }
         app_report = {
             "app": str(out / build_pipeline.APP_NAME),
@@ -639,6 +729,10 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline, "require_free", return_value=80 * build_pipeline.GIB
         ), mock.patch.object(build_pipeline, "run_monitored") as run, mock.patch.object(
             build_pipeline, "app_report", return_value=app_report
+        ), mock.patch.object(
+            build_pipeline,
+            "xcode27_compat_receipt_contract",
+            return_value=(xcode27, {"fixture": True}),
         ):
             report = build_pipeline.execute_build(
                 self.source, self.developer, plan
@@ -649,6 +743,10 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertEqual("arm64", receipt["mach_o_architecture"])
         self.assertEqual(sign_hash, receipt["sign_chrome_sha256"])
         self.assertEqual(self.ninja_report, receipt["ninja"])
+        self.assertEqual(
+            build_pipeline.sha256_file(xcode27),
+            receipt["xcode27_compatibility_receipt_sha256"],
+        )
 
     def test_stage_reclaims_only_exact_arm_output_after_verified_copy(self):
         arm_out = self.source / build_pipeline.ARM_OUT

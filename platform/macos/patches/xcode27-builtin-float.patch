@@ -1,0 +1,15 @@
+diff --git a/buildtools/third_party/libc++/BUILD.gn b/buildtools/third_party/libc++/BUILD.gn
+--- a/buildtools/third_party/libc++/BUILD.gn
++++ b/buildtools/third_party/libc++/BUILD.gn
+@@ -121,7 +121,10 @@ else if (use_clang_modules) {
+     }
+ 
+     DarwinFoundation1_module("_DarwinFoundation1") {
+-      public_deps = [ ":_AvailabilityInternal" ]
++      public_deps = [
++        ":_AvailabilityInternal",
++        ":_Builtin_float",
++      ]
+     }
+     DarwinFoundation1_module("_AvailabilityInternal") {
+     }

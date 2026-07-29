@@ -73,6 +73,35 @@ GN_COMPAT_FILES = {
         "post_sha256": "95176a7d97703e8574f05b5872b9e12d633c7cee5faa6be1467032bf72aa01a1",
     },
 }
+XCODE27_COMPAT_RECEIPT = "out/FocusMacXcode27Compatibility.json"
+XCODE27_COMPAT_PATCH = MACOS_DIR / "patches/xcode27-builtin-float.patch"
+XCODE27_COMPAT_PATCH_SHA256 = (
+    "045cd70cc5d744008420d23d8cf5c3f57a01d8bd17c4a73eb418a55e6213f000"
+)
+XCODE27_COMPAT_UPSTREAM = {
+    "commit": "f0ccfb5933f7daa9545159afbb35bdf8951efcc4",
+    "change_id": "Ia03a9da205754591442355f99fa42e21e05ed0dc",
+    "commit_position": "refs/heads/main@{#1643921}",
+    "url": (
+        "https://chromium.googlesource.com/chromium/src/buildtools/+/"
+        "f0ccfb5933f7daa9545159afbb35bdf8951efcc4%5E%21/"
+    ),
+}
+XCODE27_COMPAT_TOOLCHAIN = {
+    "xcode": {"version": "27.0", "build": "27A5228h"},
+    "sdk": {
+        "version": "27.0",
+        "build": "26A5388f",
+        "minimum_deployment_target": "12.0",
+        "architectures": ["arm64", "arm64e", "x86_64", "x86_64h"],
+    },
+}
+XCODE27_COMPAT_FILES = {
+    "buildtools/third_party/libc++/BUILD.gn": {
+        "pre_sha256": "9753adb6fe3c4ded31e7631d0e8c1a3ee7d17b6b3c9a595976c7f50ad393f46a",
+        "post_sha256": "e1916a65a94dfe6a4d1324eed43def375377d32f86ed6ac77759a036f0db85bf",
+    }
+}
 
 DAWN_NINJA_RELATIVE = "third_party/dawn/third_party/ninja/ninja"
 NINJA_VERSION = "1.12.1"
@@ -690,6 +719,263 @@ def execute_gn_compat(source, plan):
     }
 
 
+def xcode27_toolchain_identity(report):
+    """Keep only the immutable Xcode/SDK fields relevant to this backport."""
+    try:
+        return {
+            "xcode": {
+                "version": report["xcode"]["version"],
+                "build": report["xcode"]["build"],
+            },
+            "sdk": {
+                "version": report["sdk"]["version"],
+                "build": report["sdk"]["build"],
+                "minimum_deployment_target": report["sdk"][
+                    "minimum_deployment_target"
+                ],
+                "architectures": report["sdk"]["architectures"],
+            },
+        }
+    except (KeyError, TypeError) as exc:
+        raise PipelineError("Xcode 27 toolchain identity is incomplete") from exc
+
+
+def xcode27_provenance_links(source, developer_dir=None):
+    """Resolve the exact preparation, optional GN fix, and tool receipts."""
+    preparation_path, _ = preparation_contract(source)
+    tool_path, _ = tool_receipt_contract(source, developer_dir)
+    gn_path = in_source(source, GN_COMPAT_RECEIPT, "GN compatibility receipt")
+    if gn_path.exists():
+        gn_path, _ = gn_compat_receipt_contract(
+            source, preparation_path, required=True
+        )
+        gn_link = {"path": str(gn_path), "sha256": sha256_file(gn_path)}
+    else:
+        gn_link = None
+    return {
+        "preparation_receipt": {
+            "path": str(preparation_path),
+            "sha256": sha256_file(preparation_path),
+        },
+        "gn_compatibility_receipt": gn_link,
+        "tool_bootstrap_receipt": {
+            "path": str(tool_path),
+            "sha256": sha256_file(tool_path),
+        },
+    }
+
+
+def xcode27_compat_receipt_contract(source, developer_dir=None, required=True):
+    """Validate the exact upstream explicit-module fix for Xcode 27."""
+    receipt_path = in_source(
+        source, XCODE27_COMPAT_RECEIPT, "Xcode 27 compatibility receipt"
+    )
+    if not receipt_path.exists():
+        if required:
+            raise PipelineError("Xcode 27 compatibility receipt is required")
+        return None
+    receipt = load_json(receipt_path, "Xcode 27 compatibility receipt")
+    expected_keys = {
+        "schema",
+        "source_root",
+        "preparation_receipt",
+        "gn_compatibility_receipt",
+        "tool_bootstrap_receipt",
+        "toolchain",
+        "upstream",
+        "patch",
+        "files",
+        "offline",
+        "network_operations",
+        "build_executed",
+        "signing_executed",
+        "packaging_executed",
+    }
+    links = xcode27_provenance_links(source, developer_dir)
+    if set(receipt) != expected_keys or receipt.get("schema") != 1:
+        raise PipelineError("Xcode 27 compatibility receipt schema mismatch")
+    if (
+        receipt.get("source_root") != str(source)
+        or receipt.get("preparation_receipt") != links["preparation_receipt"]
+        or receipt.get("gn_compatibility_receipt")
+        != links["gn_compatibility_receipt"]
+        or receipt.get("tool_bootstrap_receipt")
+        != links["tool_bootstrap_receipt"]
+        or receipt.get("toolchain") != XCODE27_COMPAT_TOOLCHAIN
+        or receipt.get("upstream") != XCODE27_COMPAT_UPSTREAM
+        or receipt.get("patch")
+        != {
+            "path": str(XCODE27_COMPAT_PATCH),
+            "sha256": XCODE27_COMPAT_PATCH_SHA256,
+        }
+        or receipt.get("files") != XCODE27_COMPAT_FILES
+        or receipt.get("offline") is not True
+        or receipt.get("network_operations") != 0
+        or receipt.get("build_executed") is not False
+        or receipt.get("signing_executed") is not False
+        or receipt.get("packaging_executed") is not False
+    ):
+        raise PipelineError("Xcode 27 compatibility provenance mismatch")
+    if sha256_file(XCODE27_COMPAT_PATCH) != XCODE27_COMPAT_PATCH_SHA256:
+        raise PipelineError("Xcode 27 compatibility patch hash mismatch")
+    for relative, hashes in XCODE27_COMPAT_FILES.items():
+        current = in_source(
+            source, relative, "Xcode 27 compatibility source", must_exist=True
+        )
+        if sha256_file(current) != hashes["post_sha256"]:
+            raise PipelineError(
+                "Xcode 27 compatibility source hash mismatch: {}".format(relative)
+            )
+    return receipt_path, receipt
+
+
+def xcode27_compat_plan(source, developer_dir):
+    """Validate the exact pre-backport state without changing the checkout."""
+    links = xcode27_provenance_links(source, developer_dir)
+    identity = xcode27_toolchain_identity(developer_contract(developer_dir))
+    if identity != XCODE27_COMPAT_TOOLCHAIN:
+        raise PipelineError("Xcode 27 compatibility toolchain mismatch")
+    receipt_path = in_source(
+        source, XCODE27_COMPAT_RECEIPT, "Xcode 27 compatibility receipt"
+    )
+    if receipt_path.exists() or receipt_path.is_symlink():
+        raise PipelineError("Xcode 27 compatibility receipt already exists")
+    if XCODE27_COMPAT_PATCH.is_symlink() or not XCODE27_COMPAT_PATCH.is_file():
+        raise PipelineError("Xcode 27 compatibility patch is not a regular file")
+    if sha256_file(XCODE27_COMPAT_PATCH) != XCODE27_COMPAT_PATCH_SHA256:
+        raise PipelineError("Xcode 27 compatibility patch hash mismatch")
+    files = {}
+    for relative, hashes in XCODE27_COMPAT_FILES.items():
+        path = in_source(
+            source, relative, "Xcode 27 compatibility source", must_exist=True
+        )
+        if sha256_file(path) != hashes["pre_sha256"]:
+            raise PipelineError(
+                "Xcode 27 compatibility pre-fix hash mismatch: {}".format(relative)
+            )
+        files[relative] = dict(hashes)
+    try:
+        boundary = prepare_source.check_patch_boundary(source, XCODE27_COMPAT_PATCH)
+    except prepare_source.PreparationError as exc:
+        raise PipelineError(str(exc)) from exc
+    return {
+        "stage": "apply-xcode27-compat",
+        "source_root": str(source),
+        **links,
+        "toolchain": identity,
+        "upstream": XCODE27_COMPAT_UPSTREAM,
+        "patch": boundary,
+        "files": files,
+        "receipt": str(receipt_path),
+        "offline": True,
+        "network_operations": 0,
+    }
+
+
+def execute_xcode27_compat(source, developer_dir, plan):
+    """Backport the one-file upstream Xcode 27 fix transactionally."""
+    expected = xcode27_compat_plan(source, developer_dir)
+    if plan != expected:
+        raise PipelineError("Xcode 27 compatibility plan changed before execution")
+    require_free(source, SOFT_FLOOR_GIB, "Xcode 27 compatibility fix")
+    snapshot_root = Path(
+        tempfile.mkdtemp(prefix="focus-xcode27-compat-rollback-")
+    ).resolve()
+    backups = {}
+    try:
+        for position, relative in enumerate(XCODE27_COMPAT_FILES, 1):
+            current = in_source(
+                source, relative, "Xcode 27 compatibility snapshot", must_exist=True
+            )
+            backup = snapshot_root / "{:02d}.backup".format(position)
+            prepare_source.atomic_copy(current, backup)
+            backups[relative] = backup
+        prepare_source.apply_patch_plan(
+            source, [XCODE27_COMPAT_PATCH], total_patches=1
+        )
+        for relative, hashes in XCODE27_COMPAT_FILES.items():
+            current = in_source(
+                source, relative, "Xcode 27 compatibility result", must_exist=True
+            )
+            if sha256_file(current) != hashes["post_sha256"]:
+                raise PipelineError(
+                    "Xcode 27 compatibility post-fix hash mismatch: {}".format(
+                        relative
+                    )
+                )
+        receipt_value = {
+            "schema": 1,
+            "source_root": str(source),
+            "preparation_receipt": expected["preparation_receipt"],
+            "gn_compatibility_receipt": expected["gn_compatibility_receipt"],
+            "tool_bootstrap_receipt": expected["tool_bootstrap_receipt"],
+            "toolchain": XCODE27_COMPAT_TOOLCHAIN,
+            "upstream": XCODE27_COMPAT_UPSTREAM,
+            "patch": {
+                "path": str(XCODE27_COMPAT_PATCH),
+                "sha256": XCODE27_COMPAT_PATCH_SHA256,
+            },
+            "files": XCODE27_COMPAT_FILES,
+            "offline": True,
+            "network_operations": 0,
+            "build_executed": False,
+            "signing_executed": False,
+            "packaging_executed": False,
+        }
+        receipt_report = atomic_json(expected["receipt"], receipt_value)
+        xcode27_compat_receipt_contract(source, developer_dir, required=True)
+    except BaseException as original_error:
+        try:
+            receipt_path = Path(expected["receipt"])
+            if receipt_path.is_symlink() or (
+                receipt_path.exists() and not receipt_path.is_file()
+            ):
+                raise PipelineError(
+                    "unsafe Xcode 27 compatibility receipt during rollback"
+                )
+            if receipt_path.is_file():
+                receipt_path.unlink()
+            for relative, backup in backups.items():
+                target = in_source(
+                    source,
+                    relative,
+                    "Xcode 27 compatibility rollback",
+                    must_exist=True,
+                )
+                prepare_source.atomic_copy(backup, target)
+                if sha256_file(target) != XCODE27_COMPAT_FILES[relative][
+                    "pre_sha256"
+                ]:
+                    raise PipelineError(
+                        "Xcode 27 compatibility rollback hash mismatch: {}".format(
+                            relative
+                        )
+                    )
+        except BaseException as rollback_error:
+            raise PipelineError(
+                "Xcode 27 compatibility fix failed and rollback failed; "
+                "snapshot retained at {}: original={!r}; rollback={!r}".format(
+                    snapshot_root, original_error, rollback_error
+                )
+            ) from original_error
+        shutil.rmtree(snapshot_root)
+        if isinstance(original_error, prepare_source.PreparationError):
+            raise PipelineError(str(original_error)) from original_error
+        raise
+    else:
+        shutil.rmtree(snapshot_root)
+    return {
+        "stage": "apply-xcode27-compat",
+        "applied": True,
+        "receipt": receipt_report,
+        "files": XCODE27_COMPAT_FILES,
+        "upstream": XCODE27_COMPAT_UPSTREAM,
+        "offline": True,
+        "network_operations": 0,
+        "build_executed": False,
+    }
+
+
 def preparation_contract(
     source, allow_reclaimed_arm=False, allow_missing_gn_compat=False
 ):
@@ -1051,6 +1337,18 @@ def slice_receipt_contract(source, out, architecture):
         in_source(source, PREPARATION_RECEIPT, "preparation receipt", must_exist=True)
     ):
         raise PipelineError("{} preparation receipt mismatch".format(architecture))
+    xcode27_receipt = in_source(
+        source,
+        XCODE27_COMPAT_RECEIPT,
+        "Xcode 27 compatibility receipt",
+        must_exist=True,
+    )
+    if receipt.get("xcode27_compatibility_receipt_sha256") != sha256_file(
+        xcode27_receipt
+    ):
+        raise PipelineError(
+            "{} Xcode 27 compatibility receipt mismatch".format(architecture)
+        )
     if receipt.get("ninja") != ninja_contract(source):
         raise PipelineError("{} Ninja provenance mismatch".format(architecture))
     return receipt_path, receipt
@@ -1242,6 +1540,9 @@ def build_plan(source, developer_dir, architecture):
     if architecture == "x64":
         reclaim_contract(source)
     preparation_contract(source, allow_reclaimed_arm=(architecture == "x64"))
+    xcode27_path, _ = xcode27_compat_receipt_contract(
+        source, developer_dir, required=True
+    )
     tools = tool_paths(source)
     ninja = ninja_contract(source)
     if architecture == "arm64":
@@ -1279,6 +1580,10 @@ def build_plan(source, developer_dir, architecture):
         "receipt": str(build_receipt),
         "developer_dir": str(developer_dir),
         "ninja": ninja,
+        "xcode27_compatibility": {
+            "path": str(xcode27_path),
+            "sha256": sha256_file(xcode27_path),
+        },
     }
 
 
@@ -1294,6 +1599,17 @@ def execute_build(source, developer_dir, plan):
     current_ninja = ninja_contract(source)
     if plan.get("ninja") != current_ninja:
         raise PipelineError("build plan Ninja provenance changed before execution")
+    xcode27_path, _ = xcode27_compat_receipt_contract(
+        source, developer_dir, required=True
+    )
+    current_xcode27 = {
+        "path": str(xcode27_path),
+        "sha256": sha256_file(xcode27_path),
+    }
+    if plan.get("xcode27_compatibility") != current_xcode27:
+        raise PipelineError(
+            "build plan Xcode 27 compatibility provenance changed before execution"
+        )
     environment = safe_environment(
         source, developer_dir, build_ninja=Path(current_ninja["path"])
     )
@@ -1319,6 +1635,7 @@ def execute_build(source, developer_dir, plan):
         "preparation_receipt_sha256": sha256_file(
             in_source(source, PREPARATION_RECEIPT, "preparation receipt", must_exist=True)
         ),
+        "xcode27_compatibility_receipt_sha256": current_xcode27["sha256"],
         "tool_receipt_sha256": sha256_file(source.parent / TOOL_RECEIPT),
         "ninja": current_ninja,
         "sign_chrome_sha256": SIGN_CHROME_SHA256,
@@ -1622,6 +1939,7 @@ def parser():
     for name in (
         "bootstrap-tools",
         "apply-gn-compat",
+        "apply-xcode27-compat",
         "build-arm64",
         "stage-arm64",
         "build-x64",
@@ -1654,6 +1972,13 @@ def main(argv=None):
         elif args.command == "apply-gn-compat":
             plan = gn_compat_plan(source)
             result = execute_gn_compat(source, plan) if args.execute else plan
+        elif args.command == "apply-xcode27-compat":
+            plan = xcode27_compat_plan(source, developer_dir)
+            result = (
+                execute_xcode27_compat(source, developer_dir, plan)
+                if args.execute
+                else plan
+            )
         elif args.command == "build-arm64":
             plan = build_plan(source, developer_dir, "arm64")
             result = execute_build(source, developer_dir, plan) if args.execute else plan

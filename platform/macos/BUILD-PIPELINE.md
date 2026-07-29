@@ -103,7 +103,24 @@ place its directory after `depot_tools` in the child-only PATH, and scrub
 compiler, Node/npm, Python, Rust, GN/GYP, Ninja, SDK, and dynamic-loader
 override variables from the inherited build environment.
 
-### 3. Build and preserve arm64
+### 3. Apply the audited macOS/Xcode compatibility backports
+
+```sh
+python3 platform/macos/build_pipeline.py apply-gn-compat \
+  --source-root "$SRC" --execute --json
+
+python3 platform/macos/build_pipeline.py apply-xcode27-compat \
+  --source-root "$SRC" --developer-dir "$XCODE" --execute --json
+```
+
+The first command gates Chromium GN dependencies that are absent when the
+prepared profiles disable Safe Browsing and SwiftShader. The second applies
+Chromium upstream commit `f0ccfb5933f7daa9545159afbb35bdf8951efcc4`'s
+one-file `_Builtin_float` dependency fix for Xcode 27 explicit modules. Both
+commands are offline, hash-pinned, transactional, and publish immutable
+receipts only after the exact post-images are verified.
+
+### 4. Build and preserve arm64
 
 ```sh
 python3 platform/macos/build_pipeline.py build-arm64 \
@@ -119,7 +136,7 @@ trees, and removes only the exact measured `out/FocusMacArm64`. A separate
 `arm64-reclaim-complete.json` is written only after that path is absent. No
 other source or output directory is reclaimed.
 
-### 4. Build x86_64
+### 5. Build x86_64
 
 ```sh
 python3 platform/macos/build_pipeline.py build-x64 \
@@ -130,7 +147,7 @@ The x86_64 start gate uses the measured allocation of the reclaimed arm64
 output. It also revalidates the staged app, receipts, tool hashes, preparation
 hashes, and absence of `out/FocusMacArm64`.
 
-### 5. Merge, ad-hoc sign, and create the local DMG
+### 6. Merge, ad-hoc sign, and create the local DMG
 
 ```sh
 python3 platform/macos/build_pipeline.py merge-sign-package \
