@@ -8798,6 +8798,159 @@ def _resume3_monitor_contract(monitor, source, logs):
     return monitor
 
 
+def _fresh_x64_resume_preparation_binding(
+    source, developer_dir, out, supplied, pre_run
+):
+    """Bind a completed x64 run to the exact pre-Ninja fresh-GN receipt."""
+    if not isinstance(supplied, dict) or set(supplied) != {
+        "receipt",
+        "contract_sha256",
+    }:
+        raise PipelineError("resume3 fresh x86_64 preparation link mismatch")
+    link = supplied.get("receipt")
+    if not isinstance(link, dict) or set(link) != {"path", "bytes", "sha256"}:
+        raise PipelineError("resume3 fresh x86_64 receipt link mismatch")
+    receipt_path = in_source(
+        source,
+        FRESH_X64_PREPARATION_RECEIPT,
+        "fresh x86_64 preparation receipt",
+        must_exist=True,
+    )
+    before = _regular_file_snapshot(receipt_path)
+    observed = os.stat(str(receipt_path), follow_symlinks=False)
+    if (
+        observed.st_uid != os.getuid()
+        or stat.S_IMODE(observed.st_mode) & 0o022
+        or link
+        != {
+            "path": str(receipt_path),
+            "bytes": before["bytes"],
+            "sha256": before["sha256"],
+        }
+    ):
+        raise PipelineError("resume3 fresh x86_64 receipt identity changed")
+    receipt = load_json(receipt_path, "fresh x86_64 preparation receipt")
+    after = _regular_file_snapshot(receipt_path)
+    if before != after:
+        raise PipelineError("resume3 fresh x86_64 receipt changed while reading")
+    try:
+        canonical = json.dumps(
+            receipt,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("ascii")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise PipelineError("resume3 fresh x86_64 receipt is not canonical JSON") from exc
+    if supplied.get("contract_sha256") != hashlib.sha256(canonical).hexdigest():
+        raise PipelineError("resume3 fresh x86_64 contract hash changed")
+    expected_keys = {
+        "schema", "stage", "source_root", "developer_dir", "legacy_root",
+        "legacy_out", "legacy_inventory", "prepared_evidence", "fresh_out",
+        "fresh_out_identity", "fresh_profile", "generated_graph", "gn_command",
+        "acquisition_receipt", "tool_receipt", "preparation_receipt",
+        "reclaimed_arm_onboarding", "xcode27_compatibility_receipt_sha256",
+        "xcode27_seatbelt_compatibility_receipt_sha256",
+        "screen_ai_disabled_compatibility_receipt_sha256",
+        "xcode27_linkedit_strip_compatibility_receipt_sha256",
+        "linkedit_strip_tools", "legacy_preserved", "legacy_deleted",
+        "gn_gen_executed", "gn_gen_succeeded", "ninja_executed",
+        "build_executed", "signing_executed", "packaging_executed",
+        "offline", "network_operations",
+    }
+    if set(receipt) != expected_keys or (
+        receipt.get("schema") != 1
+        or receipt.get("stage") != "prepare-fresh-x64"
+        or receipt.get("source_root") != str(source)
+        or receipt.get("developer_dir") != str(developer_dir)
+        or receipt.get("fresh_out") != str(out)
+        or receipt.get("legacy_preserved") is not True
+        or receipt.get("legacy_deleted") is not False
+        or receipt.get("gn_gen_executed") is not True
+        or receipt.get("gn_gen_succeeded") is not True
+        or receipt.get("ninja_executed") is not False
+        or receipt.get("build_executed") is not False
+        or receipt.get("signing_executed") is not False
+        or receipt.get("packaging_executed") is not False
+        or receipt.get("offline") is not True
+        or receipt.get("network_operations") != 0
+        or pre_run.get("ninja_log") is not None
+        or pre_run.get("ninja_deps") is not None
+    ):
+        raise PipelineError("resume3 fresh x86_64 receipt contract mismatch")
+    if _fresh_x64_directory_identity(out, "fresh x86_64 resumed output") != receipt.get(
+        "fresh_out_identity"
+    ):
+        raise PipelineError("resume3 fresh x86_64 output identity changed")
+    graph = _fresh_x64_generated_graph_contract(
+        out, receipt.get("linkedit_strip_tools")
+    )
+    if graph != receipt.get("generated_graph"):
+        raise PipelineError("resume3 fresh x86_64 graph changed after preparation")
+    build_snapshot = pre_run.get("build_ninja")
+    toolchain_inventory = pre_run.get("toolchain_inventory")
+    _validate_recorded_file_snapshot(
+        build_snapshot, Path(out) / "build.ninja", "resume3 fresh x86_64 build graph"
+    )
+    _validate_recorded_toolchain_inventory(toolchain_inventory)
+    recorded_toolchains = [
+        {
+            "path": item["relative_path"],
+            "bytes": item["bytes"],
+            "sha256": item["sha256"],
+        }
+        for item in toolchain_inventory["files"]
+    ]
+    if (
+        {key: build_snapshot[key] for key in ("bytes", "sha256")}
+        != graph["build_ninja"]
+        or recorded_toolchains != graph["toolchains"]
+    ):
+        raise PipelineError("resume3 fresh x86_64 pre-run graph is not receipt-bound")
+    return {"receipt": receipt, "graph": graph, "link": supplied}
+
+
+def _resume3_ninja_history_transition_contract(
+    pre_run, post, architecture, process_started_at_ns
+):
+    """Validate ARM incremental history or fresh-x64 absent-to-created history."""
+    if (
+        not _strict_json_identity(pre_run["build_ninja"], post["build_ninja"])
+        or not _strict_json_identity(
+            pre_run["toolchain_inventory"], post["toolchain_inventory"]
+        )
+    ):
+        raise PipelineError("resume3 Ninja graph changed during execution")
+    if architecture == "x64":
+        if pre_run["ninja_log"] is not None or pre_run["ninja_deps"] is not None:
+            raise PipelineError("resume3 fresh x86_64 history was not absent")
+        for name in ("ninja_log", "ninja_deps"):
+            current = post[name]
+            if (
+                not isinstance(current, dict)
+                or current.get("bytes", 0) <= 0
+                or current.get("mtime_ns", 0) < process_started_at_ns
+            ):
+                raise PipelineError(
+                    "resume3 fresh x86_64 {} was not created by Ninja".format(name)
+                )
+        return True
+    if architecture != "arm64" or (
+        pre_run["ninja_log"]["sha256"] == post["ninja_log"]["sha256"]
+        or post["ninja_log"]["mtime_ns"] <= pre_run["ninja_log"]["mtime_ns"]
+        or post["ninja_deps"]["mtime_ns"] < pre_run["ninja_deps"]["mtime_ns"]
+        or (
+            pre_run["ninja_deps"]["sha256"] == post["ninja_deps"]["sha256"]
+            and not _strict_json_identity(
+                pre_run["ninja_deps"], post["ninja_deps"]
+            )
+        )
+    ):
+        raise PipelineError("resume3 Ninja history transition mismatch")
+    return True
+
+
 def _resume3_execution_record_contract(
     record_path,
     record,
@@ -8828,6 +8981,8 @@ def _resume3_execution_record_contract(
         "live_process_revalidation",
         "runner",
     }
+    if architecture == "x64":
+        root_keys.add("fresh_x64_preparation")
     _resume3_exact_keys(record, root_keys, "resume3 execution record")
     if (
         type(record["schema"]) is not int
@@ -8837,9 +8992,11 @@ def _resume3_execution_record_contract(
     ):
         raise PipelineError("resume3 execution identity mismatch")
     stem = record_path.name[: -len(".execution.json")]
-    if architecture != "arm64" or not re.fullmatch(
-        r"build-arm64-resume3-[A-Za-z0-9][A-Za-z0-9._-]*", stem
-    ):
+    run_pattern = {
+        "arm64": r"build-arm64-resume3-[A-Za-z0-9][A-Za-z0-9._-]*",
+        "x64": r"build-x64-resume3-[A-Za-z0-9][A-Za-z0-9._-]*",
+    }.get(architecture)
+    if run_pattern is None or not re.fullmatch(run_pattern, stem):
         raise PipelineError("resume3 run identifier mismatch")
     expected_stdout_logical = record_path.with_name(stem + ".log")
     expected_stdout_physical = _physical_execution_path(
@@ -8985,6 +9142,8 @@ def _resume3_execution_record_contract(
         "runner",
         "policy",
     }
+    if architecture == "x64":
+        pre_keys.add("fresh_x64_preparation")
     _resume3_exact_keys(pre, pre_keys, "resume3 pre-launch")
     planned = pre["planned_process"]
     _resume3_exact_keys(
@@ -9013,6 +9172,13 @@ def _resume3_execution_record_contract(
         or planned["jobs"] != BUILD_JOBS
         or not _strict_json_identity(pre["identity"], record["identity"])
         or not _strict_json_identity(pre["pre_run"], record["pre_run"])
+        or (
+            architecture == "x64"
+            and not _strict_json_identity(
+                pre["fresh_x64_preparation"],
+                record["fresh_x64_preparation"],
+            )
+        )
     ):
         raise PipelineError("resume3 pre-launch provenance mismatch")
     policy = pre["policy"]
@@ -9049,13 +9215,35 @@ def _resume3_execution_record_contract(
         {"ninja_log", "ninja_deps", "build_ninja", "toolchain_inventory"},
         "resume3 pre-run",
     )
-    for name, relative in (
-        ("ninja_log", ".ninja_log"),
-        ("ninja_deps", ".ninja_deps"),
-        ("build_ninja", "build.ninja"),
-    ):
-        _validate_recorded_file_snapshot(pre_run[name], Path(out) / relative, "resume3 pre-run {}".format(name))
+    if architecture == "x64":
+        if pre_run["ninja_log"] is not None or pre_run["ninja_deps"] is not None:
+            raise PipelineError("resume3 fresh x86_64 pre-run history is not absent")
+        _validate_recorded_file_snapshot(
+            pre_run["build_ninja"],
+            Path(out) / "build.ninja",
+            "resume3 pre-run build_ninja",
+        )
+    else:
+        for name, relative in (
+            ("ninja_log", ".ninja_log"),
+            ("ninja_deps", ".ninja_deps"),
+            ("build_ninja", "build.ninja"),
+        ):
+            _validate_recorded_file_snapshot(
+                pre_run[name],
+                Path(out) / relative,
+                "resume3 pre-run {}".format(name),
+            )
     _validate_recorded_toolchain_inventory(pre_run["toolchain_inventory"])
+    fresh_x64_binding = None
+    if architecture == "x64":
+        fresh_x64_binding = _fresh_x64_resume_preparation_binding(
+            source,
+            developer_dir,
+            out,
+            record["fresh_x64_preparation"],
+            pre_run,
+        )
     initial_stdout = pre["stdout_log"]
     _resume3_exact_keys(
         initial_stdout,
@@ -9082,6 +9270,8 @@ def _resume3_execution_record_contract(
     ):
         raise PipelineError("resume3 initial stdout identity mismatch")
     primary_keys = {"schema", "kind", "run_id", "observed_at_ns", "observation_methods", "pre_launch", "process_group", "stdout_log_live_snapshot"}
+    if architecture == "x64":
+        primary_keys.add("architecture")
     _resume3_exact_keys(primary, primary_keys, "resume3 primary observation")
     if (
         type(primary["schema"]) is not int
@@ -9092,6 +9282,10 @@ def _resume3_execution_record_contract(
         or primary["observed_at_ns"] != process["observed_live_at_ns"]
         or primary["observation_methods"] != ["ps", "lsof", "proc_pidpath"]
         or not _strict_json_identity(primary["pre_launch"], record["pre_launch"])
+        or (
+            architecture == "x64"
+            and primary.get("architecture") != architecture
+        )
     ):
         raise PipelineError("resume3 primary observation mismatch")
     stable_roles = _resume3_process_group_contract(
@@ -9109,6 +9303,8 @@ def _resume3_execution_record_contract(
     ):
         raise PipelineError("resume3 primary stdout mismatch")
     supplement_keys = {"schema", "kind", "run_id", "observed_at_ns", "observation_method", "primary_observation", "processes"}
+    if architecture == "x64":
+        supplement_keys.add("architecture")
     _resume3_exact_keys(supplement, supplement_keys, "resume3 environment supplement")
     if (
         type(supplement["schema"]) is not int
@@ -9124,6 +9320,10 @@ def _resume3_execution_record_contract(
         )
         or not isinstance(supplement["processes"], list)
         or len(supplement["processes"]) != 2
+        or (
+            architecture == "x64"
+            and supplement.get("architecture") != architecture
+        )
     ):
         raise PipelineError("resume3 environment supplement mismatch")
     supplement_by_role = {}
@@ -9171,6 +9371,8 @@ def _resume3_execution_record_contract(
             raise PipelineError("resume3 supplemented process identity mismatch")
         supplement_by_role[role] = item
     revalidation_keys = {"schema", "kind", "run_id", "capture_started_at_ns", "capture_finished_at_ns", "observation_methods", "linked_evidence", "stable_spine", "dynamic_descendants", "script_identities", "stdout_log_live_snapshot"}
+    if architecture == "x64":
+        revalidation_keys.add("architecture")
     _resume3_exact_keys(revalidation, revalidation_keys, "resume3 process revalidation")
     if (
         type(revalidation["schema"]) is not int
@@ -9190,6 +9392,10 @@ def _resume3_execution_record_contract(
                 "primary_observation": record["live_process_observation"],
                 "environment_supplement": record["live_process_environment_supplement"],
             },
+        )
+        or (
+            architecture == "x64"
+            and revalidation.get("architecture") != architecture
         )
     ):
         raise PipelineError("resume3 process revalidation mismatch")
@@ -9275,6 +9481,8 @@ def _resume3_execution_record_contract(
     ):
         raise PipelineError("resume3 revalidation stdout mismatch")
     status_keys = {"schema", "kind", "run_id", "pid", "pgid", "wait_observation", "pipefail", "outcome", "failure", "monitor", "evidence_complete", "pipeline_success_derived", "pre_launch", "live_evidence", "stdout_log", "post_run", "explicit_gn_gen_command", "network_operations"}
+    if architecture == "x64":
+        status_keys.add("architecture")
     _resume3_exact_keys(status, status_keys, "resume3 exit status")
     wait = status["wait_observation"]
     _resume3_exact_keys(wait, {"api", "returncode", "wait_returned_at_ns", "runner_pid"}, "resume3 wait observation")
@@ -9307,6 +9515,10 @@ def _resume3_execution_record_contract(
         or status["explicit_gn_gen_command"] is not False
         or type(status["network_operations"]) is not int
         or status["network_operations"] != 0
+        or (
+            architecture == "x64"
+            and status.get("architecture") != architecture
+        )
     ):
         raise PipelineError("resume3 successful exit status mismatch")
     logs = record_path.parent
@@ -9396,20 +9608,9 @@ def _resume3_execution_record_contract(
         _ninja_history_exact_contract(authorized_history, out, "authorized resumed Ninja phase")
     elif not _strict_json_identity(post, current_post):
         raise PipelineError("resume3 post-run snapshot changed")
-    if (
-        not _strict_json_identity(pre_run["build_ninja"], post["build_ninja"])
-        or not _strict_json_identity(
-            pre_run["toolchain_inventory"], post["toolchain_inventory"]
-        )
-        or pre_run["ninja_log"]["sha256"] == post["ninja_log"]["sha256"]
-        or post["ninja_log"]["mtime_ns"] <= pre_run["ninja_log"]["mtime_ns"]
-        or post["ninja_deps"]["mtime_ns"] < pre_run["ninja_deps"]["mtime_ns"]
-        or (
-            pre_run["ninja_deps"]["sha256"] == post["ninja_deps"]["sha256"]
-            and not _strict_json_identity(pre_run["ninja_deps"], post["ninja_deps"])
-        )
-    ):
-        raise PipelineError("resume3 Ninja history transition mismatch")
+    _resume3_ninja_history_transition_contract(
+        pre_run, post, architecture, process["started_at_ns"]
+    )
     for evidence_path, earliest, latest, label in (
         (primary_path, primary["observed_at_ns"], supplement["observed_at_ns"], "primary"),
         (supplement_path, supplement["observed_at_ns"], revalidation["capture_finished_at_ns"], "supplement"),
@@ -9419,7 +9620,7 @@ def _resume3_execution_record_contract(
         observed = os.stat(str(evidence_path), follow_symlinks=False)
         if observed.st_mtime_ns < earliest or observed.st_mtime_ns > latest + 1_000_000_000:
             raise PipelineError("resume3 {} evidence timing mismatch".format(label))
-    return {
+    result = {
         "path": str(record_path),
         "sha256": record_sha256,
         "started_at_ns": process["started_at_ns"],
@@ -9432,6 +9633,9 @@ def _resume3_execution_record_contract(
         "stdout_log": final_stdout,
         "explicit_gn_gen_command": False,
     }
+    if architecture == "x64":
+        result["fresh_x64_preparation"] = fresh_x64_binding["link"]
+    return result
 
 
 def resume_execution_record_contract(

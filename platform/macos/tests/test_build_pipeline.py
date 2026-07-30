@@ -5424,6 +5424,157 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertEqual(b"preserved legacy bytes", preserved.read_bytes())
         self.assertFalse(os.path.lexists(str(self.source / build_pipeline.X64_OUT / ".ninja_log")))
 
+    def test_fresh_x64_resume_binding_requires_exact_receipt_and_pre_graph(self):
+        out = self.source / build_pipeline.X64_OUT
+        shutil.rmtree(out)
+        toolchain = out / "obj" / "default" / "toolchain.ninja"
+        toolchain.parent.mkdir(parents=True)
+        (out / "args.gn").write_text('target_cpu = "x64"\n', encoding="utf-8")
+        (out / "build.ninja").write_text("fixture graph\n", encoding="utf-8")
+        (out / "build.ninja.d").write_text(
+            "build.ninja: args.gn\n", encoding="utf-8"
+        )
+        toolchain.write_text(
+            "command = clang -Wcrl,strippath,{} input\n".format(
+                self.linkedit_tools["selected"]["path"]
+            ),
+            encoding="utf-8",
+        )
+        graph = build_pipeline._fresh_x64_generated_graph_contract(
+            out, self.linkedit_tools
+        )
+        receipt = {
+            "schema": 1,
+            "stage": "prepare-fresh-x64",
+            "source_root": str(self.source),
+            "developer_dir": str(self.developer),
+            "legacy_root": str(self.source / build_pipeline.FRESH_X64_LEGACY_ROOT),
+            "legacy_out": str(
+                self.source
+                / build_pipeline.FRESH_X64_LEGACY_ROOT
+                / Path(build_pipeline.X64_OUT).name
+            ),
+            "legacy_inventory": {"fixture": True},
+            "prepared_evidence": {"fixture": True},
+            "fresh_out": str(out),
+            "fresh_out_identity": build_pipeline._fresh_x64_directory_identity(
+                out, "fixture fresh output"
+            ),
+            "fresh_profile": {"args_gn_sha256": graph["args_gn"]["sha256"]},
+            "generated_graph": graph,
+            "gn_command": ["gn", "gen", build_pipeline.X64_OUT],
+            "acquisition_receipt": {"fixture": True},
+            "tool_receipt": {"fixture": True},
+            "preparation_receipt": {"fixture": True},
+            "reclaimed_arm_onboarding": {"fixture": True},
+            "xcode27_compatibility_receipt_sha256": "a" * 64,
+            "xcode27_seatbelt_compatibility_receipt_sha256": "b" * 64,
+            "screen_ai_disabled_compatibility_receipt_sha256": "c" * 64,
+            "xcode27_linkedit_strip_compatibility_receipt_sha256": "d" * 64,
+            "linkedit_strip_tools": self.linkedit_tools,
+            "legacy_preserved": True,
+            "legacy_deleted": False,
+            "gn_gen_executed": True,
+            "gn_gen_succeeded": True,
+            "ninja_executed": False,
+            "build_executed": False,
+            "signing_executed": False,
+            "packaging_executed": False,
+            "offline": True,
+            "network_operations": 0,
+        }
+        receipt_path = self.write_json(
+            self.source / build_pipeline.FRESH_X64_PREPARATION_RECEIPT,
+            receipt,
+        )
+        supplied = {
+            "receipt": {
+                "path": str(receipt_path),
+                "bytes": receipt_path.stat().st_size,
+                "sha256": build_pipeline.sha256_file(receipt_path),
+            },
+            "contract_sha256": hashlib.sha256(
+                json.dumps(
+                    receipt,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("ascii")
+            ).hexdigest(),
+        }
+        pre_run = {
+            "ninja_log": None,
+            "ninja_deps": None,
+            "build_ninja": build_pipeline._regular_file_snapshot(
+                out / "build.ninja"
+            ),
+            "toolchain_inventory": build_pipeline._toolchain_inventory(out),
+        }
+        report = build_pipeline._fresh_x64_resume_preparation_binding(
+            self.source, self.developer, out, supplied, pre_run
+        )
+        self.assertEqual(graph, report["graph"])
+        forged = dict(supplied)
+        forged["contract_sha256"] = "0" * 64
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "contract hash"):
+            build_pipeline._fresh_x64_resume_preparation_binding(
+                self.source, self.developer, out, forged, pre_run
+            )
+        toolchain.write_text("command = llvm-strip\n", encoding="utf-8")
+        with self.assertRaises(build_pipeline.PipelineError):
+            build_pipeline._fresh_x64_resume_preparation_binding(
+                self.source, self.developer, out, supplied, pre_run
+            )
+
+    def test_resume3_x64_history_requires_none_to_created_transition(self):
+        graph = {"fixture": True}
+        pre_run = {
+            "ninja_log": None,
+            "ninja_deps": None,
+            "build_ninja": graph,
+            "toolchain_inventory": graph,
+        }
+        post = {
+            "ninja_log": {"bytes": 10, "mtime_ns": 101, "sha256": "a" * 64},
+            "ninja_deps": {"bytes": 20, "mtime_ns": 102, "sha256": "b" * 64},
+            "build_ninja": graph,
+            "toolchain_inventory": graph,
+        }
+        self.assertTrue(
+            build_pipeline._resume3_ninja_history_transition_contract(
+                pre_run, post, "x64", 100
+            )
+        )
+        pre_run["ninja_log"] = dict(post["ninja_log"])
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "not absent"):
+            build_pipeline._resume3_ninja_history_transition_contract(
+                pre_run, post, "x64", 100
+            )
+        pre_run["ninja_log"] = None
+        post["ninja_deps"]["mtime_ns"] = 99
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "created by Ninja"):
+            build_pipeline._resume3_ninja_history_transition_contract(
+                pre_run, post, "x64", 100
+            )
+        arm_pre = {
+            "ninja_log": {"sha256": "1" * 64, "mtime_ns": 200},
+            "ninja_deps": {"sha256": "2" * 64, "mtime_ns": 200},
+            "build_ninja": graph,
+            "toolchain_inventory": graph,
+        }
+        arm_post = {
+            "ninja_log": {"sha256": "3" * 64, "mtime_ns": 201},
+            "ninja_deps": dict(arm_pre["ninja_deps"]),
+            "build_ninja": graph,
+            "toolchain_inventory": graph,
+        }
+        self.assertTrue(
+            build_pipeline._resume3_ninja_history_transition_contract(
+                arm_pre, arm_post, "arm64", 100
+            )
+        )
+
     def test_home_alias_resume_cli_is_explicit_and_has_no_gn_option(self):
         adopt = build_pipeline.parser().parse_args(
             [
