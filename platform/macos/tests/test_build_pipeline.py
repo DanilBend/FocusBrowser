@@ -5197,6 +5197,233 @@ class BuildPipelineTests(unittest.TestCase):
                     True,
                 )
 
+    def write_invalid_legacy_x64_graph(self):
+        out = self.source / build_pipeline.X64_OUT
+        if out.exists():
+            shutil.rmtree(out)
+        out.mkdir(parents=True)
+        args_text = 'target_cpu = "x64"\nis_component_build = false\n'
+        (out / "args.gn").write_text(args_text, encoding="utf-8")
+        for index in range(build_pipeline.LEGACY_X64_TOOLCHAIN_FILE_COUNT):
+            toolchain = out / "obj" / "tool{}".format(index) / "toolchain.ninja"
+            toolchain.parent.mkdir(parents=True)
+            toolchain.write_text(
+                "command = clang -Wcrl,strippath,{} input\n".format(
+                    build_pipeline.LEGACY_LLVM_STRIP_TOKEN
+                ),
+                encoding="utf-8",
+            )
+        return out, args_text
+
+    def fresh_x64_execution_plan(self, args_text):
+        paths = build_pipeline._fresh_x64_fixed_paths(self.source)
+        legacy = build_pipeline._legacy_x64_invalid_strip_contract(paths["out"])
+        args_digest = hashlib.sha256(args_text.encode("utf-8")).hexdigest()
+        legacy_out = paths["legacy_root"] / Path(build_pipeline.X64_OUT).name
+        transaction_out = (
+            paths["transaction_root"] / Path(build_pipeline.X64_OUT).name
+        )
+        return {
+            "stage": "prepare-fresh-x64",
+            "source_root": str(self.source),
+            "developer_dir": str(self.developer),
+            "out": str(paths["out"]),
+            "receipt": str(paths["receipt"]),
+            "legacy_root": str(paths["legacy_root"]),
+            "legacy_out": str(legacy_out),
+            "transaction_root": str(paths["transaction_root"]),
+            "transaction_legacy_out": str(transaction_out),
+            "transaction_prepared": str(
+                paths["transaction_root"]
+                / build_pipeline.FRESH_X64_TRANSACTION_PREPARED
+            ),
+            "legacy_inventory": legacy,
+            "fresh_profile": {
+                "flags_file": "fixture-x64.gn",
+                "arg_names": ["is_component_build", "target_cpu"],
+                "args_gn_bytes": len(args_text.encode("utf-8")),
+                "args_gn_sha256": args_digest,
+            },
+            "gn_command": [
+                str(self.depot / "gn"),
+                "gen",
+                build_pipeline.X64_OUT,
+                "--fail-on-unused-args",
+            ],
+            "acquisition_receipt": {"path": "acquisition", "sha256": "a" * 64},
+            "tool_receipt": {"path": "tools", "sha256": "b" * 64},
+            "preparation_receipt": {"path": "preparation", "sha256": "c" * 64},
+            "reclaimed_arm_onboarding": {"kind": "fixture"},
+            "xcode27_compatibility_receipt_sha256": "d" * 64,
+            "xcode27_seatbelt_compatibility_receipt_sha256": "e" * 64,
+            "screen_ai_disabled_compatibility_receipt_sha256": "f" * 64,
+            "xcode27_linkedit_strip_compatibility_receipt_sha256": "0" * 64,
+            "linkedit_strip_tools": self.linkedit_tools,
+            "legacy_preserved": True,
+            "gn_invocations": 1,
+            "ninja_invocations": 0,
+            "offline": True,
+            "network_operations": 0,
+        }
+
+    def test_fresh_x64_legacy_gate_binds_path_hash_and_never_deletes(self):
+        out, args_text = self.write_invalid_legacy_x64_graph()
+        expected_hashes = dict(build_pipeline.SWIFTSHADER_DISABLED_ARGS_SHA256)
+        expected_hashes["x64"] = hashlib.sha256(
+            args_text.encode("utf-8")
+        ).hexdigest()
+        with mock.patch.object(
+            build_pipeline, "SWIFTSHADER_DISABLED_ARGS_SHA256", expected_hashes
+        ):
+            report = build_pipeline._legacy_x64_invalid_strip_contract(out)
+            self.assertEqual(str(out), report["root"])
+            self.assertEqual(
+                build_pipeline.LEGACY_X64_TOOLCHAIN_FILE_COUNT,
+                report["toolchain_file_count"],
+            )
+            first = out / report["toolchain_files"][0]["path"]
+            first.write_text("command = llvm-strip\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                build_pipeline.PipelineError, "exact llvm-strip graph"
+            ):
+                build_pipeline._legacy_x64_invalid_strip_contract(out)
+        self.assertTrue(out.is_dir())
+        self.assertTrue(first.is_file())
+
+    def test_fresh_x64_generated_graph_rejects_any_llvm_strip(self):
+        out = self.source / build_pipeline.X64_OUT
+        shutil.rmtree(out)
+        toolchain = out / "obj" / "default" / "toolchain.ninja"
+        toolchain.parent.mkdir(parents=True)
+        (out / "args.gn").write_text('target_cpu = "x64"\n', encoding="utf-8")
+        (out / "build.ninja").write_text("subninja obj/default/toolchain.ninja\n")
+        (out / "build.ninja.d").write_text("build.ninja: args.gn\n")
+        toolchain.write_text(
+            "command = clang -Wcrl,strippath,{} input\n".format(
+                self.linkedit_tools["selected"]["path"]
+            ),
+            encoding="utf-8",
+        )
+        report = build_pipeline._fresh_x64_generated_graph_contract(
+            out, self.linkedit_tools
+        )
+        self.assertEqual(0, report["llvm_strip_occurrences"])
+        toolchain.write_text(
+            toolchain.read_text(encoding="utf-8") + "# llvm-strip forbidden\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "llvm-strip"):
+            build_pipeline._fresh_x64_generated_graph_contract(
+                out, self.linkedit_tools
+            )
+
+    def test_fresh_x64_execution_rolls_back_without_deleting_legacy_graph(self):
+        out, args_text = self.write_invalid_legacy_x64_graph()
+        marker = out / "keep-me.bin"
+        marker.write_bytes(b"preserved legacy bytes")
+        expected_hashes = dict(build_pipeline.SWIFTSHADER_DISABLED_ARGS_SHA256)
+        expected_hashes["x64"] = hashlib.sha256(
+            args_text.encode("utf-8")
+        ).hexdigest()
+        profiles = {"profiles": {"x64": {"args_gn": args_text}}}
+        with mock.patch.object(
+            build_pipeline, "SWIFTSHADER_DISABLED_ARGS_SHA256", expected_hashes
+        ):
+            plan = self.fresh_x64_execution_plan(args_text)
+            with mock.patch.object(
+                build_pipeline, "fresh_x64_preparation_plan", return_value=plan
+            ), mock.patch.object(
+                build_pipeline, "require_free"
+            ), mock.patch.object(
+                build_pipeline.focus_macos,
+                "validate_gn_profiles",
+                return_value=profiles,
+            ), mock.patch.object(
+                build_pipeline,
+                "_recorded_alias_context",
+                return_value=self.alias_context_fixture(),
+            ), mock.patch.object(
+                build_pipeline, "safe_environment", return_value={}
+            ), mock.patch.object(
+                build_pipeline,
+                "run_monitored",
+                side_effect=build_pipeline.PipelineError("GN fixture failure"),
+            ) as command:
+                with self.assertRaisesRegex(
+                    build_pipeline.PipelineError, "GN fixture failure"
+                ):
+                    build_pipeline.execute_fresh_x64_preparation(
+                        self.source, self.developer, plan, True
+                    )
+        command.assert_called_once()
+        self.assertEqual(plan["gn_command"], command.call_args.args[0])
+        self.assertEqual(b"preserved legacy bytes", marker.read_bytes())
+        paths = build_pipeline._fresh_x64_fixed_paths(self.source)
+        self.assertFalse(os.path.lexists(str(paths["legacy_root"])))
+        self.assertFalse(os.path.lexists(str(paths["transaction_root"])))
+        self.assertFalse(os.path.lexists(str(paths["receipt"])))
+
+    def test_fresh_x64_execution_runs_only_gn_and_preserves_legacy_graph(self):
+        out, args_text = self.write_invalid_legacy_x64_graph()
+        marker = out / "keep-me.bin"
+        marker.write_bytes(b"preserved legacy bytes")
+        expected_hashes = dict(build_pipeline.SWIFTSHADER_DISABLED_ARGS_SHA256)
+        expected_hashes["x64"] = hashlib.sha256(
+            args_text.encode("utf-8")
+        ).hexdigest()
+        profiles = {"profiles": {"x64": {"args_gn": args_text}}}
+
+        def generate_graph(*_args, **_kwargs):
+            fresh = self.source / build_pipeline.X64_OUT
+            (fresh / "build.ninja").write_text("fixture\n", encoding="utf-8")
+            (fresh / "build.ninja.d").write_text(
+                "build.ninja: args.gn\n", encoding="utf-8"
+            )
+            toolchain = fresh / "obj" / "default" / "toolchain.ninja"
+            toolchain.parent.mkdir(parents=True)
+            toolchain.write_text(
+                "command = clang -Wcrl,strippath,{} input\n".format(
+                    self.linkedit_tools["selected"]["path"]
+                ),
+                encoding="utf-8",
+            )
+
+        with mock.patch.object(
+            build_pipeline, "SWIFTSHADER_DISABLED_ARGS_SHA256", expected_hashes
+        ):
+            plan = self.fresh_x64_execution_plan(args_text)
+            with mock.patch.object(
+                build_pipeline, "fresh_x64_preparation_plan", return_value=plan
+            ), mock.patch.object(
+                build_pipeline, "require_free"
+            ), mock.patch.object(
+                build_pipeline.focus_macos,
+                "validate_gn_profiles",
+                return_value=profiles,
+            ), mock.patch.object(
+                build_pipeline,
+                "_recorded_alias_context",
+                return_value=self.alias_context_fixture(),
+            ), mock.patch.object(
+                build_pipeline, "safe_environment", return_value={}
+            ), mock.patch.object(
+                build_pipeline, "run_monitored", side_effect=generate_graph
+            ) as command, mock.patch.object(
+                build_pipeline, "fresh_x64_preparation_contract"
+            ):
+                result = build_pipeline.execute_fresh_x64_preparation(
+                    self.source, self.developer, plan, True
+                )
+        command.assert_called_once()
+        self.assertEqual(plan["gn_command"], command.call_args.args[0])
+        receipt = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
+        self.assertFalse(receipt["ninja_executed"])
+        self.assertFalse(receipt["build_executed"])
+        self.assertEqual(0, receipt["generated_graph"]["llvm_strip_occurrences"])
+        preserved = Path(plan["legacy_out"]) / marker.name
+        self.assertEqual(b"preserved legacy bytes", preserved.read_bytes())
+        self.assertFalse(os.path.lexists(str(self.source / build_pipeline.X64_OUT / ".ninja_log")))
+
     def test_home_alias_resume_cli_is_explicit_and_has_no_gn_option(self):
         adopt = build_pipeline.parser().parse_args(
             [
@@ -5226,6 +5453,18 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertEqual("finalize-resumed-x64", resume.command)
         self.assertFalse(resume.confirm_resumed_slice)
         self.assertFalse(hasattr(resume, "allow_recovery_move"))
+        fresh = build_pipeline.parser().parse_args(
+            [
+                "prepare-fresh-x64",
+                "--source-root",
+                "/Users/legacy/work/src",
+                "--developer-dir",
+                "/Users/legacy/Xcode.app/Contents/Developer",
+            ]
+        )
+        self.assertFalse(fresh.execute)
+        self.assertFalse(fresh.confirm_exact_legacy_move)
+        self.assertFalse(hasattr(fresh, "resume_record"))
 
 
 if __name__ == "__main__":

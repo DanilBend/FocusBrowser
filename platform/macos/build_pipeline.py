@@ -55,6 +55,10 @@ TOOL_RECEIPT = ".focus-macos-tool-bootstrap.json"
 PREPARATION_RECEIPT = "out/FocusMacPreparation.json"
 ARM_OUT = "out/FocusMacArm64"
 X64_OUT = "out/FocusMacX64"
+FRESH_X64_PREPARATION_RECEIPT = "out/FocusMacFreshX64Preparation.json"
+FRESH_X64_LEGACY_ROOT = "out/FocusMacX64LegacyInvalid"
+FRESH_X64_TRANSACTION_ROOT = "out/.FocusMacX64LegacyInvalid.part"
+FRESH_X64_TRANSACTION_PREPARED = "prepared.json"
 STAGING_ROOT = "out/FocusMacStaging"
 STAGED_ARM_APP = STAGING_ROOT + "/arm64/" + APP_NAME
 STAGE_RECEIPT = STAGING_ROOT + "/arm64-receipt.json"
@@ -402,6 +406,10 @@ ENSURE_BOOTSTRAP_SHA256 = (
 MAX_RECEIPT_BYTES = 1024 * 1024
 MAX_RESUME_STDOUT_BYTES = 128 * 1024 * 1024
 MAX_NO_WORK_OUTPUT_BYTES = 1024 * 1024
+LEGACY_LLVM_STRIP_TOKEN = (
+    "../../third_party/llvm-build/Release+Asserts/bin/llvm-strip"
+)
+LEGACY_X64_TOOLCHAIN_FILE_COUNT = 6
 TOOL_RECEIPT_KEYS = frozenset(
     (
         "schema",
@@ -3785,7 +3793,133 @@ def execute_adhoc_runtime_signing(source, developer_dir, plan):
     }
 
 
-def _onboarding_preparation_projection(source, alias_context):
+def _reclaimed_arm_onboarding_evidence(source):
+    """Construct the exported canonical bridge after the ARM graph was reclaimed."""
+    source = Path(source)
+    onboarding_path = in_source(
+        source,
+        onboarding_alias_compat.RECEIPT_RELATIVE,
+        "onboarding alias-root receipt",
+        must_exist=True,
+    )
+    onboarding = load_json(onboarding_path, "onboarding alias-root receipt")
+    graph = onboarding.get("graph_inventory")
+    home_alias = onboarding.get("home_alias_compatibility")
+    if not isinstance(graph, dict) or not isinstance(home_alias, dict):
+        raise PipelineError("onboarding receipt lacks reclaimed graph evidence")
+    stage_path = in_source(
+        source, STAGE_RECEIPT, "arm64 stage receipt", must_exist=True
+    )
+    reclaim_path, reclaim = reclaim_contract(source)
+    evidence = {
+        "schema": 1,
+        "kind": onboarding_alias_compat.RECLAIMED_ARM_EVIDENCE_KIND,
+        "home_alias_compatibility": home_alias,
+        "graph_inventory_sha256": graph.get("aggregate_sha256"),
+        "stage_receipt": {
+            "path": STAGE_RECEIPT,
+            "bytes": stage_path.stat().st_size,
+            "sha256": sha256_file(stage_path),
+        },
+        "reclaim_receipt": {
+            "path": RECLAIM_RECEIPT,
+            "bytes": Path(reclaim_path).stat().st_size,
+            "sha256": sha256_file(reclaim_path),
+        },
+        "staged_app": {
+            "path": STAGED_ARM_APP,
+            "tree_sha256": reclaim["tree_sha256"],
+        },
+        "reclaimed_out": ARM_OUT,
+    }
+    try:
+        validated_graph = onboarding_alias_compat.validate_graph_inventory(
+            source, graph, reclaimed_arm=evidence
+        )
+    except (KeyError, TypeError, onboarding_alias_compat.AliasCompatError) as exc:
+        raise PipelineError(str(exc)) from exc
+    if not _strict_json_identity(validated_graph, graph):
+        raise PipelineError("reclaimed ARM graph validation changed its evidence")
+    return evidence
+
+
+def _reclaimed_arm_onboarding_contract(source, reclaimed_arm):
+    """Revalidate receipt, transition, and preparation projection as one value."""
+    source = Path(source)
+    receipt_path = in_source(
+        source,
+        onboarding_alias_compat.RECEIPT_RELATIVE,
+        "onboarding alias-root receipt",
+        must_exist=True,
+    )
+    receipt = load_json(receipt_path, "onboarding alias-root receipt")
+    trial = receipt.get("trial_evidence")
+    trial_report = trial.get("trial_report") if isinstance(trial, dict) else None
+    failure_report = trial.get("failure_report") if isinstance(trial, dict) else None
+    home = reclaimed_arm.get("home_alias_compatibility")
+    mappings = home.get("mappings") if isinstance(home, dict) else None
+    workspace = (
+        Path(mappings["workspace"]["physical"])
+        if isinstance(mappings, dict) and "workspace" in mappings
+        else None
+    )
+    if (
+        workspace is None
+        or not isinstance(trial_report, dict)
+        or not isinstance(failure_report, dict)
+    ):
+        raise PipelineError("reclaimed onboarding evidence links are missing")
+    trial_path = workspace / "work/logs" / onboarding_alias_compat.TRIAL_REPORT_BASENAME
+    failure_path = (
+        workspace / "work/logs" / onboarding_alias_compat.FAILURE_REPORT_BASENAME
+    )
+    try:
+        contract = onboarding_alias_compat.receipt_contract(
+            source,
+            trial_path=trial_path,
+            failure_path=failure_path,
+            reclaimed_arm=reclaimed_arm,
+        )
+        projection = (
+            onboarding_alias_compat.preparation_dependency_tree_projection_contract(
+                source, workspace, reclaimed_arm=reclaimed_arm
+            )
+        )
+    except (KeyError, TypeError, onboarding_alias_compat.AliasCompatError) as exc:
+        raise PipelineError(str(exc)) from exc
+    if (
+        Path(contract.get("path", "")).resolve(strict=True)
+        != receipt_path.resolve(strict=True)
+        or contract.get("value") != receipt
+        or contract.get("bytes") != receipt_path.stat().st_size
+        or contract.get("sha256") != sha256_file(receipt_path)
+        or not isinstance(projection, dict)
+        or projection.get("kind")
+        != onboarding_alias_compat.PREPARATION_PROJECTION_KIND
+    ):
+        raise PipelineError("reclaimed onboarding canonical contract mismatch")
+    return {
+        "evidence": reclaimed_arm,
+        "receipt": {
+            "path": str(receipt_path),
+            "bytes": contract["bytes"],
+            "sha256": contract["sha256"],
+        },
+        "projection_sha256": hashlib.sha256(
+            json.dumps(
+                projection,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("ascii")
+        ).hexdigest(),
+    }
+
+
+def _onboarding_preparation_projection(
+    source, alias_context, reclaimed_arm=None
+):
     """Return the sole cycle-free POST projection allowed by preparation."""
     if alias_context is None:
         return None
@@ -3796,7 +3930,9 @@ def _onboarding_preparation_projection(source, alias_context):
     try:
         projection = (
             onboarding_alias_compat.preparation_dependency_tree_projection_contract(
-                source, alias_context.physical_workspace
+                source,
+                alias_context.physical_workspace,
+                reclaimed_arm=reclaimed_arm,
             )
         )
     except onboarding_alias_compat.AliasCompatError as exc:
@@ -3855,9 +3991,14 @@ def preparation_contract(
     allow_reclaimed_arm=False,
     allow_missing_gn_compat=False,
     alias_context=None,
+    reclaimed_arm=None,
 ):
     if alias_context is None and Path(source).resolve(strict=True) != Path(source):
         alias_context = _recorded_alias_context(source)
+    if reclaimed_arm is None and allow_reclaimed_arm and alias_context is not None:
+        arm_out = in_source(source, ARM_OUT, "arm64 output")
+        if not os.path.lexists(str(arm_out)):
+            reclaimed_arm = _reclaimed_arm_onboarding_evidence(source)
     path_projector = alias_context.project if alias_context is not None else None
     receipt_path = in_source(
         source, PREPARATION_RECEIPT, "preparation receipt", must_exist=True
@@ -3999,7 +4140,9 @@ def preparation_contract(
         or post_prepare_tree.get("installed_special_files") != 0
     ):
         raise PipelineError("preparation post-transform dependency tree schema mismatch")
-    projection_before = _onboarding_preparation_projection(source, alias_context)
+    projection_before = _onboarding_preparation_projection(
+        source, alias_context, reclaimed_arm=reclaimed_arm
+    )
     try:
         try:
             installed = prepare_source.installed_dependency_tree(
@@ -4013,7 +4156,7 @@ def preparation_contract(
             )
         finally:
             projection_after = _onboarding_preparation_projection(
-                source, alias_context
+                source, alias_context, reclaimed_arm=reclaimed_arm
             )
             if not _strict_json_identity(projection_after, projection_before):
                 raise PipelineError(
@@ -4415,6 +4558,150 @@ def reclaim_contract(source):
     return receipt_path, receipt
 
 
+def _fresh_x64_directory_identity(path, label):
+    """Return the rename-stable identity of one real owned directory."""
+    path = Path(path)
+    observed = os.stat(str(path), follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(observed.st_mode)
+        or path.is_symlink()
+        or observed.st_uid != os.getuid()
+        or observed.st_nlink < 2
+    ):
+        raise PipelineError("{} is not a safe owned directory".format(label))
+    return {
+        "device": observed.st_dev,
+        "inode": observed.st_ino,
+        "uid": observed.st_uid,
+        "gid": observed.st_gid,
+        "mode": stat.S_IMODE(observed.st_mode),
+    }
+
+
+def _legacy_x64_invalid_strip_contract(out):
+    """Prove that an old x64 graph is the llvm-strip graph being retired."""
+    out = Path(out)
+    identity = _fresh_x64_directory_identity(out, "legacy x86_64 output")
+    args = out / "args.gn"
+    if sha256_file(args) != SWIFTSHADER_DISABLED_ARGS_SHA256["x64"]:
+        raise PipelineError("legacy x86_64 args.gn is not the pinned profile")
+    build_receipt = out / SLICE_RECEIPT_NAME
+    if os.path.lexists(str(build_receipt)):
+        raise PipelineError(
+            "refusing to retire x86_64 output carrying a build receipt"
+        )
+    manifests = []
+    pattern = re.compile(r"-Wcrl,strippath,([^\s\"']+)")
+    toolchains = sorted(
+        out.rglob("toolchain.ninja"),
+        key=lambda item: item.relative_to(out).as_posix(),
+    )
+    if len(toolchains) != LEGACY_X64_TOOLCHAIN_FILE_COUNT:
+        raise PipelineError("legacy x86_64 toolchain count changed")
+    for path in toolchains:
+        if path.is_symlink() or not path.is_file():
+            raise PipelineError("legacy x86_64 toolchain is unsafe")
+        text = path.read_text(encoding="utf-8")
+        tokens = pattern.findall(text)
+        if not tokens or set(tokens) != {LEGACY_LLVM_STRIP_TOKEN}:
+            raise PipelineError(
+                "legacy x86_64 graph is not the exact llvm-strip graph"
+            )
+        manifests.append(
+            {
+                "path": path.relative_to(out).as_posix(),
+                "bytes": path.stat().st_size,
+                "sha256": sha256_file(path),
+                "strip_token_count": len(tokens),
+                "strip_tokens": sorted(set(tokens)),
+            }
+        )
+    return {
+        "root": str(out),
+        "identity": identity,
+        "tree_sha256": tree_digest(out),
+        "allocated_bytes": physical_size(out),
+        "args_gn_sha256": sha256_file(args),
+        "toolchain_files": manifests,
+        "toolchain_file_count": len(manifests),
+        "llvm_strip_token_count": sum(
+            item["strip_token_count"] for item in manifests
+        ),
+        "xcode_strip_token_count": 0,
+        "confirmed_invalid": True,
+    }
+
+
+def _verify_legacy_x64_inventory(path, expected):
+    """Re-prove the exact invalid tree after each directory-only rename."""
+    current = _legacy_x64_invalid_strip_contract(path)
+    comparable = dict(current)
+    comparable["root"] = expected.get("root")
+    if comparable != expected:
+        raise PipelineError("legacy x86_64 inventory changed during transaction")
+    return current
+
+
+def _fresh_x64_generated_graph_contract(out, linkedit_tools):
+    """Bind the fresh GN graph and reject every residual llvm-strip spelling."""
+    out = Path(out)
+    generated = generated_linkedit_strip_contract(out, linkedit_tools)
+    toolchains = []
+    llvm_occurrences = 0
+    for path in sorted(
+        out.rglob("toolchain.ninja"),
+        key=lambda item: item.relative_to(out).as_posix(),
+    ):
+        if path.is_symlink() or not path.is_file():
+            raise PipelineError("fresh x86_64 toolchain is unsafe")
+        text = path.read_text(encoding="utf-8")
+        llvm_occurrences += text.count("llvm-strip")
+        toolchains.append(
+            {
+                "path": path.relative_to(out).as_posix(),
+                "bytes": path.stat().st_size,
+                "sha256": sha256_file(path),
+            }
+        )
+    if (
+        not toolchains
+        or len(generated["toolchain_files"]) != len(toolchains)
+        or llvm_occurrences != 0
+    ):
+        raise PipelineError(
+            "fresh x86_64 graph contains an unverified or llvm-strip toolchain"
+        )
+    args = out / "args.gn"
+    build_ninja = out / "build.ninja"
+    build_ninja_d = out / "build.ninja.d"
+    for path, label in (
+        (args, "args.gn"),
+        (build_ninja, "build.ninja"),
+        (build_ninja_d, "build.ninja.d"),
+    ):
+        if path.is_symlink() or not path.is_file():
+            raise PipelineError("fresh x86_64 {} is missing".format(label))
+    return {
+        "root": str(out),
+        "args_gn": {
+            "bytes": args.stat().st_size,
+            "sha256": sha256_file(args),
+        },
+        "build_ninja": {
+            "bytes": build_ninja.stat().st_size,
+            "sha256": sha256_file(build_ninja),
+        },
+        "build_ninja_d": {
+            "bytes": build_ninja_d.stat().st_size,
+            "sha256": sha256_file(build_ninja_d),
+        },
+        "toolchains": toolchains,
+        "toolchain_file_count": len(toolchains),
+        "llvm_strip_occurrences": 0,
+        "linkedit_strip": generated,
+    }
+
+
 def generated_linkedit_strip_contract(out, tools):
     """Require every generated Apple linker rule to select the pinned strip."""
     out = Path(out)
@@ -4465,6 +4752,514 @@ def generated_linkedit_strip_contract(out, tools):
         "all_linker_rules_use_selected_strip": True,
         "llvm_strip_selected": False,
     }
+
+
+def _rename_owned_directory(source_path, destination_path, expected_identity, label):
+    """Rename one exact directory without replacing any destination."""
+    source_path = Path(source_path)
+    destination_path = Path(destination_path)
+    if os.path.lexists(str(destination_path)):
+        raise PipelineError("{} destination already exists".format(label))
+    if _fresh_x64_directory_identity(source_path, label) != expected_identity:
+        raise PipelineError("{} identity changed before rename".format(label))
+    os.rename(str(source_path), str(destination_path))
+    _fsync_directory(source_path.parent)
+    if destination_path.parent != source_path.parent:
+        _fsync_directory(destination_path.parent)
+    if (
+        os.path.lexists(str(source_path))
+        or _fresh_x64_directory_identity(destination_path, label)
+        != expected_identity
+    ):
+        raise PipelineError("{} rename identity mismatch".format(label))
+
+
+def _remove_created_fresh_x64(path, expected_identity):
+    """Remove only the exact newly-created GN output during rollback."""
+    path = Path(path)
+    if not os.path.lexists(str(path)):
+        return
+    if _fresh_x64_directory_identity(path, "fresh x86_64 rollback output") != expected_identity:
+        raise PipelineError("fresh x86_64 rollback output identity changed")
+    shutil.rmtree(str(path))
+    _fsync_directory(path.parent)
+    if os.path.lexists(str(path)):
+        raise PipelineError("fresh x86_64 rollback output remains")
+
+
+def _fresh_x64_fixed_paths(source):
+    return {
+        "out": in_source(source, X64_OUT, "x86_64 output"),
+        "receipt": in_source(
+            source,
+            FRESH_X64_PREPARATION_RECEIPT,
+            "fresh x86_64 preparation receipt",
+        ),
+        "legacy_root": in_source(
+            source, FRESH_X64_LEGACY_ROOT, "legacy x86_64 root"
+        ),
+        "transaction_root": in_source(
+            source, FRESH_X64_TRANSACTION_ROOT, "fresh x86_64 transaction"
+        ),
+    }
+
+
+def fresh_x64_preparation_plan(source, developer_dir):
+    """Plan one alias-safe fresh GN graph while preserving the invalid graph."""
+    source = Path(source)
+    alias_context = _recorded_alias_context(source, developer_dir)
+    acquisition_path, _ = acquisition_contract(source)
+    tool_path, _ = tool_receipt_contract(source, developer_dir)
+    reclaimed_arm = _reclaimed_arm_onboarding_evidence(source)
+    preparation_path, _ = preparation_contract(
+        source,
+        allow_reclaimed_arm=True,
+        alias_context=alias_context,
+        reclaimed_arm=reclaimed_arm,
+    )
+    onboarding = _reclaimed_arm_onboarding_contract(source, reclaimed_arm)
+    xcode_path, _ = xcode27_compat_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=True,
+        alias_context=alias_context,
+    )
+    seatbelt_path, _ = xcode27_seatbelt_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=True,
+        alias_context=alias_context,
+    )
+    screen_ai_path, _ = screen_ai_disabled_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=True,
+        alias_context=alias_context,
+    )
+    linkedit_path, linkedit = xcode27_linkedit_strip_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=True,
+        alias_context=alias_context,
+    )
+    paths = _fresh_x64_fixed_paths(source)
+    for key in ("receipt", "legacy_root", "transaction_root"):
+        if os.path.lexists(str(paths[key])):
+            raise PipelineError(
+                "fresh x86_64 {} already exists".format(key.replace("_", " "))
+            )
+    for relative in (
+        SWIFTSHADER_DISABLED_SIGNING_RECEIPT,
+        ADHOC_RUNTIME_SIGNING_RECEIPT,
+        UNSIGNED_ROOT,
+        SIGNED_ROOT,
+    ):
+        if os.path.lexists(str(in_source(source, relative, "fresh x86_64 guard"))):
+            raise PipelineError("fresh x86_64 preparation is after a downstream stage")
+    legacy = _legacy_x64_invalid_strip_contract(paths["out"])
+    profiles = focus_macos.validate_gn_profiles()["profiles"]
+    profile = profiles["x64"]
+    args_data = profile["args_gn"].encode("utf-8")
+    if hashlib.sha256(args_data).hexdigest() != SWIFTSHADER_DISABLED_ARGS_SHA256["x64"]:
+        raise PipelineError("fresh x86_64 profile hash changed")
+    tools = tool_paths(source)
+    command = [str(tools["gn"]), "gen", X64_OUT, "--fail-on-unused-args"]
+    return {
+        "stage": "prepare-fresh-x64",
+        "source_root": str(source),
+        "developer_dir": str(developer_dir),
+        "out": str(paths["out"]),
+        "receipt": str(paths["receipt"]),
+        "legacy_root": str(paths["legacy_root"]),
+        "legacy_out": str(paths["legacy_root"] / Path(X64_OUT).name),
+        "transaction_root": str(paths["transaction_root"]),
+        "transaction_legacy_out": str(
+            paths["transaction_root"] / Path(X64_OUT).name
+        ),
+        "transaction_prepared": str(
+            paths["transaction_root"] / FRESH_X64_TRANSACTION_PREPARED
+        ),
+        "legacy_inventory": legacy,
+        "fresh_profile": {
+            "flags_file": profile["flags_file"],
+            "arg_names": profile["arg_names"],
+            "args_gn_bytes": len(args_data),
+            "args_gn_sha256": hashlib.sha256(args_data).hexdigest(),
+        },
+        "gn_command": command,
+        "acquisition_receipt": {
+            "path": str(acquisition_path),
+            "sha256": sha256_file(acquisition_path),
+        },
+        "tool_receipt": {
+            "path": str(tool_path),
+            "sha256": sha256_file(tool_path),
+        },
+        "preparation_receipt": {
+            "path": str(preparation_path),
+            "sha256": sha256_file(preparation_path),
+        },
+        "reclaimed_arm_onboarding": onboarding,
+        "xcode27_compatibility_receipt_sha256": sha256_file(xcode_path),
+        "xcode27_seatbelt_compatibility_receipt_sha256": sha256_file(
+            seatbelt_path
+        ),
+        "screen_ai_disabled_compatibility_receipt_sha256": sha256_file(
+            screen_ai_path
+        ),
+        "xcode27_linkedit_strip_compatibility_receipt_sha256": sha256_file(
+            linkedit_path
+        ),
+        "linkedit_strip_tools": linkedit["tools"],
+        "legacy_preserved": True,
+        "gn_invocations": 1,
+        "ninja_invocations": 0,
+        "offline": True,
+        "network_operations": 0,
+    }
+
+
+def _fresh_x64_rollback_container(container, legacy_child):
+    """Remove only our prepared marker after the old graph is restored."""
+    container = Path(container)
+    if not os.path.lexists(str(container)):
+        return
+    if os.path.lexists(str(legacy_child)):
+        raise PipelineError("legacy x86_64 tree remains inside rollback container")
+    entries = list(container.iterdir())
+    if len(entries) != 1 or entries[0].name != FRESH_X64_TRANSACTION_PREPARED:
+        raise PipelineError("fresh x86_64 rollback container has unknown entries")
+    marker = entries[0]
+    marker_identity = _lstat_identity(marker)
+    _unlink_regular_identity(marker, marker_identity, "fresh x86_64 prepared marker")
+    container.rmdir()
+    _fsync_directory(container.parent)
+
+
+def execute_fresh_x64_preparation(
+    source, developer_dir, plan, allow_exact_legacy_move
+):
+    """Move the invalid tree, run only fresh offline GN, and stop before Ninja."""
+    if not allow_exact_legacy_move:
+        raise PipelineError(
+            "prepare-fresh-x64 requires --confirm-exact-legacy-move"
+        )
+    expected = fresh_x64_preparation_plan(source, developer_dir)
+    if plan != expected:
+        raise PipelineError("fresh x86_64 preparation plan changed")
+    require_free(source, SOFT_FLOOR_GIB, "fresh x86_64 GN preparation")
+    paths = {name: Path(expected[name]) for name in (
+        "out", "receipt", "legacy_root", "legacy_out", "transaction_root",
+        "transaction_legacy_out", "transaction_prepared",
+    )}
+    transaction_identity = None
+    fresh_identity = None
+    receipt_publication = None
+    legacy_location = paths["out"]
+    try:
+        paths["transaction_root"].mkdir(mode=0o700, parents=False, exist_ok=False)
+        transaction_identity = _fresh_x64_directory_identity(
+            paths["transaction_root"], "fresh x86_64 transaction"
+        )
+        _fsync_directory(paths["transaction_root"].parent)
+        prepared_value = {
+            "schema": 1,
+            "stage": "prepare-fresh-x64",
+            "source_root": str(source),
+            "legacy_inventory": expected["legacy_inventory"],
+            "fresh_profile": expected["fresh_profile"],
+            "gn_command": expected["gn_command"],
+            "legacy_destination": expected["legacy_out"],
+            "offline": True,
+            "network_operations": 0,
+            "gn_started": False,
+            "ninja_started": False,
+        }
+        atomic_json(paths["transaction_prepared"], prepared_value)
+        _rename_owned_directory(
+            paths["out"],
+            paths["transaction_legacy_out"],
+            expected["legacy_inventory"]["identity"],
+            "legacy x86_64 output",
+        )
+        legacy_location = paths["transaction_legacy_out"]
+        _verify_legacy_x64_inventory(
+            legacy_location, expected["legacy_inventory"]
+        )
+        paths["out"].mkdir(mode=0o755, parents=False, exist_ok=False)
+        fresh_identity = _fresh_x64_directory_identity(
+            paths["out"], "fresh x86_64 output"
+        )
+        profile_text = focus_macos.validate_gn_profiles()["profiles"]["x64"][
+            "args_gn"
+        ]
+        prepare_source.atomic_publish_text(paths["out"] / "args.gn", profile_text)
+        if sha256_file(paths["out"] / "args.gn") != expected["fresh_profile"][
+            "args_gn_sha256"
+        ]:
+            raise PipelineError("fresh x86_64 args.gn changed before GN")
+        alias_context = _recorded_alias_context(source, developer_dir)
+        environment = safe_environment(
+            source,
+            developer_dir,
+            inherited={"HOME": str(alias_context.logical_home)},
+            alias_context=alias_context,
+        )
+        run_monitored(
+            expected["gn_command"], source, environment, watched_paths=(source,)
+        )
+        if (
+            os.path.lexists(str(paths["out"] / ".ninja_log"))
+            or os.path.lexists(str(paths["out"] / ".ninja_deps"))
+            or os.path.lexists(str(paths["out"] / APP_NAME))
+        ):
+            raise PipelineError("fresh x86_64 GN preparation observed Ninja output")
+        graph = _fresh_x64_generated_graph_contract(
+            paths["out"], expected["linkedit_strip_tools"]
+        )
+        if graph["args_gn"]["sha256"] != expected["fresh_profile"][
+            "args_gn_sha256"
+        ]:
+            raise PipelineError("fresh x86_64 GN rewrote args.gn")
+        if _fresh_x64_directory_identity(
+            paths["transaction_root"], "fresh x86_64 transaction"
+        ) != transaction_identity:
+            raise PipelineError("fresh x86_64 transaction identity changed")
+        _rename_owned_directory(
+            paths["transaction_root"],
+            paths["legacy_root"],
+            transaction_identity,
+            "fresh x86_64 legacy container",
+        )
+        legacy_location = paths["legacy_out"]
+        _verify_legacy_x64_inventory(
+            legacy_location, expected["legacy_inventory"]
+        )
+        prepared_final = paths["legacy_root"] / FRESH_X64_TRANSACTION_PREPARED
+        receipt_value = {
+            "schema": 1,
+            "stage": "prepare-fresh-x64",
+            "source_root": str(source),
+            "developer_dir": str(developer_dir),
+            "legacy_root": str(paths["legacy_root"]),
+            "legacy_out": str(paths["legacy_out"]),
+            "legacy_inventory": expected["legacy_inventory"],
+            "prepared_evidence": {
+                "path": str(prepared_final),
+                "sha256": sha256_file(prepared_final),
+            },
+            "fresh_out": str(paths["out"]),
+            "fresh_out_identity": fresh_identity,
+            "fresh_profile": expected["fresh_profile"],
+            "generated_graph": graph,
+            "gn_command": expected["gn_command"],
+            "acquisition_receipt": expected["acquisition_receipt"],
+            "tool_receipt": expected["tool_receipt"],
+            "preparation_receipt": expected["preparation_receipt"],
+            "reclaimed_arm_onboarding": expected["reclaimed_arm_onboarding"],
+            "xcode27_compatibility_receipt_sha256": expected[
+                "xcode27_compatibility_receipt_sha256"
+            ],
+            "xcode27_seatbelt_compatibility_receipt_sha256": expected[
+                "xcode27_seatbelt_compatibility_receipt_sha256"
+            ],
+            "screen_ai_disabled_compatibility_receipt_sha256": expected[
+                "screen_ai_disabled_compatibility_receipt_sha256"
+            ],
+            "xcode27_linkedit_strip_compatibility_receipt_sha256": expected[
+                "xcode27_linkedit_strip_compatibility_receipt_sha256"
+            ],
+            "linkedit_strip_tools": expected["linkedit_strip_tools"],
+            "legacy_preserved": True,
+            "legacy_deleted": False,
+            "gn_gen_executed": True,
+            "gn_gen_succeeded": True,
+            "ninja_executed": False,
+            "build_executed": False,
+            "signing_executed": False,
+            "packaging_executed": False,
+            "offline": True,
+            "network_operations": 0,
+        }
+        receipt_publication = atomic_json(paths["receipt"], receipt_value)
+        fresh_x64_preparation_contract(source, developer_dir)
+        return receipt_publication
+    except BaseException as original_error:
+        rollback_errors = []
+        try:
+            if receipt_publication is not None and os.path.lexists(str(paths["receipt"])):
+                _unlink_regular_identity(
+                    paths["receipt"],
+                    receipt_publication.publication_identity,
+                    "fresh x86_64 preparation receipt",
+                )
+        except BaseException as exc:
+            rollback_errors.append("receipt={!r}".format(exc))
+        try:
+            if fresh_identity is not None:
+                _remove_created_fresh_x64(paths["out"], fresh_identity)
+        except BaseException as exc:
+            rollback_errors.append("fresh_output={!r}".format(exc))
+        try:
+            if legacy_location != paths["out"]:
+                _verify_legacy_x64_inventory(
+                    legacy_location, expected["legacy_inventory"]
+                )
+                if os.path.lexists(str(paths["out"])):
+                    raise PipelineError("original x86_64 path is occupied during rollback")
+                _rename_owned_directory(
+                    legacy_location,
+                    paths["out"],
+                    expected["legacy_inventory"]["identity"],
+                    "legacy x86_64 rollback",
+                )
+                container = (
+                    paths["legacy_root"]
+                    if legacy_location == paths["legacy_out"]
+                    else paths["transaction_root"]
+                )
+                _fresh_x64_rollback_container(container, legacy_location)
+        except BaseException as exc:
+            rollback_errors.append("legacy_restore={!r}".format(exc))
+        if rollback_errors:
+            raise PipelineError(
+                "fresh x86_64 preparation failed and rollback failed closed: "
+                "original={!r}; rollback={}".format(
+                    original_error, "; ".join(rollback_errors)
+                )
+            ) from original_error
+        raise
+
+
+def fresh_x64_preparation_contract(source, developer_dir):
+    """Revalidate the preserved invalid tree and the fresh no-Ninja GN graph."""
+    source = Path(source)
+    paths = _fresh_x64_fixed_paths(source)
+    receipt = load_json(paths["receipt"], "fresh x86_64 preparation receipt")
+    expected_keys = {
+        "schema", "stage", "source_root", "developer_dir", "legacy_root",
+        "legacy_out", "legacy_inventory", "prepared_evidence", "fresh_out",
+        "fresh_out_identity", "fresh_profile", "generated_graph", "gn_command",
+        "acquisition_receipt", "tool_receipt", "preparation_receipt",
+        "reclaimed_arm_onboarding", "xcode27_compatibility_receipt_sha256",
+        "xcode27_seatbelt_compatibility_receipt_sha256",
+        "screen_ai_disabled_compatibility_receipt_sha256",
+        "xcode27_linkedit_strip_compatibility_receipt_sha256",
+        "linkedit_strip_tools", "legacy_preserved", "legacy_deleted",
+        "gn_gen_executed", "gn_gen_succeeded", "ninja_executed",
+        "build_executed", "signing_executed", "packaging_executed",
+        "offline", "network_operations",
+    }
+    if set(receipt) != expected_keys or (
+        receipt.get("schema") != 1
+        or receipt.get("stage") != "prepare-fresh-x64"
+        or receipt.get("source_root") != str(source)
+        or receipt.get("developer_dir") != str(developer_dir)
+        or receipt.get("legacy_root") != str(paths["legacy_root"])
+        or receipt.get("legacy_out")
+        != str(paths["legacy_root"] / Path(X64_OUT).name)
+        or receipt.get("fresh_out") != str(paths["out"])
+        or receipt.get("legacy_preserved") is not True
+        or receipt.get("legacy_deleted") is not False
+        or receipt.get("gn_gen_executed") is not True
+        or receipt.get("gn_gen_succeeded") is not True
+        or receipt.get("ninja_executed") is not False
+        or receipt.get("build_executed") is not False
+        or receipt.get("signing_executed") is not False
+        or receipt.get("packaging_executed") is not False
+        or receipt.get("offline") is not True
+        or receipt.get("network_operations") != 0
+        or os.path.lexists(str(paths["transaction_root"]))
+    ):
+        raise PipelineError("fresh x86_64 preparation receipt schema mismatch")
+    alias_context = _recorded_alias_context(source, developer_dir)
+    reclaimed_arm = _reclaimed_arm_onboarding_evidence(source)
+    preparation_path, _ = preparation_contract(
+        source,
+        allow_reclaimed_arm=True,
+        alias_context=alias_context,
+        reclaimed_arm=reclaimed_arm,
+    )
+    onboarding = _reclaimed_arm_onboarding_contract(source, reclaimed_arm)
+    acquisition_path, _ = acquisition_contract(source)
+    tool_path, _ = tool_receipt_contract(source, developer_dir)
+    current_links = {
+        "acquisition_receipt": {
+            "path": str(acquisition_path), "sha256": sha256_file(acquisition_path)
+        },
+        "tool_receipt": {
+            "path": str(tool_path), "sha256": sha256_file(tool_path)
+        },
+        "preparation_receipt": {
+            "path": str(preparation_path), "sha256": sha256_file(preparation_path)
+        },
+        "reclaimed_arm_onboarding": onboarding,
+    }
+    if any(receipt.get(key) != value for key, value in current_links.items()):
+        raise PipelineError("fresh x86_64 preparation provenance changed")
+    xcode_path, _ = xcode27_compat_receipt_contract(
+        source, developer_dir, True, True, alias_context
+    )
+    seatbelt_path, _ = xcode27_seatbelt_receipt_contract(
+        source, developer_dir, True, True, alias_context
+    )
+    screen_ai_path, _ = screen_ai_disabled_receipt_contract(
+        source, developer_dir, True, True, alias_context
+    )
+    linkedit_path, linkedit = xcode27_linkedit_strip_receipt_contract(
+        source, developer_dir, True, True, alias_context
+    )
+    hashes = {
+        "xcode27_compatibility_receipt_sha256": sha256_file(xcode_path),
+        "xcode27_seatbelt_compatibility_receipt_sha256": sha256_file(seatbelt_path),
+        "screen_ai_disabled_compatibility_receipt_sha256": sha256_file(screen_ai_path),
+        "xcode27_linkedit_strip_compatibility_receipt_sha256": sha256_file(linkedit_path),
+    }
+    if any(receipt.get(key) != value for key, value in hashes.items()) or receipt.get(
+        "linkedit_strip_tools"
+    ) != linkedit["tools"]:
+        raise PipelineError("fresh x86_64 compatibility provenance changed")
+    legacy = _verify_legacy_x64_inventory(
+        Path(receipt["legacy_out"]), receipt["legacy_inventory"]
+    )
+    prepared = receipt.get("prepared_evidence")
+    prepared_path = paths["legacy_root"] / FRESH_X64_TRANSACTION_PREPARED
+    if prepared != {
+        "path": str(prepared_path), "sha256": sha256_file(prepared_path)
+    }:
+        raise PipelineError("fresh x86_64 prepared evidence changed")
+    if legacy["tree_sha256"] != receipt["legacy_inventory"]["tree_sha256"]:
+        raise PipelineError("fresh x86_64 legacy tree changed")
+    if _fresh_x64_directory_identity(paths["out"], "fresh x86_64 output") != receipt.get(
+        "fresh_out_identity"
+    ):
+        raise PipelineError("fresh x86_64 output identity changed")
+    graph = _fresh_x64_generated_graph_contract(paths["out"], linkedit["tools"])
+    if graph != receipt.get("generated_graph"):
+        raise PipelineError("fresh x86_64 generated graph changed")
+    profile = focus_macos.validate_gn_profiles()["profiles"]["x64"]
+    args_data = profile["args_gn"].encode("utf-8")
+    expected_profile = {
+        "flags_file": profile["flags_file"],
+        "arg_names": profile["arg_names"],
+        "args_gn_bytes": len(args_data),
+        "args_gn_sha256": hashlib.sha256(args_data).hexdigest(),
+    }
+    command = [str(tool_paths(source)["gn"]), "gen", X64_OUT, "--fail-on-unused-args"]
+    if (
+        receipt.get("fresh_profile") != expected_profile
+        or receipt.get("gn_command") != command
+        or graph["args_gn"]["sha256"] != expected_profile["args_gn_sha256"]
+        or os.path.lexists(str(paths["out"] / ".ninja_log"))
+        or os.path.lexists(str(paths["out"] / ".ninja_deps"))
+        or os.path.lexists(str(paths["out"] / APP_NAME))
+    ):
+        raise PipelineError("fresh x86_64 no-Ninja graph contract changed")
+    return paths["receipt"], receipt
 
 
 _MACHO_64_MAGICS = {
@@ -10539,6 +11334,7 @@ def parser():
         "build-arm64",
         "finalize-resumed-arm64",
         "stage-arm64",
+        "prepare-fresh-x64",
         "build-x64",
         "finalize-resumed-x64",
         "merge-sign-package",
@@ -10553,6 +11349,10 @@ def parser():
             child.add_argument("--allow-reclaim-arm64-out", action="store_true")
         if name == "prepare-xcode27-linkedit-recovery":
             child.add_argument("--allow-recovery-move", action="store_true")
+        if name == "prepare-fresh-x64":
+            child.add_argument(
+                "--confirm-exact-legacy-move", action="store_true"
+            )
         if name == "adopt-home-alias":
             child.add_argument("--logical-home", required=True)
             child.add_argument("--logical-workspace-root", required=True)
@@ -10705,6 +11505,18 @@ def main(argv=None):
             plan = stage_arm_plan(source)
             result = (
                 execute_stage_arm(source, plan, args.allow_reclaim_arm64_out)
+                if args.execute
+                else plan
+            )
+        elif args.command == "prepare-fresh-x64":
+            plan = fresh_x64_preparation_plan(source, developer_dir)
+            result = (
+                execute_fresh_x64_preparation(
+                    source,
+                    developer_dir,
+                    plan,
+                    args.confirm_exact_legacy_move,
+                )
                 if args.execute
                 else plan
             )
