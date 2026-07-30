@@ -8986,6 +8986,9 @@ def _fresh_x64_resume_preparation_binding(
         "fresh_out_identity"
     ):
         raise PipelineError("resume3 fresh x86_64 output identity changed")
+    _verify_legacy_x64_inventory(
+        Path(receipt["legacy_out"]), receipt["legacy_inventory"]
+    )
     graph = _fresh_x64_generated_graph_contract(
         out, receipt.get("linkedit_strip_tools")
     )

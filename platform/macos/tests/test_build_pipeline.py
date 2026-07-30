@@ -5609,8 +5609,14 @@ class BuildPipelineTests(unittest.TestCase):
             ),
             "toolchain_inventory": build_pipeline._toolchain_inventory(out),
         }
-        report = build_pipeline._fresh_x64_resume_preparation_binding(
-            self.source, self.developer, out, supplied, pre_run
+        with mock.patch.object(
+            build_pipeline, "_verify_legacy_x64_inventory"
+        ) as legacy:
+            report = build_pipeline._fresh_x64_resume_preparation_binding(
+                self.source, self.developer, out, supplied, pre_run
+            )
+        legacy.assert_called_once_with(
+            Path(receipt["legacy_out"]), receipt["legacy_inventory"]
         )
         self.assertEqual(graph, report["graph"])
         forged = dict(supplied)
@@ -5620,7 +5626,9 @@ class BuildPipelineTests(unittest.TestCase):
                 self.source, self.developer, out, forged, pre_run
             )
         toolchain.write_text("command = llvm-strip\n", encoding="utf-8")
-        with self.assertRaises(build_pipeline.PipelineError):
+        with mock.patch.object(
+            build_pipeline, "_verify_legacy_x64_inventory"
+        ), self.assertRaises(build_pipeline.PipelineError):
             build_pipeline._fresh_x64_resume_preparation_binding(
                 self.source, self.developer, out, supplied, pre_run
             )
