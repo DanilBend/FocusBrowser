@@ -427,6 +427,60 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline.XCODE27_COMPAT_UPSTREAM["commit"],
         )
 
+    def test_swiftshader_signing_patch_is_hash_pinned_scoped_and_semantic(self):
+        patch = build_pipeline.SWIFTSHADER_DISABLED_SIGNING_PATCH
+        self.assertEqual(
+            build_pipeline.SWIFTSHADER_DISABLED_SIGNING_PATCH_SHA256,
+            build_pipeline.sha256_file(patch),
+        )
+        text = patch.read_text(encoding="utf-8")
+        self.assertEqual(
+            {"chrome/installer/mac/signing/parts.py"},
+            {
+                line.removeprefix("--- a/")
+                for line in text.splitlines()
+                if line.startswith("--- a/")
+            },
+        )
+        self.assertEqual(1, text.count("-        'libvk_swiftshader.dylib',"))
+        self.assertEqual(1, text.count("         'libEGL.dylib',"))
+        self.assertEqual(1, text.count("         'libGLESv2.dylib',"))
+        self.assertNotIn("-'libEGL.dylib'", text)
+        self.assertNotIn("-'libGLESv2.dylib'", text)
+
+    def test_swiftshader_app_contract_requires_angle_and_forbids_vulkan(self):
+        app = self.make_app(self.root)
+        libraries = (
+            app
+            / "Contents/Frameworks/Focus Browser Framework.framework"
+            / "Versions/150.0.7871.128/Libraries"
+        )
+        libraries.mkdir(parents=True)
+        for name in build_pipeline.SWIFTSHADER_REQUIRED_ANGLE_LIBRARIES:
+            (libraries / name).write_bytes((name + " fixture").encode("utf-8"))
+        report = build_pipeline.swiftshader_app_library_contract(app)
+        self.assertTrue(report["swiftshader_library_absent"])
+        self.assertEqual(
+            set(build_pipeline.SWIFTSHADER_REQUIRED_ANGLE_LIBRARIES),
+            set(report["required_sha256"]),
+        )
+        (libraries / build_pipeline.SWIFTSHADER_VULKAN_LIBRARY).write_bytes(
+            b"forbidden"
+        )
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "unexpectedly bundled"
+        ):
+            build_pipeline.swiftshader_app_library_contract(app)
+
+    def test_swiftshader_refresh_is_copy_signing_only_at_j8(self):
+        report = build_pipeline.swiftshader_signing_refresh_contract(self.source)
+        self.assertEqual("-j8", report["command"][1])
+        self.assertEqual(build_pipeline.X64_OUT, report["command"][3])
+        self.assertEqual(
+            "chrome/installer/mac:copy_signing", report["command"][-1]
+        )
+        self.assertEqual(5, len(report["command"]))
+
     def test_xcode27_execution_restores_pre_fix_file_on_apply_failure(self):
         patch = self.root / "fixture-xcode27.patch"
         patch.write_text("fixture\n", encoding="utf-8")
@@ -1535,9 +1589,157 @@ class BuildPipelineTests(unittest.TestCase):
         universalizer.write_text("universalize\n", encoding="utf-8")
         return arm_app, x64_out, universalizer
 
+    def prepare_swiftshader_execute_fixture(self):
+        source_parts = self.source / "chrome/installer/mac/signing/parts.py"
+        source_parts.parent.mkdir(parents=True, exist_ok=True)
+        packaging_parts = (
+            self.source
+            / build_pipeline.X64_OUT
+            / build_pipeline.PACKAGING_NAME
+            / "signing/parts.py"
+        )
+        packaging_parts.parent.mkdir(parents=True, exist_ok=True)
+        pre = b"pre signing parts\n"
+        post = b"post signing parts\n"
+        source_parts.write_bytes(pre)
+        packaging_parts.write_bytes(pre)
+        patch = self.root / "swiftshader-signing.patch"
+        patch.write_text("fixture patch\n", encoding="utf-8")
+        receipt = self.source / build_pipeline.SWIFTSHADER_DISABLED_SIGNING_RECEIPT
+        files = {
+            "chrome/installer/mac/signing/parts.py": {
+                "pre_sha256": hashlib.sha256(pre).hexdigest(),
+                "post_sha256": hashlib.sha256(post).hexdigest(),
+            }
+        }
+        app_trees = {"arm64": "a" * 64, "x64": "b" * 64}
+        plan = {
+            "source_parts": str(source_parts),
+            "packaging_parts": str(packaging_parts),
+            "source_state": "pre",
+            "packaging_state": "pre",
+            "app_tree_sha256": app_trees,
+            "refresh": {
+                "command": ["autoninja", "-j8", "-C", "out", "copy_signing"],
+                "ninja": {"path": str(self.ninja)},
+            },
+            "receipt": str(receipt),
+            "preparation_receipt": {"path": "prep", "sha256": "c" * 64},
+            "reclaim_receipt": {"path": "reclaim", "sha256": "d" * 64},
+            "x64_build_receipt": {"path": "x64", "sha256": "e" * 64},
+            "profiles": {"arm64": {}, "x64": {}},
+            "build_args": {"arm64": {}, "x64": {}},
+            "libraries": {"arm64": {}, "x64": {}},
+            "patch": {"path": str(patch), "sha256": "f" * 64},
+        }
+        return plan, files, patch, source_parts, packaging_parts, pre, post
+
+    def test_swiftshader_execute_publishes_receipt_after_exact_refresh(self):
+        (
+            plan,
+            files,
+            patch,
+            source_parts,
+            packaging_parts,
+            _pre,
+            post,
+        ) = self.prepare_swiftshader_execute_fixture()
+
+        def apply_source(*_args, **_kwargs):
+            source_parts.write_bytes(post)
+
+        def refresh_package(*_args, **_kwargs):
+            packaging_parts.write_bytes(post)
+
+        with mock.patch.object(
+            build_pipeline,
+            "swiftshader_disabled_signing_plan",
+            return_value=plan,
+        ), mock.patch.object(
+            build_pipeline, "SWIFTSHADER_DISABLED_SIGNING_FILES", files
+        ), mock.patch.object(
+            build_pipeline, "SWIFTSHADER_DISABLED_SIGNING_PATCH", patch
+        ), mock.patch.object(
+            build_pipeline.prepare_source,
+            "apply_patch_plan",
+            side_effect=apply_source,
+        ), mock.patch.object(
+            build_pipeline, "run_monitored", side_effect=refresh_package
+        ), mock.patch.object(
+            build_pipeline, "safe_environment", return_value={}
+        ), mock.patch.object(
+            build_pipeline, "require_free", return_value=50 * build_pipeline.GIB
+        ), mock.patch.object(
+            build_pipeline,
+            "swiftshader_disabled_build_contract",
+            return_value={"app_tree_sha256": plan["app_tree_sha256"]},
+        ), mock.patch.object(
+            build_pipeline, "swiftshader_disabled_signing_receipt_contract"
+        ) as receipt_contract:
+            report = build_pipeline.execute_swiftshader_disabled_signing(
+                self.source, self.developer, plan
+            )
+        self.assertEqual(post, source_parts.read_bytes())
+        self.assertEqual(post, packaging_parts.read_bytes())
+        receipt = Path(plan["receipt"])
+        self.assertTrue(receipt.is_file())
+        value = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertTrue(value["signing_scripts_refreshed"])
+        self.assertFalse(value["app_build_executed"])
+        self.assertTrue(report["applied"])
+        receipt_contract.assert_called_once_with(self.source, self.developer)
+
+    def test_swiftshader_execute_rolls_back_both_files_on_refresh_failure(self):
+        (
+            plan,
+            files,
+            patch,
+            source_parts,
+            packaging_parts,
+            pre,
+            post,
+        ) = self.prepare_swiftshader_execute_fixture()
+
+        def apply_source(*_args, **_kwargs):
+            source_parts.write_bytes(post)
+
+        with mock.patch.object(
+            build_pipeline,
+            "swiftshader_disabled_signing_plan",
+            return_value=plan,
+        ), mock.patch.object(
+            build_pipeline, "SWIFTSHADER_DISABLED_SIGNING_FILES", files
+        ), mock.patch.object(
+            build_pipeline, "SWIFTSHADER_DISABLED_SIGNING_PATCH", patch
+        ), mock.patch.object(
+            build_pipeline.prepare_source,
+            "apply_patch_plan",
+            side_effect=apply_source,
+        ), mock.patch.object(
+            build_pipeline,
+            "run_monitored",
+            side_effect=build_pipeline.PipelineError("forced refresh failure"),
+        ), mock.patch.object(
+            build_pipeline, "safe_environment", return_value={}
+        ), mock.patch.object(
+            build_pipeline, "require_free", return_value=50 * build_pipeline.GIB
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "forced refresh failure"
+        ):
+            build_pipeline.execute_swiftshader_disabled_signing(
+                self.source, self.developer, plan
+            )
+        self.assertEqual(pre, source_parts.read_bytes())
+        self.assertEqual(pre, packaging_parts.read_bytes())
+        self.assertFalse(Path(plan["receipt"]).exists())
+
     def test_merge_plan_uses_chromium_x64_first_and_ad_hoc_signing(self):
         _, x64_out, universalizer = self.prepare_merge_fixture()
         output = self.root / "FocusBrowser.dmg"
+        swiftshader_receipt = self.write_json(
+            self.source / build_pipeline.SWIFTSHADER_DISABLED_SIGNING_RECEIPT,
+            {"fixture": True},
+        )
         packaging_python = {
             "path": str(self.root / "pinned-python3.11"),
             "version": "3.11.8",
@@ -1564,11 +1766,19 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline,
             "packaging_python_contract",
             return_value=packaging_python,
+        ), mock.patch.object(
+            build_pipeline,
+            "swiftshader_disabled_signing_receipt_contract",
+            return_value=(swiftshader_receipt, {"fixture": True}),
         ):
             plan = build_pipeline.merge_plan(
                 self.source, self.developer, output
             )
         self.assertEqual(packaging_python, plan["packaging_python"])
+        self.assertEqual(
+            build_pipeline.sha256_file(swiftshader_receipt),
+            plan["swiftshader_disabled_signing"]["sha256"],
+        )
         for name in ("universalize", "sign", "package"):
             self.assertEqual(packaging_python["path"], plan["commands"][name][0])
         universalize = plan["commands"]["universalize"]
@@ -1586,6 +1796,10 @@ class BuildPipelineTests(unittest.TestCase):
 
     def test_merge_rejects_relative_dmg_output(self):
         _, _, universalizer = self.prepare_merge_fixture()
+        swiftshader_receipt = self.write_json(
+            self.source / build_pipeline.SWIFTSHADER_DISABLED_SIGNING_RECEIPT,
+            {"fixture": True},
+        )
         real_hash = build_pipeline.sha256_file
 
         def pinned_hash(path):
@@ -1608,6 +1822,10 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline,
             "packaging_python_contract",
             return_value={"path": str(self.root / "pinned-python3.11")},
+        ), mock.patch.object(
+            build_pipeline,
+            "swiftshader_disabled_signing_receipt_contract",
+            return_value=(swiftshader_receipt, {"fixture": True}),
         ), self.assertRaisesRegex(
             build_pipeline.PipelineError, "absolute"
         ):

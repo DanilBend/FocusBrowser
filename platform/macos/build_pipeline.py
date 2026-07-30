@@ -165,6 +165,49 @@ SCREEN_AI_DISABLED_CONFIG_FILES = {
     )
 }
 
+SWIFTSHADER_DISABLED_SIGNING_RECEIPT = (
+    "out/FocusMacSwiftShaderDisabledSigningCompatibility.json"
+)
+SWIFTSHADER_DISABLED_SIGNING_PATCH = (
+    MACOS_DIR / "patches/swiftshader-disabled-signing.patch"
+)
+SWIFTSHADER_DISABLED_SIGNING_PATCH_SHA256 = (
+    "e28b64ca51c0589c4f20c40276e2fa6064e3b95fd8d1cc350e913e9769b289a4"
+)
+SWIFTSHADER_DISABLED_SIGNING_FILES = {
+    "chrome/installer/mac/signing/parts.py": {
+        "pre_sha256": "bf24d456dd39b0cedaee3801e60918ba45559648406b923199021035bff32eb7",
+        "post_sha256": "41c05f155e53f9d109464954e5efa88fc1e8e4882237e5f224a081fdf056f498",
+    }
+}
+SWIFTSHADER_DISABLED_PROFILE_SHA256 = {
+    "arm64": "c20cfc128b0a29e4a1a9a6c77d4136aeffd8475a38731c8a1a25b31a4deac543",
+    "x64": "97049f4283c4eb0bd3b598832b73d102506e01d756645794b048c97e54448a0d",
+}
+SWIFTSHADER_DISABLED_ARGS_SHA256 = {
+    "arm64": "69180d23743db64b6630f5f41e3154a8dee16967a0a00b6e83c103eda6542ad3",
+    "x64": "3c48347a05797ed1e2e6ffc0be6ef00b277cc4d838ae78cd5294a5387d4d4ec1",
+}
+SWIFTSHADER_REQUIRED_ANGLE_LIBRARIES = (
+    "libEGL.dylib",
+    "libGLESv2.dylib",
+)
+SWIFTSHADER_VULKAN_LIBRARY = "libvk_swiftshader.dylib"
+SWIFTSHADER_DISABLED_SIGNING_UPSTREAM = {
+    "swiftshader_signing_introduced_commit": (
+        "abafaff8b0398c70bd12d1dcc7d5b100fd426a19"
+    ),
+    "conditional_signing_precedent_commit": (
+        "64b4ad0ad126ef8db7769501d6ffc7cb85f29866"
+    ),
+    "conditional_signing_precedent_change_id": (
+        "Ia2b5a2d0bfafbab22f0521e5c063a17795463e77"
+    ),
+    "conditional_signing_precedent_commit_position": (
+        "refs/heads/main@{#1655305}"
+    ),
+}
+
 DAWN_NINJA_RELATIVE = "third_party/dawn/third_party/ninja/ninja"
 NINJA_VERSION = "1.12.1"
 NINJA_CIPD_VERSION = "version:3@1.12.1.chromium.4"
@@ -1675,6 +1718,433 @@ def execute_screen_ai_disabled(source, developer_dir, plan):
     }
 
 
+def _disabled_swiftshader_text_contract(path, label, expected_sha256):
+    """Require one exact disabled flag and reject any enabled spelling."""
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        raise PipelineError("missing regular {}: {}".format(label, path))
+    observed = sha256_file(path)
+    if observed != expected_sha256:
+        raise PipelineError("{} hash mismatch".format(label))
+    text = path.read_text(encoding="utf-8")
+    if (
+        text.count("enable_swiftshader=false") != 1
+        or re.search(r"enable_swiftshader\s*=\s*true", text)
+    ):
+        raise PipelineError("{} does not pin disabled SwiftShader".format(label))
+    return {"path": str(path), "sha256": observed}
+
+
+def swiftshader_app_library_contract(app):
+    """Prove the bundle has ANGLE libraries and intentionally lacks SwiftShader."""
+    app = Path(app)
+    if app.is_symlink() or not app.is_dir() or app.name != APP_NAME:
+        raise PipelineError("invalid app for SwiftShader signing contract: {}".format(app))
+    framework = (
+        app
+        / "Contents"
+        / "Frameworks"
+        / "Focus Browser Framework.framework"
+    )
+    versions = framework / "Versions"
+    if framework.is_symlink() or not framework.is_dir():
+        raise PipelineError("missing Focus framework for SwiftShader signing contract")
+    if versions.is_symlink() or not versions.is_dir():
+        raise PipelineError("missing real Focus framework Versions directory")
+    version_dirs = sorted(
+        (
+            child
+            for child in versions.iterdir()
+            if child.name != "Current" and child.is_dir() and not child.is_symlink()
+        ),
+        key=lambda child: child.name,
+    )
+    if len(version_dirs) != 1:
+        raise PipelineError("Focus framework must contain one real version directory")
+    libraries = version_dirs[0] / "Libraries"
+    if libraries.is_symlink() or not libraries.is_dir():
+        raise PipelineError("missing real Focus framework Libraries directory")
+    required = {}
+    for name in SWIFTSHADER_REQUIRED_ANGLE_LIBRARIES:
+        library = libraries / name
+        if library.is_symlink() or not library.is_file():
+            raise PipelineError("required ANGLE library is missing: {}".format(name))
+        required[name] = sha256_file(library)
+    forbidden = libraries / SWIFTSHADER_VULKAN_LIBRARY
+    if os.path.lexists(str(forbidden)):
+        raise PipelineError("disabled SwiftShader library is unexpectedly bundled")
+    return {
+        "app": str(app),
+        "framework_version": version_dirs[0].name,
+        "libraries": str(libraries),
+        "required_sha256": required,
+        "swiftshader_library_absent": True,
+    }
+
+
+def swiftshader_disabled_build_contract(source):
+    """Bind the signing exception to both exact Focus build profiles and apps."""
+    profiles = {}
+    for architecture in ("arm64", "x64"):
+        profiles[architecture] = _disabled_swiftshader_text_contract(
+            MACOS_DIR / "flags.{}.gn".format(architecture),
+            "{} SwiftShader profile".format(architecture),
+            SWIFTSHADER_DISABLED_PROFILE_SHA256[architecture],
+        )
+    reclaim_path, reclaim = reclaim_contract(source)
+    arm_args_hash = reclaim.get("arm_args_gn_sha256")
+    if arm_args_hash != SWIFTSHADER_DISABLED_ARGS_SHA256["arm64"]:
+        raise PipelineError("reclaimed arm64 args do not pin disabled SwiftShader")
+    x64_out = in_source(
+        source, X64_OUT, "x86_64 output", must_exist=True, directory=True
+    )
+    x64_receipt_path, _ = slice_receipt_contract(source, x64_out, "x64")
+    x64_args = _disabled_swiftshader_text_contract(
+        x64_out / "args.gn",
+        "x64 generated args",
+        SWIFTSHADER_DISABLED_ARGS_SHA256["x64"],
+    )
+    arm_app = in_source(
+        source, STAGED_ARM_APP, "staged arm64 app", must_exist=True, directory=True
+    )
+    x64_app = x64_out / APP_NAME
+    libraries = {
+        "arm64": swiftshader_app_library_contract(arm_app),
+        "x64": swiftshader_app_library_contract(x64_app),
+    }
+    return {
+        "profiles": profiles,
+        "build_args": {
+            "arm64": {
+                "path": None,
+                "sha256": arm_args_hash,
+                "reclaimed": True,
+            },
+            "x64": {**x64_args, "reclaimed": False},
+        },
+        "libraries": libraries,
+        "app_tree_sha256": {
+            "arm64": reclaim["tree_sha256"],
+            "x64": tree_digest(x64_app),
+        },
+        "reclaim_receipt": {
+            "path": str(reclaim_path),
+            "sha256": sha256_file(reclaim_path),
+        },
+        "x64_build_receipt": {
+            "path": str(x64_receipt_path),
+            "sha256": sha256_file(x64_receipt_path),
+        },
+    }
+
+
+def swiftshader_signing_refresh_contract(source):
+    """Return the one small j8 target that refreshes generated signing scripts."""
+    tools = tool_paths(source)
+    ninja = ninja_contract(source)
+    return {
+        "command": [
+            str(tools["autoninja"]),
+            "-j{}".format(BUILD_JOBS),
+            "-C",
+            X64_OUT,
+            "chrome/installer/mac:copy_signing",
+        ],
+        "ninja": ninja,
+    }
+
+
+def _swiftshader_signing_file_state(path, label):
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        raise PipelineError("missing regular {}: {}".format(label, path))
+    observed = sha256_file(path)
+    hashes = next(iter(SWIFTSHADER_DISABLED_SIGNING_FILES.values()))
+    if observed == hashes["pre_sha256"]:
+        return "pre"
+    if observed == hashes["post_sha256"]:
+        return "post"
+    raise PipelineError("{} is neither the audited pre nor post image".format(label))
+
+
+def swiftshader_disabled_signing_plan(source, developer_dir):
+    """Plan the Focus-only correction to Chromium's generated signing package."""
+    acquisition_contract(source)
+    tool_receipt_contract(source, developer_dir)
+    preparation_path, _ = preparation_contract(source, allow_reclaimed_arm=True)
+    receipt_path = in_source(
+        source,
+        SWIFTSHADER_DISABLED_SIGNING_RECEIPT,
+        "disabled SwiftShader signing receipt",
+    )
+    if receipt_path.exists() or receipt_path.is_symlink():
+        raise PipelineError("disabled SwiftShader signing receipt already exists")
+    patch = SWIFTSHADER_DISABLED_SIGNING_PATCH
+    if patch.is_symlink() or not patch.is_file():
+        raise PipelineError("disabled SwiftShader signing patch is not regular")
+    if sha256_file(patch) != SWIFTSHADER_DISABLED_SIGNING_PATCH_SHA256:
+        raise PipelineError("disabled SwiftShader signing patch hash mismatch")
+    relative = next(iter(SWIFTSHADER_DISABLED_SIGNING_FILES))
+    source_parts = in_source(
+        source, relative, "Chromium signing parts", must_exist=True
+    )
+    packaging_parts = in_source(
+        source,
+        X64_OUT + "/" + PACKAGING_NAME + "/signing/parts.py",
+        "generated x86_64 signing parts",
+        must_exist=True,
+    )
+    source_state = _swiftshader_signing_file_state(
+        source_parts, "Chromium signing parts"
+    )
+    packaging_state = _swiftshader_signing_file_state(
+        packaging_parts, "generated x86_64 signing parts"
+    )
+    if source_state == "pre" and packaging_state == "post":
+        raise PipelineError("generated signing package is ahead of its source")
+    try:
+        prepare_source.check_patch_boundary(
+            source, patch, reverse=(source_state == "post")
+        )
+    except prepare_source.PreparationError as exc:
+        raise PipelineError(str(exc)) from exc
+    build = swiftshader_disabled_build_contract(source)
+    refresh = swiftshader_signing_refresh_contract(source)
+    return {
+        "stage": "apply-swiftshader-disabled-signing-compat",
+        "source_root": str(source),
+        "developer_dir": str(developer_dir),
+        "preparation_receipt": {
+            "path": str(preparation_path),
+            "sha256": sha256_file(preparation_path),
+        },
+        **build,
+        "upstream": SWIFTSHADER_DISABLED_SIGNING_UPSTREAM,
+        "patch": {
+            "path": str(patch),
+            "sha256": SWIFTSHADER_DISABLED_SIGNING_PATCH_SHA256,
+        },
+        "files": SWIFTSHADER_DISABLED_SIGNING_FILES,
+        "source_parts": str(source_parts),
+        "packaging_parts": str(packaging_parts),
+        "source_state": source_state,
+        "packaging_state": packaging_state,
+        "refresh": refresh,
+        "receipt": str(receipt_path),
+        "offline": True,
+        "network_operations": 0,
+    }
+
+
+def swiftshader_disabled_signing_receipt_contract(source, developer_dir):
+    """Validate the completed source and generated-package signing correction."""
+    receipt_path = in_source(
+        source,
+        SWIFTSHADER_DISABLED_SIGNING_RECEIPT,
+        "disabled SwiftShader signing receipt",
+        must_exist=True,
+    )
+    receipt = load_json(receipt_path, "disabled SwiftShader signing receipt")
+    expected_keys = {
+        "schema",
+        "source_root",
+        "developer_dir",
+        "preparation_receipt",
+        "reclaim_receipt",
+        "x64_build_receipt",
+        "profiles",
+        "build_args",
+        "libraries",
+        "app_tree_sha256",
+        "upstream",
+        "patch",
+        "files",
+        "refresh",
+        "recovery_state",
+        "offline",
+        "network_operations",
+        "app_build_executed",
+        "signing_scripts_refreshed",
+        "signing_executed",
+        "packaging_executed",
+    }
+    preparation_path, _ = preparation_contract(source, allow_reclaimed_arm=True)
+    build = swiftshader_disabled_build_contract(source)
+    refresh = swiftshader_signing_refresh_contract(source)
+    recovery_state = receipt.get("recovery_state")
+    allowed_recovery_states = (
+        {"source": "pre", "packaging": "pre"},
+        {"source": "post", "packaging": "pre"},
+        {"source": "post", "packaging": "post"},
+    )
+    if set(receipt) != expected_keys or receipt.get("schema") != 1:
+        raise PipelineError("disabled SwiftShader signing receipt schema mismatch")
+    if (
+        receipt.get("source_root") != str(source)
+        or receipt.get("developer_dir") != str(developer_dir)
+        or receipt.get("preparation_receipt")
+        != {"path": str(preparation_path), "sha256": sha256_file(preparation_path)}
+        or receipt.get("reclaim_receipt") != build["reclaim_receipt"]
+        or receipt.get("x64_build_receipt") != build["x64_build_receipt"]
+        or receipt.get("profiles") != build["profiles"]
+        or receipt.get("build_args") != build["build_args"]
+        or receipt.get("libraries") != build["libraries"]
+        or receipt.get("app_tree_sha256") != build["app_tree_sha256"]
+        or receipt.get("upstream") != SWIFTSHADER_DISABLED_SIGNING_UPSTREAM
+        or receipt.get("patch")
+        != {
+            "path": str(SWIFTSHADER_DISABLED_SIGNING_PATCH),
+            "sha256": SWIFTSHADER_DISABLED_SIGNING_PATCH_SHA256,
+        }
+        or receipt.get("files") != SWIFTSHADER_DISABLED_SIGNING_FILES
+        or receipt.get("refresh") != refresh
+        or recovery_state not in allowed_recovery_states
+        or receipt.get("offline") is not True
+        or receipt.get("network_operations") != 0
+        or receipt.get("app_build_executed") is not False
+        or receipt.get("signing_scripts_refreshed") is not True
+        or receipt.get("signing_executed") is not False
+        or receipt.get("packaging_executed") is not False
+    ):
+        raise PipelineError("disabled SwiftShader signing provenance mismatch")
+    if sha256_file(SWIFTSHADER_DISABLED_SIGNING_PATCH) != (
+        SWIFTSHADER_DISABLED_SIGNING_PATCH_SHA256
+    ):
+        raise PipelineError("disabled SwiftShader signing patch hash mismatch")
+    relative, hashes = next(iter(SWIFTSHADER_DISABLED_SIGNING_FILES.items()))
+    source_parts = in_source(
+        source, relative, "Chromium signing parts", must_exist=True
+    )
+    packaging_parts = in_source(
+        source,
+        X64_OUT + "/" + PACKAGING_NAME + "/signing/parts.py",
+        "generated x86_64 signing parts",
+        must_exist=True,
+    )
+    for label, path in (
+        ("Chromium signing parts", source_parts),
+        ("generated x86_64 signing parts", packaging_parts),
+    ):
+        if sha256_file(path) != hashes["post_sha256"]:
+            raise PipelineError("{} post-fix hash mismatch".format(label))
+    return receipt_path, receipt
+
+
+def execute_swiftshader_disabled_signing(source, developer_dir, plan):
+    """Apply the one-file correction and refresh only copy_signing at j8."""
+    expected = swiftshader_disabled_signing_plan(source, developer_dir)
+    if plan != expected:
+        raise PipelineError("disabled SwiftShader signing plan changed")
+    require_free(source, SOFT_FLOOR_GIB, "disabled SwiftShader signing fix")
+    source_parts = Path(expected["source_parts"])
+    packaging_parts = Path(expected["packaging_parts"])
+    initial_app_trees = expected["app_tree_sha256"]
+    snapshot_root = Path(
+        tempfile.mkdtemp(prefix="focus-swiftshader-signing-rollback-")
+    ).resolve()
+    source_backup = snapshot_root / "source-parts.py"
+    packaging_backup = snapshot_root / "packaging-parts.py"
+    prepare_source.atomic_copy(source_parts, source_backup)
+    prepare_source.atomic_copy(packaging_parts, packaging_backup)
+    receipt_report = None
+    try:
+        if expected["source_state"] == "pre":
+            prepare_source.apply_patch_plan(
+                source,
+                [SWIFTSHADER_DISABLED_SIGNING_PATCH],
+                total_patches=1,
+            )
+        hashes = next(iter(SWIFTSHADER_DISABLED_SIGNING_FILES.values()))
+        if sha256_file(source_parts) != hashes["post_sha256"]:
+            raise PipelineError("Chromium signing parts post-fix hash mismatch")
+        if expected["packaging_state"] == "pre":
+            environment = safe_environment(
+                source,
+                developer_dir,
+                build_ninja=Path(expected["refresh"]["ninja"]["path"]),
+            )
+            run_monitored(expected["refresh"]["command"], source, environment)
+        if sha256_file(packaging_parts) != hashes["post_sha256"]:
+            raise PipelineError("generated signing parts post-fix hash mismatch")
+        current_build = swiftshader_disabled_build_contract(source)
+        if current_build["app_tree_sha256"] != initial_app_trees:
+            raise PipelineError("signing-script refresh changed an app bundle")
+        receipt_value = {
+            "schema": 1,
+            "source_root": str(source),
+            "developer_dir": str(developer_dir),
+            "preparation_receipt": expected["preparation_receipt"],
+            "reclaim_receipt": expected["reclaim_receipt"],
+            "x64_build_receipt": expected["x64_build_receipt"],
+            "profiles": expected["profiles"],
+            "build_args": expected["build_args"],
+            "libraries": expected["libraries"],
+            "app_tree_sha256": initial_app_trees,
+            "upstream": SWIFTSHADER_DISABLED_SIGNING_UPSTREAM,
+            "patch": expected["patch"],
+            "files": SWIFTSHADER_DISABLED_SIGNING_FILES,
+            "refresh": expected["refresh"],
+            "recovery_state": {
+                "source": expected["source_state"],
+                "packaging": expected["packaging_state"],
+            },
+            "offline": True,
+            "network_operations": 0,
+            "app_build_executed": False,
+            "signing_scripts_refreshed": True,
+            "signing_executed": False,
+            "packaging_executed": False,
+        }
+        receipt_report = atomic_json(Path(expected["receipt"]), receipt_value)
+        swiftshader_disabled_signing_receipt_contract(source, developer_dir)
+    except BaseException as original_error:
+        try:
+            receipt_path = Path(expected["receipt"])
+            if receipt_path.is_symlink() or (
+                receipt_path.exists() and not receipt_path.is_file()
+            ):
+                raise PipelineError("unsafe SwiftShader receipt during rollback")
+            if receipt_path.is_file():
+                receipt_path.unlink()
+            prepare_source.atomic_copy(source_backup, source_parts)
+            prepare_source.atomic_copy(packaging_backup, packaging_parts)
+            if (
+                _swiftshader_signing_file_state(
+                    source_parts, "rolled-back Chromium signing parts"
+                )
+                != expected["source_state"]
+                or _swiftshader_signing_file_state(
+                    packaging_parts, "rolled-back generated signing parts"
+                )
+                != expected["packaging_state"]
+            ):
+                raise PipelineError("SwiftShader signing rollback state mismatch")
+        except BaseException as rollback_error:
+            raise PipelineError(
+                "disabled SwiftShader signing fix and rollback failed; snapshot "
+                "retained at {}: original={!r}; rollback={!r}".format(
+                    snapshot_root, original_error, rollback_error
+                )
+            ) from original_error
+        shutil.rmtree(snapshot_root)
+        if isinstance(original_error, prepare_source.PreparationError):
+            raise PipelineError(str(original_error)) from original_error
+        raise
+    else:
+        shutil.rmtree(snapshot_root)
+    return {
+        "stage": "apply-swiftshader-disabled-signing-compat",
+        "applied": True,
+        "receipt": receipt_report,
+        "files": SWIFTSHADER_DISABLED_SIGNING_FILES,
+        "refresh_command": expected["refresh"]["command"],
+        "jobs": BUILD_JOBS,
+        "app_build_executed": False,
+        "signing_executed": False,
+        "packaging_executed": False,
+    }
+
+
 def preparation_contract(
     source, allow_reclaimed_arm=False, allow_missing_gn_compat=False
 ):
@@ -2564,6 +3034,9 @@ def merge_plan(source, developer_dir, dmg_output):
     slice_receipt_contract(source, x64_out, "x64")
     x64_app = x64_out / APP_NAME
     app_report(x64_app, ("x86_64",))
+    swiftshader_receipt_path, _ = swiftshader_disabled_signing_receipt_contract(
+        source, developer_dir
+    )
     packaging = x64_out / PACKAGING_NAME
     if packaging.is_symlink() or not packaging.is_dir():
         raise PipelineError("missing x86_64 signing package")
@@ -2640,6 +3113,10 @@ def merge_plan(source, developer_dir, dmg_output):
         "dmg_output": str(output),
         "commands": commands,
         "packaging_python": packaging_python,
+        "swiftshader_disabled_signing": {
+            "path": str(swiftshader_receipt_path),
+            "sha256": sha256_file(swiftshader_receipt_path),
+        },
         "developer_dir": str(developer_dir),
     }
 
@@ -2656,6 +3133,17 @@ def execute_merge(source, developer_dir, plan):
             or command[0] != current_python["path"]
         ):
             raise PipelineError("merge command does not use pinned packaging Python")
+    swiftshader_receipt_path, _ = swiftshader_disabled_signing_receipt_contract(
+        source, developer_dir
+    )
+    current_swiftshader = {
+        "path": str(swiftshader_receipt_path),
+        "sha256": sha256_file(swiftshader_receipt_path),
+    }
+    if plan.get("swiftshader_disabled_signing") != current_swiftshader:
+        raise PipelineError(
+            "disabled SwiftShader signing provenance changed before merge"
+        )
     arm_size = physical_size(plan["arm_app"])
     x64_size = physical_size(plan["x64_app"])
     # Universalization creates one combined app and signing creates another.
@@ -2671,6 +3159,14 @@ def execute_merge(source, developer_dir, plan):
     copied_sign = unsigned_root / PACKAGING_NAME / "sign_chrome.py"
     if sha256_file(copied_sign) != SIGN_CHROME_SHA256:
         raise PipelineError("copied Chromium signing script hash mismatch")
+    copied_parts = unsigned_root / PACKAGING_NAME / "signing/parts.py"
+    swiftshader_hashes = next(
+        iter(SWIFTSHADER_DISABLED_SIGNING_FILES.values())
+    )
+    if sha256_file(copied_parts) != swiftshader_hashes["post_sha256"]:
+        raise PipelineError(
+            "copied disabled-SwiftShader signing parts hash mismatch"
+        )
     if packaging_python_contract(source) != current_python:
         raise PipelineError("packaging Python changed before signing")
     run_monitored(plan["commands"]["sign"], source, environment)
@@ -2729,6 +3225,7 @@ def execute_merge(source, developer_dir, plan):
         "notarization_performed": False,
         "local_only": True,
         "packaging_python": current_python,
+        "swiftshader_disabled_signing": current_swiftshader,
     }
     report["signed_app"] = str(signed_app)
     report["signed_app_tree_sha256"] = tree_digest(signed_app)
@@ -2746,6 +3243,7 @@ def parser():
         "apply-xcode27-compat",
         "apply-xcode27-seatbelt-compat",
         "apply-screen-ai-disabled-compat",
+        "apply-swiftshader-disabled-signing-compat",
         "build-arm64",
         "stage-arm64",
         "build-x64",
@@ -2796,6 +3294,13 @@ def main(argv=None):
             plan = screen_ai_disabled_plan(source, developer_dir)
             result = (
                 execute_screen_ai_disabled(source, developer_dir, plan)
+                if args.execute
+                else plan
+            )
+        elif args.command == "apply-swiftshader-disabled-signing-compat":
+            plan = swiftshader_disabled_signing_plan(source, developer_dir)
+            result = (
+                execute_swiftshader_disabled_signing(source, developer_dir, plan)
                 if args.execute
                 else plan
             )

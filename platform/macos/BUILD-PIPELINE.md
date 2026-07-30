@@ -169,7 +169,25 @@ hashes, and absence of `out/FocusMacArm64`. Receipt validation explicitly
 accepts the recorded reclaimed arm64 `args.gn` hash while keeping every other
 preparation and compatibility input immutable.
 
-### 6. Merge, ad-hoc sign, and create the local DMG
+### 6. Refresh signing metadata for disabled SwiftShader
+
+```sh
+python3 platform/macos/build_pipeline.py \
+  apply-swiftshader-disabled-signing-compat \
+  --source-root "$SRC" --developer-dir "$XCODE" --execute --json
+```
+
+Both Focus profiles deliberately set `enable_swiftshader=false`, and the two
+verified app slices consequently omit `libvk_swiftshader.dylib` while retaining
+`libEGL.dylib` and `libGLESv2.dylib`. Chromium 150's macOS signing list did not
+carry that GN condition and otherwise tries to sign the intentionally absent
+library. This Focus-profile-pinned correction removes only that stale signing
+entry, then refreshes only `chrome/installer/mac:copy_signing` at `-j8`; it
+does not rebuild or modify either app slice. The exact pre/post images, build
+arguments, app library inventories, patch, Ninja identity, and receipt chain
+are verified transactionally before the merge may continue.
+
+### 7. Merge, ad-hoc sign, and create the local DMG
 
 ```sh
 python3 platform/macos/build_pipeline.py merge-sign-package \
@@ -178,11 +196,11 @@ python3 platform/macos/build_pipeline.py merge-sign-package \
 ```
 
 The DMG path must be absolute, absent, and below a real non-symlink parent.
-The pipeline verifies exact signing sources, combines both apps, signs nested
-code with Chromium's generated scripts, requires `Signature=adhoc`, verifies
-the complete signature and both architectures, then runs the local DMG
-packager as a monitored process. The source and DMG filesystems are watched
-throughout packaging.
+The pipeline verifies the completed disabled-SwiftShader signing receipt and
+exact signing sources, combines both apps, signs nested code with Chromium's
+generated scripts, requires `Signature=adhoc`, verifies the complete signature
+and both architectures, then runs the local DMG packager as a monitored
+process. The source and DMG filesystems are watched throughout packaging.
 
 ## Disk safety and interrupted runs
 
