@@ -14,7 +14,6 @@ import os
 import re
 import stat
 import sys
-import time
 from pathlib import Path
 
 
@@ -209,7 +208,15 @@ def recovery_plan(source_root, developer_dir, run_stem):
         name: _read_immutable(paths[name], "recovery {} evidence".format(name))
         for name in ("pre", "primary", "supplement", "revalidation", "status")
     }
-    observed_at_ns = max(time.time_ns(), evidence["status"]["identity"]["mtime_ns"])
+    # The plan is recomputed immediately before no-replace publication.  Keep
+    # this derived timestamp deterministic so an unchanged immutable evidence
+    # set yields the exact same recovery record on both passes.
+    observed_at_ns = max(
+        evidence["status"]["identity"]["mtime_ns"],
+        evidence["status"]["value"].get("wait_observation", {}).get(
+            "wait_returned_at_ns", 0
+        ),
+    )
     record = recovery_record_from_values(
         run_stem, paths, evidence, observed_at_ns
     )
