@@ -11198,6 +11198,9 @@ def merge_plan(source, developer_dir, dmg_output):
             "private_candidate_mode": "0700",
             "final_output_absent_until_runtime_passes": True,
             "atomic_no_overwrite_publish": True,
+            "descriptor_pinned_publish": True,
+            "durable_final_entry_before_candidate_unlink": True,
+            "persistent_publish_recovery_journal": False,
             "architectures": ["arm64", "x86_64"],
             "native_arm64_required": True,
             "rosetta_x86_64_required": True,
@@ -11313,54 +11316,23 @@ def _cleanup_private_dmg_candidate(
 
 
 def _publish_accepted_dmg(candidate, candidate_identity, output, size, digest):
-    """No-overwrite publish the exact runtime-accepted inode."""
-    candidate = Path(candidate)
-    output = Path(output)
-    observed = os.lstat(str(candidate))
-    if (
-        not stat.S_ISREG(observed.st_mode)
-        or (observed.st_dev, observed.st_ino) != tuple(candidate_identity)
-        or observed.st_size != size
-        or package_local_dmg.sha256_file(candidate) != digest
-    ):
-        raise PipelineError("DMG runtime candidate changed before publication")
-    if os.path.lexists(str(output)):
-        raise PipelineError("refusing to overwrite DMG output created during acceptance")
-    placed = False
+    """Durably publish the exact accepted inode through the shared primitive."""
     try:
-        try:
-            os.link(str(candidate), str(output), follow_symlinks=False)
-        except FileExistsError as exc:
-            raise PipelineError(
-                "refusing to overwrite DMG output created during acceptance"
-            ) from exc
-        except OSError as exc:
-            raise PipelineError(
-                "failed to atomically publish accepted DMG: {}".format(exc)
-            ) from exc
-        placed = True
-        published = os.lstat(str(output))
-        if (
-            not stat.S_ISREG(published.st_mode)
-            or (published.st_dev, published.st_ino) != tuple(candidate_identity)
-            or published.st_size != size
-            or package_local_dmg.sha256_file(output) != digest
-        ):
-            raise PipelineError("published DMG does not match accepted candidate")
-        candidate.unlink()
-        return published
-    except BaseException as original_error:
-        if placed:
-            try:
-                _unlink_created_dmg(output, candidate_identity)
-            except BaseException as cleanup_error:
-                raise PipelineError(
-                    "accepted DMG publication failed and output rollback also failed: "
-                    "original={!r}; rollback={!r}".format(
-                        original_error, cleanup_error
-                    )
-                ) from original_error
+        return package_local_dmg.durable_publish_candidate(
+            candidate,
+            output,
+            candidate_identity,
+            size,
+            digest,
+        )
+    except package_local_dmg.CommittedPublishError:
+        # The caller must distinguish this durable commit boundary from all
+        # pre-commit failures and must never roll the final inode back.
         raise
+    except (OSError, package_local_dmg.PackageError) as exc:
+        raise PipelineError(
+            "accepted DMG publication rejected: {}".format(exc)
+        ) from exc
 
 
 def execute_merge(source, developer_dir, plan):
@@ -11499,6 +11471,9 @@ def execute_merge(source, developer_dir, plan):
     )
     candidate_identity = None
     published_identity = None
+    publication_committed = False
+    post_commit_cleanup_warnings = []
+    private_root_cleanup_complete = False
     try:
         package_command = _candidate_package_command(
             plan["commands"]["package"], output, candidate
@@ -11535,31 +11510,59 @@ def execute_merge(source, developer_dir, plan):
         output_digest = package_local_dmg.sha256_file(candidate)
         if output_digest != mounted_runtime["sha256"]:
             raise PipelineError("DMG candidate hash changed after runtime acceptance")
-        published_stat = _publish_accepted_dmg(
-            candidate,
-            candidate_identity,
-            output,
-            accepted_stat.st_size,
-            output_digest,
-        )
-        published_identity = (published_stat.st_dev, published_stat.st_ino)
-        _cleanup_private_dmg_candidate(
-            temporary_root,
-            root_identity,
-            candidate,
-            candidate_identity,
-        )
+        try:
+            published_stat = _publish_accepted_dmg(
+                candidate,
+                candidate_identity,
+                output,
+                accepted_stat.st_size,
+                output_digest,
+            )
+            published_identity = (
+                published_stat.st_dev,
+                published_stat.st_ino,
+            )
+            publication_committed = True
+        except package_local_dmg.CommittedPublishError as committed_error:
+            # The output-parent fsync already crossed the durable commit
+            # boundary.  Recover candidate cleanup if possible, but never
+            # unlink the accepted final inode.
+            publication_committed = True
+            published_identity = tuple(committed_error.final_identity)
+            post_commit_cleanup_warnings.append(repr(committed_error))
+        try:
+            _cleanup_private_dmg_candidate(
+                temporary_root,
+                root_identity,
+                candidate,
+                candidate_identity,
+            )
+            private_root_cleanup_complete = True
+        except Exception as cleanup_error:
+            post_commit_cleanup_warnings.append(repr(cleanup_error))
         final_stat = os.lstat(str(output))
         if (
             not stat.S_ISREG(final_stat.st_mode)
             or (final_stat.st_dev, final_stat.st_ino) != published_identity
             or final_stat.st_size != accepted_stat.st_size
+            or final_stat.st_nlink != 1
             or package_local_dmg.sha256_file(output) != output_digest
         ):
-            raise PipelineError("published DMG changed after atomic placement")
+            raise PipelineError("published DMG changed after durable placement")
         mounted_runtime = dict(mounted_runtime)
         mounted_runtime["published_dmg"] = str(output)
         mounted_runtime["published_same_inode"] = True
+        mounted_runtime["publication"] = {
+            "commit_boundary": "descriptor-pinned output-parent fsync",
+            "candidate_unlinked_after_commit": True,
+            "final_link_count": final_stat.st_nlink,
+            "private_root_cleanup_complete": private_root_cleanup_complete,
+            "persistent_recovery_journal": False,
+        }
+        if post_commit_cleanup_warnings:
+            mounted_runtime["publication"]["cleanup_warnings"] = list(
+                post_commit_cleanup_warnings
+            )
     except BaseException as original_error:
         if isinstance(original_error, runtime_smoke.DmgDetachError):
             raise PipelineError(
@@ -11570,11 +11573,6 @@ def execute_merge(source, developer_dir, plan):
                 )
             ) from original_error
         cleanup_errors = []
-        if published_identity is not None:
-            try:
-                _unlink_created_dmg(output, published_identity)
-            except BaseException as cleanup_error:
-                cleanup_errors.append("published output={!r}".format(cleanup_error))
         try:
             if os.path.lexists(str(temporary_root)):
                 _cleanup_private_dmg_candidate(
@@ -11585,6 +11583,20 @@ def execute_merge(source, developer_dir, plan):
                 )
         except BaseException as cleanup_error:
             cleanup_errors.append("private candidate={!r}".format(cleanup_error))
+        if publication_committed:
+            if isinstance(original_error, (KeyboardInterrupt, SystemExit)):
+                raise
+            raise PipelineError(
+                "DMG publication crossed its durable commit boundary; the final "
+                "inode was retained after the later failure: original={!r}{}".format(
+                    original_error,
+                    (
+                        "; cleanup={}".format("; ".join(cleanup_errors))
+                        if cleanup_errors
+                        else ""
+                    ),
+                )
+            ) from original_error
         if cleanup_errors:
             raise PipelineError(
                 "DMG acceptance failed and safe cleanup also failed: "

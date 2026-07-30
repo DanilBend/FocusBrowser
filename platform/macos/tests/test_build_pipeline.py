@@ -3362,6 +3362,9 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertEqual("0700", runtime["private_candidate_mode"])
         self.assertTrue(runtime["final_output_absent_until_runtime_passes"])
         self.assertTrue(runtime["atomic_no_overwrite_publish"])
+        self.assertTrue(runtime["descriptor_pinned_publish"])
+        self.assertTrue(runtime["durable_final_entry_before_candidate_unlink"])
+        self.assertFalse(runtime["persistent_publish_recovery_journal"])
         self.assertTrue(runtime["native_arm64_required"])
         self.assertTrue(runtime["rosetta_x86_64_required"])
         self.assertEqual(["arm64", "x86_64"], runtime["architectures"])
@@ -3501,6 +3504,7 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertFalse(candidates[0].parent.exists())
         self.assertTrue(fixture["output"].is_file())
         published = os.lstat(str(fixture["output"]))
+        self.assertEqual(1, published.st_nlink)
         self.assertEqual(
             candidate_identities[0], (published.st_dev, published.st_ino)
         )
@@ -3517,6 +3521,17 @@ class BuildPipelineTests(unittest.TestCase):
                 "published_same_inode"
             ]
         )
+        publication = report["runtime_acceptance"]["mounted_final_dmg"][
+            "publication"
+        ]
+        self.assertEqual(
+            "descriptor-pinned output-parent fsync",
+            publication["commit_boundary"],
+        )
+        self.assertEqual(1, publication["final_link_count"])
+        self.assertTrue(publication["candidate_unlinked_after_commit"])
+        self.assertTrue(publication["private_root_cleanup_complete"])
+        self.assertFalse(publication["persistent_recovery_journal"])
 
     def test_signed_app_runtime_failure_prevents_dmg_packaging(self):
         fixture = self.prepare_execute_merge_fixture()
@@ -3634,7 +3649,7 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertEqual(1, len(candidates))
         self.assertFalse(candidates[0].parent.exists())
 
-    def test_failure_after_atomic_publish_rolls_back_final_output(self):
+    def test_post_commit_root_cleanup_warning_never_removes_final_output(self):
         fixture = self.prepare_execute_merge_fixture()
         candidates = []
         real_cleanup = build_pipeline._cleanup_private_dmg_candidate
@@ -3652,22 +3667,124 @@ class BuildPipelineTests(unittest.TestCase):
             real_cleanup(*args, **kwargs)
             raise build_pipeline.PipelineError("synthetic post-publish failure")
 
-        with self.mocked_merge_dependencies(
-            fixture, monitored
-        ), mock.patch.object(
+        with self.mocked_merge_dependencies(fixture, monitored), mock.patch.object(
             build_pipeline,
             "_cleanup_private_dmg_candidate",
             side_effect=cleanup_then_fail,
+        ):
+            report = build_pipeline.execute_merge(
+                self.source, self.developer, fixture["plan"]
+            )
+
+        self.assertEqual(1, cleanup_calls)
+        self.assertEqual(b"accepted candidate", fixture["output"].read_bytes())
+        self.assertEqual(1, os.lstat(str(fixture["output"])).st_nlink)
+        self.assertEqual(1, len(candidates))
+        self.assertFalse(candidates[0].parent.exists())
+        publication = report["runtime_acceptance"]["mounted_final_dmg"][
+            "publication"
+        ]
+        self.assertFalse(publication["private_root_cleanup_complete"])
+        self.assertIn("synthetic post-publish failure", publication["cleanup_warnings"][0])
+
+    def test_committed_candidate_cleanup_error_is_recovered_without_rollback(self):
+        fixture = self.prepare_execute_merge_fixture()
+        candidates = []
+        real_unlink = os.unlink
+        rejected_once = False
+
+        def monitored(command, *_args, **_kwargs):
+            if self.is_package_command(command):
+                candidate = self.package_command_output(command)
+                candidates.append(candidate)
+                candidate.write_bytes(b"accepted candidate")
+
+        def reject_first_descriptor_relative_unlink(path, *args, **kwargs):
+            nonlocal rejected_once
+            if (
+                not rejected_once
+                and kwargs.get("dir_fd") is not None
+                and Path(path).name == fixture["output"].name
+            ):
+                rejected_once = True
+                raise OSError("synthetic descriptor-relative cleanup failure")
+            return real_unlink(path, *args, **kwargs)
+
+        with self.mocked_merge_dependencies(fixture, monitored), mock.patch(
+            "os.unlink", side_effect=reject_first_descriptor_relative_unlink
+        ):
+            report = build_pipeline.execute_merge(
+                self.source, self.developer, fixture["plan"]
+            )
+
+        self.assertTrue(rejected_once)
+        self.assertEqual(b"accepted candidate", fixture["output"].read_bytes())
+        self.assertEqual(1, os.lstat(str(fixture["output"])).st_nlink)
+        self.assertFalse(candidates[0].parent.exists())
+        publication = report["runtime_acceptance"]["mounted_final_dmg"][
+            "publication"
+        ]
+        self.assertTrue(publication["private_root_cleanup_complete"])
+        self.assertIn("durably committed", publication["cleanup_warnings"][0])
+
+    def test_post_commit_final_verification_failure_retains_exact_output(self):
+        fixture = self.prepare_execute_merge_fixture()
+        candidates = []
+        real_cleanup = build_pipeline._cleanup_private_dmg_candidate
+
+        def monitored(command, *_args, **_kwargs):
+            if self.is_package_command(command):
+                candidate = self.package_command_output(command)
+                candidates.append(candidate)
+                candidate.write_bytes(b"accepted candidate")
+
+        def cleanup_then_tamper(*args, **kwargs):
+            real_cleanup(*args, **kwargs)
+            fixture["output"].write_bytes(b"post-commit tamper")
+
+        with self.mocked_merge_dependencies(fixture, monitored), mock.patch.object(
+            build_pipeline,
+            "_cleanup_private_dmg_candidate",
+            side_effect=cleanup_then_tamper,
         ), self.assertRaisesRegex(
-            build_pipeline.PipelineError, "synthetic post-publish failure"
+            build_pipeline.PipelineError, "durable commit boundary"
         ):
             build_pipeline.execute_merge(
                 self.source, self.developer, fixture["plan"]
             )
 
-        self.assertEqual(1, cleanup_calls)
-        self.assertFalse(fixture["output"].exists())
-        self.assertEqual(1, len(candidates))
+        self.assertEqual(b"post-commit tamper", fixture["output"].read_bytes())
+        self.assertEqual(1, os.lstat(str(fixture["output"])).st_nlink)
+        self.assertFalse(candidates[0].parent.exists())
+
+    def test_interrupt_after_durable_helper_return_preserves_final_output(self):
+        fixture = self.prepare_execute_merge_fixture()
+        candidates = []
+        real_publish = build_pipeline.package_local_dmg.durable_publish_candidate
+
+        def monitored(command, *_args, **_kwargs):
+            if self.is_package_command(command):
+                candidate = self.package_command_output(command)
+                candidates.append(candidate)
+                candidate.write_bytes(b"accepted candidate")
+
+        def publish_then_interrupt(*args, **kwargs):
+            real_publish(*args, **kwargs)
+            raise KeyboardInterrupt("synthetic interrupt after durable return")
+
+        with self.mocked_merge_dependencies(fixture, monitored), mock.patch.object(
+            build_pipeline.package_local_dmg,
+            "durable_publish_candidate",
+            side_effect=publish_then_interrupt,
+        ), self.assertRaisesRegex(
+            KeyboardInterrupt, "after durable return"
+        ):
+            build_pipeline.execute_merge(
+                self.source, self.developer, fixture["plan"]
+            )
+
+        self.assertEqual(b"accepted candidate", fixture["output"].read_bytes())
+        self.assertEqual(1, os.lstat(str(fixture["output"])).st_nlink)
         self.assertFalse(candidates[0].parent.exists())
 
     def test_mounted_dmg_detach_failure_retains_exact_created_inode(self):
