@@ -24,6 +24,7 @@ import tempfile
 import zipfile
 from collections import OrderedDict
 from pathlib import Path, PurePosixPath
+from typing import Callable, Optional
 
 
 MACOS_DIR = Path(__file__).resolve().parent
@@ -688,7 +689,11 @@ def expected_post_version_resource_inventory():
     }
 
 
-def validate_recovery_checkpoint_report(report, source_root=None):
+def validate_recovery_checkpoint_report(
+    report,
+    source_root=None,
+    path_projector: Optional[Callable[[Path], Path]] = None,
+):
     """Validate explicit provenance for the one audited split recovery."""
     if report is None:
         return None
@@ -749,7 +754,7 @@ def validate_recovery_checkpoint_report(report, source_root=None):
     ):
         raise PreparationError("recovery artifact checkpoint mismatch")
     if source_root is not None and artifacts["onboarding_node"] != (
-        onboarding_node_contract(source_root)
+        onboarding_node_contract(source_root, path_projector=path_projector)
     ):
         raise PreparationError("recovery onboarding Node checkpoint mismatch")
     return report
@@ -820,6 +825,28 @@ def require_regular_in_tree(root, relative, label):
     except ValueError as exc:
         raise PreparationError("{} escaped its root: {}".format(label, candidate)) from exc
     return candidate
+
+
+def _project_validated_absolute_path(
+    path: Path,
+    path_projector: Optional[Callable[[Path], Path]],
+    label: str,
+) -> str:
+    """Project one already-validated physical path without resolving its alias."""
+    if not isinstance(path, Path) or not path.is_absolute():
+        raise PreparationError("{} physical path is not absolute".format(label))
+    if path_projector is None:
+        return str(path)
+    if not callable(path_projector):
+        raise PreparationError("{} path projector is not callable".format(label))
+    projected = path_projector(path)
+    if not isinstance(projected, Path):
+        raise PreparationError("{} path projector must return Path".format(label))
+    if not projected.is_absolute() or ".." in projected.parts:
+        raise PreparationError(
+            "{} path projector returned a non-canonical absolute path".format(label)
+        )
+    return str(projected)
 
 
 def validate_acquisition_marker(source_root):
@@ -1074,7 +1101,11 @@ def validate_offline_cache(cache_root, contracts=None):
     return cache, report
 
 
-def validate_dependency_cache_marker(cache_root, contracts=None):
+def validate_dependency_cache_marker(
+    cache_root,
+    contracts=None,
+    path_projector: Optional[Callable[[Path], Path]] = None,
+):
     """Bind the additive Mac cache to the exact complete 10-archive inventory."""
     cache = require_real_directory(cache_root, "offline cache")
     contracts = contracts or validate_dependency_manifest()
@@ -1103,7 +1134,7 @@ def validate_dependency_cache_marker(cache_root, contracts=None):
         or payload["unpacked"] is not False
     ):
         raise PreparationError("dependency cache marker safety contract mismatch")
-    expected_archives = []
+    validated_archives = []
     total_bytes = 0
     allowed_entries = {DEPENDENCY_CACHE_MARKER}
     for name, contract in contracts.items():
@@ -1113,20 +1144,19 @@ def validate_dependency_cache_marker(cache_root, contracts=None):
         allowed_entries.add(contract["download_filename"])
         size = archive.stat().st_size
         total_bytes += size
-        if sha256_file(archive) != contract["sha256"]:
+        observed_hash = sha256_file(archive)
+        if observed_hash != contract["sha256"]:
             raise PreparationError(
                 "dependency cache archive hash changed: {}".format(archive)
             )
-        expected_archives.append(
+        validated_archives.append(
             {
                 "bytes": size,
                 "name": name,
-                "path": str(archive),
+                "path": archive,
                 "sha256": contract["sha256"],
             }
         )
-    if payload["archives"] != expected_archives:
-        raise PreparationError("dependency cache marker archive inventory mismatch")
     observed_entries = set()
     for entry in cache.iterdir():
         if entry.is_symlink() or not entry.is_file():
@@ -1136,9 +1166,23 @@ def validate_dependency_cache_marker(cache_root, contracts=None):
         observed_entries.add(entry.name)
     if observed_entries != allowed_entries:
         raise PreparationError("dependency cache contains an unexpected or partial file")
+    marker_hash = sha256_file(marker)
+    expected_archives = [
+        {
+            **archive,
+            "path": _project_validated_absolute_path(
+                archive["path"], path_projector, "dependency cache archive"
+            ),
+        }
+        for archive in validated_archives
+    ]
+    if payload["archives"] != expected_archives:
+        raise PreparationError("dependency cache marker archive inventory mismatch")
     return {
-        "path": str(marker),
-        "sha256": sha256_file(marker),
+        "path": _project_validated_absolute_path(
+            marker, path_projector, "dependency cache marker"
+        ),
+        "sha256": marker_hash,
         "archive_count": len(expected_archives),
         "total_bytes": total_bytes,
         "archives": {
@@ -1749,7 +1793,10 @@ def merge_staged_dependencies(source_root, stage_root, contracts):
     }
 
 
-def onboarding_node_contract(source_root):
+def onboarding_node_contract(
+    source_root,
+    path_projector: Optional[Callable[[Path], Path]] = None,
+):
     """Validate the exact native Node used for deterministic source generation."""
     source_root = require_real_directory(source_root, "Chromium source")
     machine = platform.machine().lower()
@@ -1794,7 +1841,9 @@ def onboarding_node_contract(source_root):
     if version.returncode or version.stdout.strip() != ONBOARDING_NODE_VERSION:
         raise PreparationError("onboarding Node version mismatch")
     return {
-        "path": str(node),
+        "path": _project_validated_absolute_path(
+            node, path_projector, "onboarding Node"
+        ),
         "relative_path": relative,
         "architecture": machine,
         "version": ONBOARDING_NODE_VERSION,

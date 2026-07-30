@@ -603,11 +603,206 @@ class PrepareSourceTests(unittest.TestCase):
         )
         report = prepare_source.validate_dependency_cache_marker(cache, contracts)
         self.assertEqual(1, report["archive_count"])
+        self.assertEqual(str(marker.resolve()), report["path"])
+        self.assertEqual(
+            report,
+            prepare_source.validate_dependency_cache_marker(
+                cache, contracts, path_projector=lambda path: path
+            ),
+        )
         changed = json.loads(marker.read_text(encoding="utf-8"))
         changed["archives"][0]["bytes"] += 1
         marker.write_text(json.dumps(changed) + "\n", encoding="utf-8")
         with self.assertRaisesRegex(prepare_source.PreparationError, "inventory"):
             prepare_source.validate_dependency_cache_marker(cache, contracts)
+
+    def test_dependency_cache_path_projection_follows_physical_validation(self):
+        cache = self.root / "projected-marker-cache"
+        cache.mkdir()
+        payload = b"archive"
+        archive = cache / "dep.tgz"
+        archive.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        contracts = OrderedDict(
+            (("dep", {"download_filename": "dep.tgz", "sha256": digest}),)
+        )
+        logical_cache = Path("/Users/legacy/cache")
+        marker = cache / prepare_source.DEPENDENCY_CACHE_MARKER
+        marker.write_text(
+            json.dumps(
+                {
+                    "archives": [
+                        {
+                            "bytes": len(payload),
+                            "name": "dep",
+                            "path": str(logical_cache / archive.name),
+                            "sha256": digest,
+                        }
+                    ],
+                    "deps_ini_sha256": prepare_source.DEPS_INI_SHA256,
+                    "source_mutated": False,
+                    "unpacked": False,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        projected = []
+
+        def projector(path):
+            projected.append(path)
+            return logical_cache / path.relative_to(cache.resolve())
+
+        report = prepare_source.validate_dependency_cache_marker(
+            cache, contracts, path_projector=projector
+        )
+        self.assertEqual(
+            [archive.resolve(), marker.resolve()],
+            projected,
+        )
+        self.assertEqual(str(logical_cache / marker.name), report["path"])
+        self.assertEqual({"dep": digest}, report["archives"])
+        self.assertEqual(len(payload), report["total_bytes"])
+
+        archive.write_bytes(b"tampered")
+        projected.clear()
+        with self.assertRaisesRegex(
+            prepare_source.PreparationError, "archive hash changed"
+        ):
+            prepare_source.validate_dependency_cache_marker(
+                cache, contracts, path_projector=projector
+            )
+        self.assertEqual([], projected)
+
+    def test_dependency_cache_path_projector_rejects_untyped_or_unsafe_output(self):
+        cache = self.root / "adversarial-marker-cache"
+        cache.mkdir()
+        payload = b"archive"
+        archive = cache / "dep.tgz"
+        archive.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        contracts = OrderedDict(
+            (("dep", {"download_filename": "dep.tgz", "sha256": digest}),)
+        )
+        marker = cache / prepare_source.DEPENDENCY_CACHE_MARKER
+        marker.write_text(
+            json.dumps(
+                {
+                    "archives": [
+                        {
+                            "bytes": len(payload),
+                            "name": "dep",
+                            "path": str(archive.resolve()),
+                            "sha256": digest,
+                        }
+                    ],
+                    "deps_ini_sha256": prepare_source.DEPS_INI_SHA256,
+                    "source_mutated": False,
+                    "unpacked": False,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        cases = (
+            (7, "not callable"),
+            (lambda _path: "/absolute/string", "must return Path"),
+            (lambda _path: Path("relative/path"), "non-canonical absolute"),
+            (
+                lambda _path: Path("/logical/cache/../escape"),
+                "non-canonical absolute",
+            ),
+        )
+        for projector, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                prepare_source.PreparationError, message
+            ):
+                prepare_source.validate_dependency_cache_marker(
+                    cache, contracts, path_projector=projector
+                )
+
+    def test_onboarding_node_projects_only_after_hash_arch_and_version(self):
+        source = self.root / "node-source"
+        relative = prepare_source.ONBOARDING_NODE_RELATIVE_BY_HOST["arm64"]
+        node = source / relative
+        node.parent.mkdir(parents=True)
+        node.write_bytes(b"node fixture")
+        node.chmod(0o755)
+        digest = hashlib.sha256(node.read_bytes()).hexdigest()
+        logical_node = Path("/Users/legacy/chromium/src") / relative
+        events = []
+
+        def runner(command, **_kwargs):
+            if command[0] == "/usr/bin/lipo":
+                events.append("architecture")
+                return mock.Mock(returncode=0, stdout="arm64\n", stderr="")
+            events.append("version")
+            return mock.Mock(
+                returncode=0,
+                stdout=prepare_source.ONBOARDING_NODE_VERSION + "\n",
+                stderr="",
+            )
+
+        def projector(path):
+            events.append("project")
+            self.assertEqual(node.resolve(), path)
+            return logical_node
+
+        with mock.patch.object(
+            prepare_source.platform, "machine", return_value="arm64"
+        ), mock.patch.object(
+            prepare_source,
+            "ONBOARDING_NODE_SHA256_BY_HOST",
+            {"arm64": digest, "x86_64": "unused"},
+        ), mock.patch.object(prepare_source.subprocess, "run", side_effect=runner):
+            physical = prepare_source.onboarding_node_contract(source)
+            identity = prepare_source.onboarding_node_contract(
+                source, path_projector=lambda path: path
+            )
+            projected = prepare_source.onboarding_node_contract(
+                source, path_projector=projector
+            )
+
+        self.assertEqual(physical, identity)
+        self.assertEqual(str(logical_node), projected["path"])
+        self.assertEqual(physical["relative_path"], projected["relative_path"])
+        self.assertEqual(physical["architecture"], projected["architecture"])
+        self.assertEqual(physical["version"], projected["version"])
+        self.assertEqual(physical["sha256"], projected["sha256"])
+        self.assertEqual(
+            [
+                "architecture",
+                "version",
+                "architecture",
+                "version",
+                "architecture",
+                "version",
+                "project",
+            ],
+            events,
+        )
+
+        projected_calls = []
+
+        def bad_runner(command, **_kwargs):
+            if command[0] == "/usr/bin/lipo":
+                return mock.Mock(returncode=0, stdout="arm64\n", stderr="")
+            return mock.Mock(returncode=0, stdout="v0.0.0\n", stderr="")
+
+        with mock.patch.object(
+            prepare_source.platform, "machine", return_value="arm64"
+        ), mock.patch.object(
+            prepare_source,
+            "ONBOARDING_NODE_SHA256_BY_HOST",
+            {"arm64": digest, "x86_64": "unused"},
+        ), mock.patch.object(
+            prepare_source.subprocess, "run", side_effect=bad_runner
+        ), self.assertRaisesRegex(prepare_source.PreparationError, "version mismatch"):
+            prepare_source.onboarding_node_contract(
+                source,
+                path_projector=lambda path: projected_calls.append(path) or logical_node,
+            )
+        self.assertEqual([], projected_calls)
 
     def test_onboarding_strings_are_generated_twice_byte_identically(self):
         source = self.root / "generator-src"
@@ -1146,14 +1341,18 @@ class PrepareSourceTests(unittest.TestCase):
             },
             "resources": prepare_source.expected_post_version_resource_inventory(),
         }
+        projector = mock.Mock()
         with mock.patch.object(
             prepare_source, "onboarding_node_contract", return_value=node
-        ):
+        ) as node_contract:
             self.assertEqual(
                 report,
                 prepare_source.validate_recovery_checkpoint_report(
-                    report, self.root
+                    report, self.root, path_projector=projector
                 ),
+            )
+            node_contract.assert_called_once_with(
+                self.root, path_projector=projector
             )
             tampered = json.loads(json.dumps(report))
             tampered["resources"]["inventory_sha256"] = "0" * 64
