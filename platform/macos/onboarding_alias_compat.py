@@ -24,6 +24,12 @@ from pathlib import Path, PurePosixPath
 SOURCE_RELATIVE = "components/focus_onboarding/vite.config.ts"
 RECEIPT_RELATIVE = ".focus-macos-onboarding-alias-root.json"
 TRANSITION_CONSUMED_RELATIVE = "out/FocusMacOnboardingAliasTransition.json"
+ARM_OUT_RELATIVE = "out/FocusMacArm64"
+ARM_STAGE_RECEIPT_RELATIVE = "out/FocusMacStaging/arm64-receipt.json"
+ARM_RECLAIM_RECEIPT_RELATIVE = (
+    "out/FocusMacStaging/arm64-reclaim-complete.json"
+)
+ARM_STAGED_APP_RELATIVE = "out/FocusMacStaging/arm64/Focus Browser.app"
 PATCH_RELATIVE = "patches/focus-onboarding-alias-root.patch"
 PATCH_PATH = Path(__file__).resolve().parent / PATCH_RELATIVE
 
@@ -49,6 +55,7 @@ TRANSITION_KIND = "focus-macos-onboarding-home-alias-adoption-transition"
 PREPARATION_PROJECTION_KIND = (
     "focus-macos-onboarding-preparation-dependency-tree-projection"
 )
+RECLAIMED_ARM_EVIDENCE_KIND = "focus-macos-reclaimed-arm-graph-evidence"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 HUNK_RE = re.compile(
     r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$"
@@ -699,6 +706,345 @@ def _graph_entry(source, value, label):
     return expected
 
 
+def _graph_entry_snapshot(value, label):
+    """Validate one frozen entry after its output directory was reclaimed."""
+    if not isinstance(value, dict) or set(value) != {"path", "bytes", "sha256"}:
+        raise AliasCompatError("{} entry schema mismatch".format(label))
+    relative = _safe_relative(value.get("path"), label + " path")
+    if type(value.get("bytes")) is not int or value["bytes"] < 0:
+        raise AliasCompatError("{} byte count is invalid".format(label))
+    if not isinstance(value.get("sha256"), str) or SHA256_RE.fullmatch(
+        value["sha256"]
+    ) is None:
+        raise AliasCompatError("{} SHA-256 is invalid".format(label))
+    return {"path": relative, "bytes": value["bytes"], "sha256": value["sha256"]}
+
+
+def _normalized_home_alias_from_receipt(source, supplied):
+    """Validate the current alias identity without recomputing legacy build inputs."""
+    if not isinstance(supplied, dict) or set(supplied) != {
+        "receipt", "volume", "alias", "mappings"
+    }:
+        raise AliasCompatError("reclaimed HomeAlias evidence schema mismatch")
+    receipt_path = _in_source(
+        source, HOME_ALIAS_RECEIPT_RELATIVE, "reclaimed HomeAlias receipt"
+    )
+    snapshot = _read_regular(
+        receipt_path, "reclaimed HomeAlias receipt", max_bytes=MAX_JSON_BYTES
+    )
+    if snapshot["mode"] & 0o022:
+        raise AliasCompatError("reclaimed HomeAlias receipt is group/world writable")
+    if supplied.get("receipt") != {
+        "path": HOME_ALIAS_RECEIPT_RELATIVE,
+        **snapshot["record"],
+    }:
+        raise AliasCompatError("reclaimed HomeAlias receipt binding changed")
+    receipt = _json_no_duplicates(snapshot["data"], "reclaimed HomeAlias receipt")
+    mappings = receipt.get("mappings") if isinstance(receipt, dict) else None
+    volume = receipt.get("volume") if isinstance(receipt, dict) else None
+    alias = receipt.get("alias") if isinstance(receipt, dict) else None
+    if (
+        not isinstance(receipt, dict)
+        or type(receipt.get("schema")) is not int
+        or receipt.get("schema") != 2
+        or not isinstance(mappings, dict)
+        or set(mappings) != {"workspace", "source", "developer", "repo"}
+        or not isinstance(volume, dict)
+        or set(volume) != {"filesystem", "volume_uuid"}
+        or volume.get("filesystem") != "apfs"
+        or not isinstance(volume.get("volume_uuid"), str)
+        or re.fullmatch(
+            r"[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}",
+            volume.get("volume_uuid", ""),
+        )
+        is None
+        or not isinstance(alias, dict)
+    ):
+        raise AliasCompatError("reclaimed HomeAlias receipt identity changed")
+
+    normalized_mappings = {}
+    devices = set()
+    for name in ("workspace", "source", "developer", "repo"):
+        mapping = mappings.get(name)
+        identity = mapping.get("identity") if isinstance(mapping, dict) else None
+        if (
+            not isinstance(mapping, dict)
+            or set(mapping) != {"logical", "physical", "identity"}
+            or not isinstance(identity, dict)
+            or set(identity) != {
+                "volume_uuid", "device", "inode", "uid", "gid", "mode"
+            }
+            or identity.get("volume_uuid") != volume.get("volume_uuid")
+            or any(
+                type(identity.get(key)) is not int
+                for key in ("device", "inode", "uid", "gid", "mode")
+            )
+            or identity.get("device", 0) <= 0
+            or identity.get("inode", 0) <= 0
+            or identity.get("uid", -1) < 0
+            or identity.get("gid", -1) < 0
+        ):
+            raise AliasCompatError(
+                "reclaimed HomeAlias {} mapping changed".format(name)
+            )
+        logical = Path(mapping.get("logical", ""))
+        physical = Path(mapping.get("physical", ""))
+        if (
+            not logical.is_absolute()
+            or not physical.is_absolute()
+            or Path(os.path.abspath(str(logical))) != logical
+            or Path(os.path.abspath(str(physical))) != physical
+        ):
+            raise AliasCompatError(
+                "reclaimed HomeAlias {} paths are invalid".format(name)
+            )
+        try:
+            physical_status = os.stat(physical, follow_symlinks=False)
+            logical_status = os.stat(logical)
+            physical_resolved = physical.resolve(strict=True)
+            logical_resolved = logical.resolve(strict=True)
+        except OSError as exc:
+            raise AliasCompatError(
+                "reclaimed HomeAlias {} mapping is unavailable".format(name)
+            ) from exc
+        if (
+            physical_resolved != physical
+            or logical_resolved != physical
+            or not stat.S_ISDIR(physical_status.st_mode)
+            or (logical_status.st_dev, logical_status.st_ino)
+            != (physical_status.st_dev, physical_status.st_ino)
+            or identity.get("inode") != physical_status.st_ino
+            or identity.get("uid") != physical_status.st_uid
+            or identity.get("gid") != physical_status.st_gid
+            or identity.get("mode") != stat.S_IMODE(physical_status.st_mode)
+        ):
+            raise AliasCompatError(
+                "reclaimed HomeAlias {} current identity changed".format(name)
+            )
+        devices.add(physical_status.st_dev)
+        if name != "repo":
+            normalized_mappings[name] = {
+                "logical": str(logical),
+                "physical": str(physical),
+                "identity": {
+                    key: identity[key]
+                    for key in ("volume_uuid", "inode", "uid", "gid", "mode")
+                },
+            }
+    if (
+        len(devices) != 1
+        or Path(normalized_mappings["source"]["physical"]) != source
+    ):
+        raise AliasCompatError("reclaimed HomeAlias source/volume binding changed")
+
+    target_identity = alias.get("target_identity")
+    if (
+        set(alias) != {
+            "path", "target", "device", "inode", "uid", "gid", "mode",
+            "root_owned", "absolute_exact_target", "target_identity",
+        }
+        or alias.get("root_owned") is not True
+        or alias.get("absolute_exact_target") is not True
+        or not isinstance(target_identity, dict)
+        or set(target_identity) != {
+            "volume_uuid", "device", "inode", "uid", "gid", "mode"
+        }
+        or target_identity.get("volume_uuid") != volume.get("volume_uuid")
+        or any(
+            type(alias.get(key)) is not int
+            for key in ("device", "inode", "uid", "gid", "mode")
+        )
+        or any(
+            type(target_identity.get(key)) is not int
+            for key in ("device", "inode", "uid", "gid", "mode")
+        )
+    ):
+        raise AliasCompatError("reclaimed HomeAlias alias identity changed")
+    logical_home = Path(receipt.get("logical_home", ""))
+    physical_home = Path(receipt.get("physical_home", ""))
+    try:
+        alias_status = os.lstat(logical_home)
+        home_status = os.stat(physical_home, follow_symlinks=False)
+        raw_target = Path(os.readlink(logical_home))
+    except OSError as exc:
+        raise AliasCompatError("reclaimed HomeAlias root is unavailable") from exc
+    if (
+        Path(alias.get("path", "")) != logical_home
+        or Path(alias.get("target", "")) != physical_home
+        or not stat.S_ISLNK(alias_status.st_mode)
+        or raw_target != physical_home
+        or logical_home.resolve(strict=True) != physical_home
+        or physical_home.resolve(strict=True) != physical_home
+        or alias.get("inode") != alias_status.st_ino
+        or alias.get("uid") != alias_status.st_uid
+        or alias.get("gid") != alias_status.st_gid
+        or alias.get("mode") != stat.S_IMODE(alias_status.st_mode)
+        or target_identity.get("inode") != home_status.st_ino
+        or target_identity.get("uid") != home_status.st_uid
+        or target_identity.get("gid") != home_status.st_gid
+        or target_identity.get("mode") != stat.S_IMODE(home_status.st_mode)
+        or home_status.st_dev not in devices
+    ):
+        raise AliasCompatError("reclaimed HomeAlias current root identity changed")
+    normalized = {
+        "receipt": {"path": HOME_ALIAS_RECEIPT_RELATIVE, **snapshot["record"]},
+        "volume": dict(volume),
+        "alias": {
+            "path": alias["path"],
+            "target": alias["target"],
+            "inode": alias["inode"],
+            "uid": alias["uid"],
+            "gid": alias["gid"],
+            "mode": alias["mode"],
+            "target_identity": {
+                key: target_identity[key]
+                for key in ("volume_uuid", "inode", "uid", "gid", "mode")
+            },
+        },
+        "mappings": normalized_mappings,
+    }
+    if not _strict_json_equal(normalized, supplied):
+        raise AliasCompatError("reclaimed HomeAlias normalized contract changed")
+    return normalized
+
+
+def _reclaimed_arm_evidence_contract(source, supplied, graph):
+    """Bind an immutable ARM graph snapshot to the exact reclaim chain."""
+    required = {
+        "schema", "kind", "home_alias_compatibility", "graph_inventory_sha256",
+        "stage_receipt", "reclaim_receipt", "staged_app", "reclaimed_out",
+    }
+    if (
+        not isinstance(supplied, dict)
+        or set(supplied) != required
+        or type(supplied.get("schema")) is not int
+        or supplied.get("schema") != 1
+        or supplied.get("kind") != RECLAIMED_ARM_EVIDENCE_KIND
+        or supplied.get("reclaimed_out") != ARM_OUT_RELATIVE
+        or supplied.get("graph_inventory_sha256")
+        != graph.get("aggregate_sha256")
+    ):
+        raise AliasCompatError("reclaimed ARM evidence schema/binding mismatch")
+    home_alias = _normalized_home_alias_from_receipt(
+        source, supplied.get("home_alias_compatibility")
+    )
+    logical_source = Path(home_alias["mappings"]["source"]["logical"])
+    arm_out = _in_source(
+        source, ARM_OUT_RELATIVE, "reclaimed ARM output", allow_missing_leaf=True
+    )
+    if arm_out.exists() or arm_out.is_symlink():
+        raise AliasCompatError("reclaimed ARM output still exists")
+    staged_app = _in_source(
+        source, ARM_STAGED_APP_RELATIVE, "staged ARM app"
+    )
+    if staged_app.is_symlink() or not staged_app.is_dir():
+        raise AliasCompatError("staged ARM app is missing or unsafe")
+
+    records = {}
+    values = {}
+    for label, relative, key in (
+        ("ARM stage receipt", ARM_STAGE_RECEIPT_RELATIVE, "stage_receipt"),
+        ("ARM reclaim receipt", ARM_RECLAIM_RECEIPT_RELATIVE, "reclaim_receipt"),
+    ):
+        path = _in_source(source, relative, label)
+        snapshot = _read_regular(path, label, max_bytes=MAX_JSON_BYTES)
+        if snapshot["mode"] & 0o022:
+            raise AliasCompatError("{} is group/world writable".format(label))
+        record = {"path": relative, **snapshot["record"]}
+        if supplied.get(key) != record:
+            raise AliasCompatError("{} evidence binding changed".format(label))
+        records[key] = record
+        values[key] = _json_no_duplicates(snapshot["data"], label)
+    stage = values["stage_receipt"]
+    reclaim = values["reclaim_receipt"]
+    stage_keys = {
+        "schema", "architecture", "source_root", "staged_app", "tree_sha256",
+        "app_allocated_bytes", "reclaim_requested_out", "reclaim_requested_bytes",
+        "arm_args_gn_sha256", "build_receipt_sha256", "upstream_no_work_probe",
+    }
+    reclaim_keys = {
+        "schema", "reclaim_complete", "source_root", "staged_app", "tree_sha256",
+        "reclaimed_out", "reclaimed_out_bytes", "arm_args_gn_sha256",
+        "stage_receipt_sha256",
+    }
+    expected_staged = logical_source / ARM_STAGED_APP_RELATIVE
+    expected_out = logical_source / ARM_OUT_RELATIVE
+    expected_ninja = (
+        logical_source / "third_party/dawn/third_party/ninja/ninja"
+    )
+    no_work = stage.get("upstream_no_work_probe") if isinstance(stage, dict) else None
+    if (
+        not isinstance(stage, dict)
+        or set(stage) != stage_keys
+        or type(stage.get("schema")) is not int
+        or stage.get("schema") not in (1, 2)
+        or stage.get("architecture") != "arm64"
+        or stage.get("source_root") != str(logical_source)
+        or stage.get("staged_app") != str(expected_staged)
+        or stage.get("reclaim_requested_out") != str(expected_out)
+        or type(stage.get("app_allocated_bytes")) is not int
+        or stage["app_allocated_bytes"] <= 0
+        or type(stage.get("reclaim_requested_bytes")) is not int
+        or stage["reclaim_requested_bytes"] <= 0
+        or not isinstance(stage.get("tree_sha256"), str)
+        or SHA256_RE.fullmatch(stage["tree_sha256"]) is None
+        or not isinstance(stage.get("arm_args_gn_sha256"), str)
+        or SHA256_RE.fullmatch(stage["arm_args_gn_sha256"]) is None
+        or not isinstance(stage.get("build_receipt_sha256"), str)
+        or SHA256_RE.fullmatch(stage["build_receipt_sha256"]) is None
+        or (stage.get("schema") == 1 and no_work is not None)
+        or (
+            stage.get("schema") == 2
+            and (
+                not isinstance(no_work, dict)
+                or set(no_work) != {
+                    "command", "returncode", "output_bytes", "output_sha256",
+                    "bounded_output_limit", "no_work",
+                }
+                or no_work.get("command") != [
+                    str(expected_ninja), "-n", "-C", ARM_OUT_RELATIVE,
+                    "chrome", "chrome/installer/mac:copies",
+                ]
+                or no_work.get("no_work") is not True
+                or type(no_work.get("returncode")) is not int
+                or no_work.get("returncode") != 0
+                or type(no_work.get("output_bytes")) is not int
+                or no_work.get("output_bytes", -1) < 0
+                or not isinstance(no_work.get("output_sha256"), str)
+                or SHA256_RE.fullmatch(no_work.get("output_sha256", "")) is None
+                or no_work.get("bounded_output_limit") != 1024 * 1024
+            )
+        )
+    ):
+        raise AliasCompatError("reclaimed ARM stage receipt contract mismatch")
+    if (
+        not isinstance(reclaim, dict)
+        or set(reclaim) != reclaim_keys
+        or type(reclaim.get("schema")) is not int
+        or reclaim.get("schema") != 1
+        or reclaim.get("reclaim_complete") is not True
+        or reclaim.get("source_root") != str(logical_source)
+        or reclaim.get("staged_app") != str(expected_staged)
+        or reclaim.get("reclaimed_out") != str(expected_out)
+        or reclaim.get("tree_sha256") != stage.get("tree_sha256")
+        or reclaim.get("arm_args_gn_sha256") != stage.get("arm_args_gn_sha256")
+        or reclaim.get("reclaimed_out_bytes") != stage.get("reclaim_requested_bytes")
+        or reclaim.get("stage_receipt_sha256")
+        != records["stage_receipt"]["sha256"]
+        or supplied.get("staged_app") != {
+            "path": ARM_STAGED_APP_RELATIVE,
+            "tree_sha256": reclaim.get("tree_sha256"),
+        }
+    ):
+        raise AliasCompatError("reclaimed ARM receipt chain mismatch")
+    if graph.get("args_gn", {}).get("path") != ARM_OUT_RELATIVE + "/args.gn" or (
+        graph.get("args_gn", {}).get("sha256")
+        != reclaim.get("arm_args_gn_sha256")
+    ):
+        raise AliasCompatError("reclaimed ARM graph args are not reclaim-bound")
+    return {**supplied, "home_alias_compatibility": home_alias}
+
+
 def _toolchain_paths(source, out_relative):
     out = _in_source(source, out_relative, "frozen Ninja output")
     if not out.is_dir():
@@ -762,7 +1108,7 @@ def capture_graph_inventory(source_root, build_ninja_relative):
     return {**core, "aggregate_sha256": _sha256(_canonical_bytes(core))}
 
 
-def validate_graph_inventory(source_root, supplied):
+def validate_graph_inventory(source_root, supplied, *, reclaimed_arm=None):
     source = _source_root(source_root)
     required = {
         "schema",
@@ -784,19 +1130,24 @@ def validate_graph_inventory(source_root, supplied):
         raise AliasCompatError("explicit graph inventory identity mismatch")
     if not isinstance(supplied.get("toolchains"), list) or not supplied["toolchains"]:
         raise AliasCompatError("explicit graph inventory has no toolchains")
-    build = _graph_entry(source, supplied["build_ninja"], "build.ninja")
+    entry_validator = (
+        _graph_entry_snapshot
+        if reclaimed_arm is not None
+        else lambda value, label: _graph_entry(source, value, label)
+    )
+    build = entry_validator(supplied["build_ninja"], "build.ninja")
     build_parts = PurePosixPath(build["path"]).parts
     if len(build_parts) != 3 or build_parts[0] != "out" or build_parts[-1] != "build.ninja":
         raise AliasCompatError("inventoried build.ninja path is not an output root")
     out_relative = PurePosixPath(build["path"]).parent.as_posix()
-    build_d = _graph_entry(source, supplied["build_ninja_d"], "build.ninja.d")
-    args_gn = _graph_entry(source, supplied["args_gn"], "args.gn")
+    build_d = entry_validator(supplied["build_ninja_d"], "build.ninja.d")
+    args_gn = entry_validator(supplied["args_gn"], "args.gn")
     if build_d["path"] != out_relative + "/build.ninja.d":
         raise AliasCompatError("build.ninja.d is not beside the inventoried graph")
     if args_gn["path"] != out_relative + "/args.gn":
         raise AliasCompatError("args.gn is not beside the inventoried graph")
     toolchains = [
-        _graph_entry(source, entry, "toolchain.ninja")
+        entry_validator(entry, "toolchain.ninja")
         for entry in supplied["toolchains"]
     ]
     paths = [entry["path"] for entry in toolchains]
@@ -808,7 +1159,7 @@ def validate_graph_inventory(source_root, supplied):
         for value in paths
     ):
         raise AliasCompatError("toolchain inventory paths are invalid")
-    if paths != _toolchain_paths(source, out_relative):
+    if reclaimed_arm is None and paths != _toolchain_paths(source, out_relative):
         raise AliasCompatError("toolchain inventory does not exactly cover the output")
     core = {
         "schema": 1,
@@ -821,7 +1172,14 @@ def validate_graph_inventory(source_root, supplied):
     aggregate = _sha256(_canonical_bytes(core))
     if supplied.get("aggregate_sha256") != aggregate:
         raise AliasCompatError("explicit graph inventory aggregate mismatch")
-    return {**core, "aggregate_sha256": aggregate}
+    validated = {**core, "aggregate_sha256": aggregate}
+    if reclaimed_arm is not None:
+        if out_relative != ARM_OUT_RELATIVE:
+            raise AliasCompatError(
+                "reclaimed evidence is only valid for the ARM output graph"
+            )
+        _reclaimed_arm_evidence_contract(source, reclaimed_arm, validated)
+    return validated
 
 
 def _canonical_home_alias_contract(logical_source, logical_developer):
@@ -1180,7 +1538,9 @@ def validate_trial_report(
     }
 
 
-def _transition_for_home_alias(source, graph, trial, home_alias):
+def _transition_for_home_alias(
+    source, graph, trial, home_alias, *, reclaimed_arm=None
+):
     try:
         workspace = home_alias["mappings"]["workspace"]["physical"]
         alias_source = home_alias["mappings"]["source"]["physical"]
@@ -1195,6 +1555,7 @@ def _transition_for_home_alias(source, graph, trial, home_alias):
         trial,
         require_complete=True,
         allowed_source_states=("pre", "post"),
+        reclaimed_arm=reclaimed_arm,
     )
     return {
         "path": contract["path"],
@@ -1247,8 +1608,19 @@ def _transition_consumed_link(source, transition, *, create=False, test_hook=Non
     }
 
 
-def _transition_with_link(source, graph, trial, home_alias, *, create=False, test_hook=None):
-    transition = _transition_for_home_alias(source, graph, trial, home_alias)
+def _transition_with_link(
+    source,
+    graph,
+    trial,
+    home_alias,
+    *,
+    create=False,
+    test_hook=None,
+    reclaimed_arm=None,
+):
+    transition = _transition_for_home_alias(
+        source, graph, trial, home_alias, reclaimed_arm=reclaimed_arm
+    )
     consumed = _transition_consumed_link(
         source, transition, create=create, test_hook=test_hook
     )
@@ -1324,7 +1696,9 @@ def _receipt_status(source, source_contract, graph, trial, home_alias, transitio
     return receipt_path, {"value": receipt, "record": snapshot["record"]}
 
 
-def receipt_contract(source_root, *, trial_path, failure_path):
+def receipt_contract(
+    source_root, *, trial_path, failure_path, reclaimed_arm=None
+):
     """Revalidate one existing receipt from only its embedded frozen evidence."""
     source = _source_root(source_root)
     source_contract = _source_contract(source)
@@ -1339,8 +1713,16 @@ def receipt_contract(source_root, *, trial_path, failure_path):
     receipt = _json_no_duplicates(snapshot["data"], "alias-root receipt")
     if not isinstance(receipt, dict):
         raise AliasCompatError("alias-root receipt root is not an object")
-    graph = validate_graph_inventory(source, receipt.get("graph_inventory"))
-    home_alias = validate_home_alias_receipt(source)
+    graph = validate_graph_inventory(
+        source, receipt.get("graph_inventory"), reclaimed_arm=reclaimed_arm
+    )
+    home_alias = (
+        validate_home_alias_receipt(source)
+        if reclaimed_arm is None
+        else _normalized_home_alias_from_receipt(
+            source, reclaimed_arm.get("home_alias_compatibility")
+        )
+    )
     trial_value, trial_record = load_json_report(trial_path, "Vite trial report")
     failure_value, failure_record = load_json_report(
         failure_path, "resume failure report"
@@ -1357,7 +1739,12 @@ def receipt_contract(source_root, *, trial_path, failure_path):
         home_alias=home_alias,
     )
     transition = _transition_with_link(
-        source, graph, trial, home_alias, create=False
+        source,
+        graph,
+        trial,
+        home_alias,
+        create=False,
+        reclaimed_arm=reclaimed_arm,
     )
     _validate_receipt(
         source, receipt, source_contract, graph, trial, home_alias, transition
@@ -1920,10 +2307,13 @@ def transition_receipt_contract(
     *,
     require_complete=True,
     allowed_source_states=("pre",),
+    reclaimed_arm=None,
 ):
     source = _source_root(source_root)
     workspace, _, _, _ = _workspace_binding(workspace_root, source)
-    current_graph = validate_graph_inventory(source, graph)
+    current_graph = validate_graph_inventory(
+        source, graph, reclaimed_arm=reclaimed_arm
+    )
     if not _strict_json_equal(current_graph, graph):
         raise AliasCompatError("transition frozen graph changed")
     try:
@@ -1988,7 +2378,9 @@ def transition_receipt_contract(
     }
 
 
-def preparation_dependency_tree_projection_contract(source_root, workspace_root):
+def preparation_dependency_tree_projection_contract(
+    source_root, workspace_root, *, reclaimed_arm=None
+):
     """Project only the audited onboarding POST back to its preparation PRE line.
 
     This validator deliberately does not call the HomeAlias contract.  It is the
@@ -2014,6 +2406,7 @@ def preparation_dependency_tree_projection_contract(source_root, workspace_root)
         trial,
         require_complete=True,
         allowed_source_states=("post",),
+        reclaimed_arm=reclaimed_arm,
     )
     consumed = _transition_consumed_link(source, transition, create=False)
     if consumed is None:

@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -383,6 +384,97 @@ class OnboardingAliasCompatTests(unittest.TestCase):
         self.assertEqual("pre", contract["state"])
         return contract["post"]
 
+    def reclaimed_arm_evidence(self):
+        if not self.receipt.exists():
+            self.execute()
+        home_alias = onboarding_alias_compat.validate_home_alias_receipt(
+            self.source
+        )
+        logical_source = Path(
+            home_alias["mappings"]["source"]["logical"]
+        )
+        staging = self.source / "out/FocusMacStaging"
+        staged_app = staging / "arm64/Focus Browser.app"
+        staged_app.mkdir(parents=True)
+        stage_path = self.source / onboarding_alias_compat.ARM_STAGE_RECEIPT_RELATIVE
+        reclaim_path = (
+            self.source / onboarding_alias_compat.ARM_RECLAIM_RECEIPT_RELATIVE
+        )
+        stage = {
+            "schema": 2,
+            "architecture": "arm64",
+            "source_root": str(logical_source),
+            "staged_app": str(
+                logical_source / onboarding_alias_compat.ARM_STAGED_APP_RELATIVE
+            ),
+            "tree_sha256": "8" * 64,
+            "app_allocated_bytes": 4096,
+            "reclaim_requested_out": str(
+                logical_source / onboarding_alias_compat.ARM_OUT_RELATIVE
+            ),
+            "reclaim_requested_bytes": 8192,
+            "arm_args_gn_sha256": self.inventory["args_gn"]["sha256"],
+            "build_receipt_sha256": "9" * 64,
+            "upstream_no_work_probe": {
+                "command": [
+                    str(
+                        logical_source
+                        / "third_party/dawn/third_party/ninja/ninja"
+                    ),
+                    "-n", "-C", onboarding_alias_compat.ARM_OUT_RELATIVE,
+                    "chrome", "chrome/installer/mac:copies",
+                ],
+                "returncode": 0,
+                "output_bytes": 1,
+                "output_sha256": "7" * 64,
+                "bounded_output_limit": 1024 * 1024,
+                "no_work": True,
+            },
+        }
+        stage_data = (
+            json.dumps(stage, ensure_ascii=True, indent=2, sort_keys=True) + "\n"
+        ).encode("ascii")
+        stage_path.write_bytes(stage_data)
+        reclaim = {
+            "schema": 1,
+            "reclaim_complete": True,
+            "source_root": str(logical_source),
+            "staged_app": stage["staged_app"],
+            "tree_sha256": stage["tree_sha256"],
+            "reclaimed_out": stage["reclaim_requested_out"],
+            "reclaimed_out_bytes": stage["reclaim_requested_bytes"],
+            "arm_args_gn_sha256": stage["arm_args_gn_sha256"],
+            "stage_receipt_sha256": hashlib.sha256(stage_data).hexdigest(),
+        }
+        reclaim_data = (
+            json.dumps(reclaim, ensure_ascii=True, indent=2, sort_keys=True)
+            + "\n"
+        ).encode("ascii")
+        reclaim_path.write_bytes(reclaim_data)
+        evidence = {
+            "schema": 1,
+            "kind": onboarding_alias_compat.RECLAIMED_ARM_EVIDENCE_KIND,
+            "home_alias_compatibility": home_alias,
+            "graph_inventory_sha256": self.inventory["aggregate_sha256"],
+            "stage_receipt": {
+                "path": onboarding_alias_compat.ARM_STAGE_RECEIPT_RELATIVE,
+                "bytes": len(stage_data),
+                "sha256": hashlib.sha256(stage_data).hexdigest(),
+            },
+            "reclaim_receipt": {
+                "path": onboarding_alias_compat.ARM_RECLAIM_RECEIPT_RELATIVE,
+                "bytes": len(reclaim_data),
+                "sha256": hashlib.sha256(reclaim_data).hexdigest(),
+            },
+            "staged_app": {
+                "path": onboarding_alias_compat.ARM_STAGED_APP_RELATIVE,
+                "tree_sha256": stage["tree_sha256"],
+            },
+            "reclaimed_out": onboarding_alias_compat.ARM_OUT_RELATIVE,
+        }
+        shutil.rmtree(self.out)
+        return evidence
+
     def test_pinned_patch_derives_exact_pre_and_post_hashes(self):
         contract = onboarding_alias_compat._source_contract(self.source)
         self.assertEqual("pre", contract["state"])
@@ -434,6 +526,122 @@ class OnboardingAliasCompatTests(unittest.TestCase):
         )
         self.assertEqual(result["receipt"]["sha256"], contract["sha256"])
         self.assertEqual(self.inventory, contract["value"]["graph_inventory"])
+
+    def test_reclaimed_contract_validates_without_live_arm_graph(self):
+        evidence = self.reclaimed_arm_evidence()
+        with self.assertRaisesRegex(
+            onboarding_alias_compat.AliasCompatError, "build.ninja is missing"
+        ):
+            onboarding_alias_compat.receipt_contract(
+                self.source,
+                trial_path=self.trial_path,
+                failure_path=self.failure_path,
+            )
+        with self.assertRaisesRegex(
+            onboarding_alias_compat.AliasCompatError, "build.ninja is missing"
+        ):
+            onboarding_alias_compat.preparation_dependency_tree_projection_contract(
+                self.source, self.physical_home / "workspace"
+            )
+        contract = onboarding_alias_compat.receipt_contract(
+            self.source,
+            trial_path=self.trial_path,
+            failure_path=self.failure_path,
+            reclaimed_arm=evidence,
+        )
+        self.assertEqual(self.inventory, contract["value"]["graph_inventory"])
+        projection = (
+            onboarding_alias_compat.preparation_dependency_tree_projection_contract(
+                self.source,
+                self.physical_home / "workspace",
+                reclaimed_arm=evidence,
+            )
+        )
+        self.assertEqual(
+            onboarding_alias_compat.PREPARATION_PROJECTION_KIND,
+            projection["kind"],
+        )
+
+    def test_reclaimed_contract_rejects_graph_and_reclaim_drift(self):
+        evidence = self.reclaimed_arm_evidence()
+        cases = []
+        wrong_aggregate = json.loads(json.dumps(evidence))
+        wrong_aggregate["graph_inventory_sha256"] = "0" * 64
+        cases.append(("evidence-aggregate", wrong_aggregate))
+        wrong_stage = json.loads(json.dumps(evidence))
+        wrong_stage["stage_receipt"]["sha256"] = "0" * 64
+        cases.append(("stage-receipt", wrong_stage))
+        wrong_tree = json.loads(json.dumps(evidence))
+        wrong_tree["staged_app"]["tree_sha256"] = "0" * 64
+        cases.append(("staged-tree", wrong_tree))
+        wrong_alias = json.loads(json.dumps(evidence))
+        wrong_alias["home_alias_compatibility"]["alias"]["inode"] += 1
+        cases.append(("current-alias", wrong_alias))
+        for name, changed in cases:
+            with self.subTest(case=name):
+                with self.assertRaises(onboarding_alias_compat.AliasCompatError):
+                    onboarding_alias_compat.receipt_contract(
+                        self.source,
+                        trial_path=self.trial_path,
+                        failure_path=self.failure_path,
+                        reclaimed_arm=changed,
+                    )
+
+    def test_reclaimed_contract_rejects_embedded_graph_shape_and_args_drift(self):
+        evidence = self.reclaimed_arm_evidence()
+        original = self.receipt.read_bytes()
+        for name, mutate in (
+            (
+                "toolchain-order",
+                lambda value: value["graph_inventory"]["toolchains"].reverse(),
+            ),
+            (
+                "args-hash",
+                lambda value: value["graph_inventory"]["args_gn"].__setitem__(
+                    "sha256", "0" * 64
+                ),
+            ),
+        ):
+            with self.subTest(case=name):
+                value = json.loads(original)
+                mutate(value)
+                core = {
+                    key: value["graph_inventory"][key]
+                    for key in (
+                        "schema", "kind", "build_ninja", "build_ninja_d",
+                        "args_gn", "toolchains",
+                    )
+                }
+                value["graph_inventory"]["aggregate_sha256"] = hashlib.sha256(
+                    json.dumps(
+                        core,
+                        ensure_ascii=True,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("ascii")
+                ).hexdigest()
+                evidence["graph_inventory_sha256"] = value["graph_inventory"][
+                    "aggregate_sha256"
+                ]
+                self.receipt.chmod(0o644)
+                self.receipt.write_text(
+                    json.dumps(value, ensure_ascii=True, indent=2, sort_keys=True)
+                    + "\n",
+                    encoding="ascii",
+                )
+                self.receipt.chmod(0o444)
+                try:
+                    with self.assertRaises(onboarding_alias_compat.AliasCompatError):
+                        onboarding_alias_compat.receipt_contract(
+                            self.source,
+                            trial_path=self.trial_path,
+                            failure_path=self.failure_path,
+                            reclaimed_arm=evidence,
+                        )
+                finally:
+                    self.receipt.chmod(0o644)
+                    self.receipt.write_bytes(original)
+                    self.receipt.chmod(0o444)
 
     def test_execute_recovers_already_post_source_without_rewriting_it(self):
         self.target.write_bytes(self.postimage())
