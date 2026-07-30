@@ -19,14 +19,17 @@ is rejected.
 - Xcode: 27 beta 4 (`27A5228h`), macOS SDK 27.0
 - deployment target: macOS 12.0
 - slices: native `arm64`, then `x86_64`
-- local parallelism: `-j10` on the 10-core, 16 GiB host, selected after live
-  memory-pressure checks
+- local parallelism: `-j8` on the 10-core, 16 GiB host, leaving headroom for
+  Chromium generators that create their own worker pools
 - outputs: `chrome` and `chrome/installer/mac:copies`
 - remote execution, Siso, updater, and branded entitlements: disabled
 - signing: Chromium's generated nested signing workflow with ad-hoc identity
   `-`, development mode, no provisioning profile, no notarization, and no
   Chromium packaging
 - packaging: the repository's verified local UDZO DMG packager
+- merge/sign/package Python: depot_tools' pinned CIPD CPython 3.11.8; Apple
+  `/usr/bin/python3` is rejected because Xcode 27 currently resolves it to
+  Python 3.9, while Chromium 150 signing requires `asyncio.TaskGroup`
 
 The final main executable must contain exactly `arm64` and `x86_64`. The
 Chromium universalizer input order is deliberately x86_64 first and arm64

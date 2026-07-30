@@ -38,7 +38,7 @@ GIB = 1024 ** 3
 SOFT_FLOOR_GIB = 35
 HARD_FLOOR_GIB = 30
 BOOTSTRAP_POST_GIB = 70
-BUILD_JOBS = 10
+BUILD_JOBS = 8
 POLL_SECONDS = 2.0
 
 APP_NAME = "Focus Browser.app"
@@ -175,6 +175,24 @@ NINJA_SHA256_BY_HOST = {
 NINJA_CIPD_INSTANCE_BY_HOST = {
     "arm64": "xem0_6s7Lt77xBhJ_IHxFsjQR7JYkGvswGG-nsrwSv0C",
     "x86_64": "mGbmncDR78ysAZaXITtasuAzLcxiloLxNzPgeS6pURkC",
+}
+PACKAGING_PYTHON_WRAPPER_RELATIVE = "depot_tools/python-bin/python3"
+PACKAGING_PYTHON_WRAPPER_SHA256 = (
+    "2d813fd16b24d1e466d6852b14f13552103262b706071b7066ef35143ff35348"
+)
+PACKAGING_PYTHON_RELDIR = (
+    "bootstrap-2@3.11.8.chromium.35_bin/python3/bin"
+)
+PACKAGING_PYTHON_RELDIR_SHA256 = (
+    "616f672408066fd076e3fdbfa7d506d7b765a7249035ea32e08860b0f1644842"
+)
+PACKAGING_PYTHON_VERSION = (3, 11, 8)
+PACKAGING_PYTHON_CIPD_VERSION = "version:2@3.11.8.chromium.35"
+PACKAGING_PYTHON_SHA256_BY_HOST = {
+    "arm64": "a4472b6fd8d81757bf30ded029f75902d4563a94a07fd6ff587e1788537c3fad",
+}
+PACKAGING_PYTHON_CIPD_INSTANCE_BY_HOST = {
+    "arm64": "dl9bUIZGl7f8pb51Mu3HiNfyngIPmCaS-aoII_eAklUC",
 }
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -573,6 +591,110 @@ def ninja_contract(source):
         "cipd_package": "infra/3pp/tools/ninja/{}".format(cipd_platform),
         "cipd_version": NINJA_CIPD_VERSION,
         "cipd_instance": NINJA_CIPD_INSTANCE_BY_HOST[machine],
+    }
+
+
+def packaging_python_contract(source):
+    """Bind packaging to Chromium's bootstrapped Python with TaskGroup support."""
+    machine = platform.machine().lower()
+    if machine == "aarch64":
+        machine = "arm64"
+    elif machine == "amd64":
+        machine = "x86_64"
+    if machine not in PACKAGING_PYTHON_SHA256_BY_HOST:
+        raise PipelineError(
+            "unsupported Mac host architecture for packaging Python: {}".format(
+                machine
+            )
+        )
+    depot = source.parent / "depot_tools"
+    wrapper = source.parent / PACKAGING_PYTHON_WRAPPER_RELATIVE
+    if wrapper.is_symlink() or not wrapper.is_file() or not os.access(str(wrapper), os.X_OK):
+        raise PipelineError("packaging Python wrapper is not a regular executable")
+    if sha256_file(wrapper) != PACKAGING_PYTHON_WRAPPER_SHA256:
+        raise PipelineError("packaging Python wrapper hash mismatch")
+    reldir_file = depot / "python3_bin_reldir.txt"
+    if reldir_file.is_symlink() or not reldir_file.is_file():
+        raise PipelineError("packaging Python relative-path marker is missing")
+    if (
+        sha256_file(reldir_file) != PACKAGING_PYTHON_RELDIR_SHA256
+        or reldir_file.read_text(encoding="utf-8") != PACKAGING_PYTHON_RELDIR
+    ):
+        raise PipelineError("packaging Python relative-path marker mismatch")
+    python_bin_dir = depot / PACKAGING_PYTHON_RELDIR
+    bootstrap_root = python_bin_dir.parent.parent
+    for path in (depot, bootstrap_root, bootstrap_root / "python3", python_bin_dir):
+        if path.is_symlink() or not path.is_dir():
+            raise PipelineError("packaging Python path is unsafe: {}".format(path))
+    executable = python_bin_dir / "python3.11"
+    if executable.is_symlink() or not executable.is_file() or not os.access(
+        str(executable), os.X_OK
+    ):
+        raise PipelineError("packaging Python is not a regular executable")
+    observed_hash = sha256_file(executable)
+    if observed_hash != PACKAGING_PYTHON_SHA256_BY_HOST[machine]:
+        raise PipelineError("packaging Python executable hash mismatch")
+    instance = PACKAGING_PYTHON_CIPD_INSTANCE_BY_HOST[machine]
+    cipd_package = "infra/3pp/tools/cpython3/mac-{}".format(machine)
+    cipd_slot = bootstrap_root / ".cipd/pkgs/0"
+    description = load_json(
+        cipd_slot / "description.json", "packaging Python CIPD description"
+    )
+    if description != {"subdir": "python3", "package_name": cipd_package}:
+        raise PipelineError("packaging Python CIPD package mismatch")
+    current = cipd_slot / "_current"
+    if not current.is_symlink() or os.readlink(str(current)) != instance:
+        raise PipelineError("packaging Python CIPD instance mismatch")
+    instance_dir = cipd_slot / instance
+    if instance_dir.is_symlink() or not instance_dir.is_dir():
+        raise PipelineError("packaging Python CIPD instance is missing")
+    environment = {
+        "PATH": SYSTEM_PATH,
+        "LANG": "C",
+        "LC_ALL": "C",
+        "TZ": "UTC",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    architectures = capture(
+        ["/usr/bin/lipo", "-archs", str(executable)], source, environment
+    ).split()
+    if architectures != [machine]:
+        raise PipelineError("packaging Python architecture mismatch")
+    probe = capture(
+        [
+            str(executable),
+            "-c",
+            (
+                "import asyncio,json,platform,sys;"
+                "print(json.dumps({'machine':platform.machine().lower(),"
+                "'task_group':hasattr(asyncio,'TaskGroup'),"
+                "'version':list(sys.version_info[:3])},sort_keys=True))"
+            ),
+        ],
+        source,
+        environment,
+    )
+    try:
+        identity = json.loads(probe)
+    except json.JSONDecodeError as exc:
+        raise PipelineError("packaging Python identity is not JSON") from exc
+    if identity != {
+        "machine": machine,
+        "task_group": True,
+        "version": list(PACKAGING_PYTHON_VERSION),
+    }:
+        raise PipelineError("packaging Python identity mismatch")
+    return {
+        "path": str(executable),
+        "wrapper": str(wrapper),
+        "wrapper_sha256": PACKAGING_PYTHON_WRAPPER_SHA256,
+        "architecture": machine,
+        "version": ".".join(str(value) for value in PACKAGING_PYTHON_VERSION),
+        "sha256": observed_hash,
+        "cipd_package": cipd_package,
+        "cipd_version": PACKAGING_PYTHON_CIPD_VERSION,
+        "cipd_instance": instance,
+        "asyncio_task_group": True,
     }
 
 
@@ -2464,6 +2586,8 @@ def merge_plan(source, developer_dir, dmg_output):
     )
     if sha256_file(universalizer) != focus_macos.PINNED_CHROMIUM_UNIVERSALIZER_SHA256:
         raise PipelineError("Chromium universalizer hash mismatch")
+    packaging_python = packaging_python_contract(source)
+    python = packaging_python["path"]
     unsigned_root = in_source(source, UNSIGNED_ROOT, "unsigned universal root")
     signed_root = in_source(source, SIGNED_ROOT, "signed universal root")
     if unsigned_root.exists() or unsigned_root.is_symlink():
@@ -2475,14 +2599,14 @@ def merge_plan(source, developer_dir, dmg_output):
     commands = {
         "copy_packaging": ["/usr/bin/ditto", str(packaging), str(unsigned_root / PACKAGING_NAME)],
         "universalize": [
-            "/usr/bin/python3",
+            python,
             str(universalizer),
             str(x64_app),
             str(arm_app),
             str(unsigned_app),
         ],
         "sign": [
-            "/usr/bin/python3",
+            python,
             str(unsigned_root / PACKAGING_NAME / "sign_chrome.py"),
             "--identity",
             "-",
@@ -2497,7 +2621,7 @@ def merge_plan(source, developer_dir, dmg_output):
             str(signed_root),
         ],
         "package": [
-            "/usr/bin/python3",
+            python,
             str(MACOS_DIR / "package_local_dmg.py"),
             "--app",
             str(signed_root / APP_NAME),
@@ -2515,11 +2639,23 @@ def merge_plan(source, developer_dir, dmg_output):
         "signed_root": str(signed_root),
         "dmg_output": str(output),
         "commands": commands,
+        "packaging_python": packaging_python,
         "developer_dir": str(developer_dir),
     }
 
 
 def execute_merge(source, developer_dir, plan):
+    current_python = packaging_python_contract(source)
+    if plan.get("packaging_python") != current_python:
+        raise PipelineError("packaging Python changed before merge execution")
+    for name in ("universalize", "sign", "package"):
+        command = plan.get("commands", {}).get(name)
+        if (
+            not isinstance(command, list)
+            or not command
+            or command[0] != current_python["path"]
+        ):
+            raise PipelineError("merge command does not use pinned packaging Python")
     arm_size = physical_size(plan["arm_app"])
     x64_size = physical_size(plan["x64_app"])
     # Universalization creates one combined app and signing creates another.
@@ -2535,6 +2671,8 @@ def execute_merge(source, developer_dir, plan):
     copied_sign = unsigned_root / PACKAGING_NAME / "sign_chrome.py"
     if sha256_file(copied_sign) != SIGN_CHROME_SHA256:
         raise PipelineError("copied Chromium signing script hash mismatch")
+    if packaging_python_contract(source) != current_python:
+        raise PipelineError("packaging Python changed before signing")
     run_monitored(plan["commands"]["sign"], source, environment)
     signed_app = Path(plan["signed_root"]) / APP_NAME
     app_report(signed_app, ("arm64", "x86_64"))
@@ -2563,6 +2701,8 @@ def execute_merge(source, developer_dir, plan):
     package_required = SOFT_FLOOR_GIB + 5 + (3 * universal_size) / GIB
     require_free(source, package_required, "DMG packaging source")
     require_free(output.parent, package_required, "DMG packaging output")
+    if packaging_python_contract(source) != current_python:
+        raise PipelineError("packaging Python changed before DMG packaging")
     run_monitored(
         plan["commands"]["package"],
         source,
@@ -2588,6 +2728,7 @@ def execute_merge(source, developer_dir, plan):
         "signing_performed": True,
         "notarization_performed": False,
         "local_only": True,
+        "packaging_python": current_python,
     }
     report["signed_app"] = str(signed_app)
     report["signed_app_tree_sha256"] = tree_digest(signed_app)

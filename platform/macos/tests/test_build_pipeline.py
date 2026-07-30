@@ -1130,6 +1130,88 @@ class BuildPipelineTests(unittest.TestCase):
         )
         self.assertEqual(2, capture.call_count)
 
+    def test_packaging_python_contract_requires_pinned_python311_task_group(self):
+        wrapper = self.depot / "python-bin/python3"
+        wrapper.parent.mkdir(parents=True)
+        wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        wrapper.chmod(0o755)
+        reldir = "bootstrap-test/python3/bin"
+        (self.depot / "python3_bin_reldir.txt").write_text(
+            reldir, encoding="utf-8"
+        )
+        executable = self.depot / reldir / "python3.11"
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"fixture pinned python 3.11\n")
+        executable.chmod(0o755)
+        instance = "fixture-cipd-instance"
+        slot = self.depot / "bootstrap-test/.cipd/pkgs/0"
+        slot.mkdir(parents=True)
+        self.write_json(
+            slot / "description.json",
+            {
+                "subdir": "python3",
+                "package_name": "infra/3pp/tools/cpython3/mac-arm64",
+            },
+        )
+        (slot / instance).mkdir()
+        (slot / "_current").symlink_to(instance)
+        identity = {
+            "machine": "arm64",
+            "task_group": True,
+            "version": [3, 11, 8],
+        }
+
+        def capture_identity(command, _cwd, _environment, **_kwargs):
+            if command[0] == "/usr/bin/lipo":
+                return "arm64"
+            return json.dumps(identity, sort_keys=True)
+
+        patches = (
+            mock.patch.object(
+                build_pipeline,
+                "PACKAGING_PYTHON_WRAPPER_SHA256",
+                build_pipeline.sha256_file(wrapper),
+            ),
+            mock.patch.object(
+                build_pipeline, "PACKAGING_PYTHON_RELDIR", reldir
+            ),
+            mock.patch.object(
+                build_pipeline,
+                "PACKAGING_PYTHON_RELDIR_SHA256",
+                build_pipeline.sha256_file(self.depot / "python3_bin_reldir.txt"),
+            ),
+            mock.patch.object(
+                build_pipeline,
+                "PACKAGING_PYTHON_SHA256_BY_HOST",
+                {"arm64": build_pipeline.sha256_file(executable)},
+            ),
+            mock.patch.object(
+                build_pipeline,
+                "PACKAGING_PYTHON_CIPD_INSTANCE_BY_HOST",
+                {"arm64": instance},
+            ),
+            mock.patch.object(build_pipeline.platform, "machine", return_value="arm64"),
+        )
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        with mock.patch.object(
+            build_pipeline, "capture", side_effect=capture_identity
+        ):
+            report = build_pipeline.packaging_python_contract(self.source)
+        self.assertEqual(str(executable), report["path"])
+        self.assertEqual("3.11.8", report["version"])
+        self.assertTrue(report["asyncio_task_group"])
+
+        identity["task_group"] = False
+        identity["version"] = [3, 9, 6]
+        with mock.patch.object(
+            build_pipeline, "capture", side_effect=capture_identity
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "identity mismatch"
+        ):
+            build_pipeline.packaging_python_contract(self.source)
+
     def test_bootstrap_is_hook_only_and_must_precede_preparation(self):
         (self.checkout / build_pipeline.TOOL_RECEIPT).unlink()
         (self.source / build_pipeline.PREPARATION_RECEIPT).unlink()
@@ -1186,7 +1268,7 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertTrue(receipt["hooks_complete"])
         self.assertFalse(receipt["build_executed"])
 
-    def test_build_plan_is_sequential_local_and_ten_jobs(self):
+    def test_build_plan_is_sequential_local_and_eight_jobs(self):
         out = self.source / build_pipeline.ARM_OUT
         out.mkdir(parents=True, exist_ok=True)
         xcode27 = self.write_json(
@@ -1219,7 +1301,7 @@ class BuildPipelineTests(unittest.TestCase):
             )
         self.assertEqual("build-arm64", plan["stage"])
         self.assertEqual(self.ninja_report, plan["ninja"])
-        self.assertEqual("-j10", plan["commands"][1][1])
+        self.assertEqual("-j8", plan["commands"][1][1])
         self.assertEqual(
             ["chrome", "chrome/installer/mac:copies"], plan["commands"][1][-2:]
         )
@@ -1456,6 +1538,10 @@ class BuildPipelineTests(unittest.TestCase):
     def test_merge_plan_uses_chromium_x64_first_and_ad_hoc_signing(self):
         _, x64_out, universalizer = self.prepare_merge_fixture()
         output = self.root / "FocusBrowser.dmg"
+        packaging_python = {
+            "path": str(self.root / "pinned-python3.11"),
+            "version": "3.11.8",
+        }
         real_hash = build_pipeline.sha256_file
 
         def pinned_hash(path):
@@ -1472,10 +1558,19 @@ class BuildPipelineTests(unittest.TestCase):
 
         with mock.patch.object(
             build_pipeline, "app_report", return_value={"architectures": ["arm64"]}
-        ), mock.patch.object(build_pipeline, "sha256_file", side_effect=pinned_hash):
+        ), mock.patch.object(
+            build_pipeline, "sha256_file", side_effect=pinned_hash
+        ), mock.patch.object(
+            build_pipeline,
+            "packaging_python_contract",
+            return_value=packaging_python,
+        ):
             plan = build_pipeline.merge_plan(
                 self.source, self.developer, output
             )
+        self.assertEqual(packaging_python, plan["packaging_python"])
+        for name in ("universalize", "sign", "package"):
+            self.assertEqual(packaging_python["path"], plan["commands"][name][0])
         universalize = plan["commands"]["universalize"]
         self.assertEqual(str(x64_out / build_pipeline.APP_NAME), universalize[-3])
         self.assertEqual(str(self.source / build_pipeline.STAGED_ARM_APP), universalize[-2])
@@ -1507,12 +1602,37 @@ class BuildPipelineTests(unittest.TestCase):
 
         with mock.patch.object(
             build_pipeline, "app_report", return_value={"architectures": ["arm64"]}
-        ), mock.patch.object(build_pipeline, "sha256_file", side_effect=pinned_hash), self.assertRaisesRegex(
+        ), mock.patch.object(
+            build_pipeline, "sha256_file", side_effect=pinned_hash
+        ), mock.patch.object(
+            build_pipeline,
+            "packaging_python_contract",
+            return_value={"path": str(self.root / "pinned-python3.11")},
+        ), self.assertRaisesRegex(
             build_pipeline.PipelineError, "absolute"
         ):
             build_pipeline.merge_plan(
                 self.source, self.developer, Path("relative.dmg")
             )
+
+    def test_merge_execution_rejects_python_command_drift_before_mutation(self):
+        python = {"path": str(self.root / "pinned-python3.11")}
+        unsigned = self.source / build_pipeline.UNSIGNED_ROOT
+        plan = {
+            "packaging_python": python,
+            "commands": {
+                "universalize": [python["path"], "universalizer.py"],
+                "sign": ["/usr/bin/python3", "sign_chrome.py"],
+                "package": [python["path"], "package_local_dmg.py"],
+            },
+        }
+        with mock.patch.object(
+            build_pipeline, "packaging_python_contract", return_value=python
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "pinned packaging Python"
+        ):
+            build_pipeline.execute_merge(self.source, self.developer, plan)
+        self.assertFalse(unsigned.exists())
 
     def test_recursive_reclamation_requires_explicit_flag(self):
         with self.assertRaisesRegex(build_pipeline.PipelineError, "allow-reclaim"):
