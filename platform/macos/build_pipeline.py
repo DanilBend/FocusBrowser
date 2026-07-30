@@ -8937,16 +8937,28 @@ def _fresh_x64_resume_preparation_binding(
     if before != after:
         raise PipelineError("resume3 fresh x86_64 receipt changed while reading")
     try:
-        canonical = json.dumps(
-            receipt,
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
+        # This is deliberately byte-for-byte the canonical encoding used by
+        # alias_resume_runner._canonical_bytes.  The runner records this hash
+        # before Ninja starts, so validating a different (compact) JSON
+        # serialization would reject honest completed runs.
+        canonical = (
+            json.dumps(
+                receipt,
+                ensure_ascii=True,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            + "\n"
         ).encode("ascii")
     except (TypeError, ValueError, UnicodeEncodeError) as exc:
         raise PipelineError("resume3 fresh x86_64 receipt is not canonical JSON") from exc
-    if supplied.get("contract_sha256") != hashlib.sha256(canonical).hexdigest():
+    canonical_sha256 = hashlib.sha256(canonical).hexdigest()
+    if (
+        supplied.get("contract_sha256") != canonical_sha256
+        or before["bytes"] != len(canonical)
+        or before["sha256"] != canonical_sha256
+    ):
         raise PipelineError("resume3 fresh x86_64 contract hash changed")
     expected_keys = {
         "schema", "stage", "source_root", "developer_dir", "legacy_root",

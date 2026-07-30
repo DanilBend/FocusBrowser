@@ -24,6 +24,7 @@ if str(PLATFORM_DIR) not in sys.path:
     sys.path.insert(0, str(PLATFORM_DIR))
 
 import build_pipeline
+import alias_resume_runner
 
 
 class BuildPipelineTests(unittest.TestCase):
@@ -5698,9 +5699,11 @@ class BuildPipelineTests(unittest.TestCase):
             "offline": True,
             "network_operations": 0,
         }
-        receipt_path = self.write_json(
-            self.source / build_pipeline.FRESH_X64_PREPARATION_RECEIPT,
-            receipt,
+        receipt_path = self.source / build_pipeline.FRESH_X64_PREPARATION_RECEIPT
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.write_text(
+            json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
         )
         supplied = {
             "receipt": {
@@ -5709,13 +5712,7 @@ class BuildPipelineTests(unittest.TestCase):
                 "sha256": build_pipeline.sha256_file(receipt_path),
             },
             "contract_sha256": hashlib.sha256(
-                json.dumps(
-                    receipt,
-                    ensure_ascii=True,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    allow_nan=False,
-                ).encode("ascii")
+                alias_resume_runner._canonical_bytes(receipt)
             ).hexdigest(),
         }
         pre_run = {
