@@ -8,6 +8,7 @@ import stat
 import sys
 import tempfile
 import time
+import types
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -253,6 +254,207 @@ class AliasResumeRunnerTests(unittest.TestCase):
         )
         self.assertFalse(parsed.execute)
         self.assertFalse(parsed.confirm_official_resume3)
+        self.assertEqual("arm64", parsed.architecture)
+
+    def test_x64_plan_uses_fresh_contract_fixed_out_stem_targets_and_j8(self):
+        x64_out = self.source / runner.ARCHITECTURE_CONFIGS["x64"]["out_relative"]
+        x64_out.mkdir()
+        fresh_path = self.source / "out/FocusMacFreshX64Preparation.json"
+        fresh_value = {"schema": 1, "architecture": "x64", "fresh": True}
+        fresh_path.write_text(json.dumps(fresh_value), encoding="utf-8")
+        fresh_path.chmod(0o644)
+        context = types.SimpleNamespace(
+            logical_workspace=self.workspace,
+            physical_workspace=self.workspace,
+            physical_source=self.source,
+            physical_developer=self.developer,
+        )
+        with mock.patch.object(runner.sys, "platform", "darwin"), mock.patch.object(
+            runner.build_pipeline, "resolve_source", return_value=self.source
+        ), mock.patch.object(
+            runner.build_pipeline,
+            "home_alias_receipt_contract",
+            return_value=(self.source / "HomeAlias.json", self.alias_receipt),
+        ), mock.patch.object(
+            runner.build_pipeline, "_recorded_alias_context", return_value=context
+        ), mock.patch.object(
+            runner.build_pipeline,
+            "fresh_x64_preparation_contract",
+            return_value=(fresh_path, fresh_value),
+            create=True,
+        ) as fresh_contract, mock.patch.object(
+            runner.build_pipeline, "preparation_contract"
+        ) as legacy_preparation, mock.patch.object(
+            runner.build_pipeline, "onboarding_alias_root_receipt_contract"
+        ) as legacy_onboarding, mock.patch.object(
+            runner.build_pipeline, "ninja_contract", return_value=self.ninja_contract
+        ):
+            plan = runner.create_plan(self.source, self.developer, "x64")
+        fresh_contract.assert_called_once_with(self.source, self.developer)
+        legacy_preparation.assert_not_called()
+        legacy_onboarding.assert_not_called()
+        self.assertEqual("x64", plan.architecture)
+        self.assertEqual("out/FocusMacX64", plan.out_relative)
+        self.assertEqual(x64_out, plan.out)
+        self.assertEqual(runner.X64_RUN_STEM, plan.run_stem)
+        self.assertTrue(plan.run_stem.startswith("build-x64-resume3-"))
+        self.assertEqual(
+            (str(self.autoninja), "-j8", "-C", "out/FocusMacX64", *runner.TARGETS),
+            plan.argv,
+        )
+        self.assertNotIn("gn gen", plan.shell_script)
+        self.assertNotRegex(plan.shell_script, r"https?://")
+        self.assertEqual(
+            runner.X64_RUN_STEM + runner.EVIDENCE_SUFFIXES["final"],
+            plan.evidence["final"].logical.name,
+        )
+        self.assertEqual(str(fresh_path), plan.fresh_x64_preparation["receipt"]["path"])
+
+    def test_x64_records_are_architecture_and_fresh_receipt_bound(self):
+        x64_out = self.source / runner.ARCHITECTURE_CONFIGS["x64"]["out_relative"]
+        x64_out.mkdir()
+        for name, data in (
+            ("build.ninja", b"subninja toolchain.ninja\n"),
+            ("toolchain.ninja", b"rule fixture\n"),
+        ):
+            (x64_out / name).write_bytes(data)
+        fresh = {
+            "receipt": {"path": "/fresh.json", "sha256": "a" * 64},
+            "contract_sha256": "b" * 64,
+        }
+        plan = replace(
+            self.plan,
+            architecture="x64",
+            out=x64_out,
+            physical_out=x64_out,
+            out_relative="out/FocusMacX64",
+            run_stem=runner.X64_RUN_STEM,
+            fresh_x64_preparation=fresh,
+        )
+        stdout_initial = {
+            "device": 1,
+            "inode": 2,
+            "uid": os.getuid(),
+            "gid": os.getgid(),
+            "mode": 0o644,
+            "bytes": 0,
+            "mtime_ns": 3,
+            "birth_time_ns": 4,
+        }
+        pre = runner._pre_launch_value(plan, stdout_initial)
+        self.assertEqual("x64", pre["architecture"])
+        self.assertEqual(runner.X64_RUN_STEM, pre["run_id"])
+        self.assertEqual(fresh, pre["fresh_x64_preparation"])
+        self.assertIsNone(pre["pre_run"]["ninja_log"])
+        self.assertIsNone(pre["pre_run"]["ninja_deps"])
+        (x64_out / ".ninja_log").write_bytes(b"unexpected stale history\n")
+        with self.assertRaisesRegex(
+            runner.RunnerError, "fresh x64 pre-run Ninja history is not absent"
+        ):
+            runner._pre_launch_value(plan, stdout_initial)
+        (x64_out / ".ninja_log").unlink()
+        process = types.SimpleNamespace(pid=123)
+        with mock.patch.object(runner, "_stdout_live_snapshot", return_value={}):
+            primary = runner._primary_value(
+                plan, process, {"sha256": "c" * 64}, [], stdout_initial
+            )
+        self.assertEqual("x64", primary["architecture"])
+        member_base = {"ppid": 1, "pgid": 123}
+        supplement_primary = {
+            "process_group": {
+                "members": [
+                    {**member_base, "role": role, "pid": pid}
+                    for role, pid in (("autoninja_python", 10), ("pinned_ninja", 11))
+                ]
+            }
+        }
+        python_bin = (
+            plan.source.parent
+            / "depot_tools/python-bin/.."
+            / runner.build_pipeline.PACKAGING_PYTHON_RELDIR
+        )
+        observed_path = os.pathsep.join(
+            (str(python_bin), str(python_bin / "Scripts"), plan.environment["PATH"])
+        )
+        raw_environment = "PATH={} PWD={} {}".format(
+            observed_path,
+            plan.physical_source,
+            " ".join(
+                "{}={}".format(name, plan.environment[name])
+                for name in runner.BASE_ENVIRONMENT_ORDER
+                if name != "PATH"
+            ),
+        )
+        with mock.patch.object(runner, "_ps_eww", return_value=raw_environment):
+            supplement = runner._supplement_value(
+                plan, supplement_primary, {"sha256": "d" * 64}
+            )
+        self.assertEqual("x64", supplement["architecture"])
+        spine = [
+            {
+                "role": role,
+                "pid": index + 20,
+                "ppid": 1,
+                "pgid": 123,
+                "started_at_ns": 1,
+                "cwd_physical": str(plan.physical_source),
+                "executable": "/fixture/executable",
+                "ps_command": "fixture",
+            }
+            for index, role in enumerate(runner.EXPECTED_ROLES)
+        ]
+        revalidation_primary = {"process_group": {"members": spine}}
+        with mock.patch.object(
+            runner, "_capture_spine", return_value=spine
+        ), mock.patch.object(
+            runner, "_script_identity", return_value={}
+        ), mock.patch.object(
+            runner, "_stdout_live_snapshot", return_value={}
+        ):
+            revalidation = runner._revalidation_value(
+                plan,
+                process,
+                {"sha256": "1" * 64},
+                revalidation_primary,
+                {"sha256": "2" * 64},
+                {"sha256": "3" * 64},
+                stdout_initial,
+            )
+        self.assertEqual("x64", revalidation["architecture"])
+        exit_value = runner._exit_status_value(
+            plan,
+            process,
+            0,
+            10,
+            {"sha256": "c" * 64},
+            None,
+            None,
+            None,
+            {},
+            {},
+            "completed",
+            None,
+            {},
+        )
+        self.assertEqual("x64", exit_value["architecture"])
+        final = runner._final_record(
+            plan,
+            process,
+            1,
+            {"observed_at_ns": 2},
+            {"logical": {}, "identity": {}, "pre_run": {}, "runner": {}, "stdout_log": stdout_initial},
+            {"sha256": "1" * 64},
+            {"sha256": "2" * 64},
+            {"sha256": "3" * 64},
+            {"sha256": "4" * 64},
+            {"stdout_log": {}, "post_run": {}, "wait_observation": {"wait_returned_at_ns": 5, "returncode": 0}},
+            {"sha256": "5" * 64},
+        )
+        self.assertEqual("x64", final["architecture"])
+        self.assertEqual(fresh, final["fresh_x64_preparation"])
+        report = runner._plan_report(plan)
+        self.assertEqual("x64", report["architecture"])
+        self.assertEqual(fresh, report["fresh_x64_preparation"])
 
     def test_real_launched_child_inherits_no_runner_signal_mask_and_accepts_term(self):
         report = self.root / "child-signal-mask.json"

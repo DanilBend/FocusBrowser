@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-shot, provenance-bound arm64 HomeAlias resume runner.
+"""One-shot, provenance-bound HomeAlias raw-Ninja resume runner.
 
 This module owns the process from pre-launch evidence through ``Popen.wait``.
 It has one fixed run identity, one fixed j8 Ninja command, and no GN or network
@@ -37,6 +37,11 @@ import build_pipeline  # pylint: disable=wrong-import-position
 RUN_STEM = "build-arm64-resume3-home-alias-20260730T170000MSK"
 ARCHITECTURE = "arm64"
 OUT_RELATIVE = "out/FocusMacArm64"
+X64_RUN_STEM = "build-x64-resume3-home-alias-20260730T203200MSK"
+ARCHITECTURE_CONFIGS = {
+    "arm64": {"out_relative": OUT_RELATIVE, "run_stem": RUN_STEM},
+    "x64": {"out_relative": "out/FocusMacX64", "run_stem": X64_RUN_STEM},
+}
 TARGETS = ("chrome", "chrome/installer/mac:copies")
 JOBS = 8
 MAX_CAPTURE_BYTES = 4 * 1024 * 1024
@@ -166,6 +171,10 @@ class RunPlan:
     environment: dict
     shell_script: str
     evidence: dict
+    architecture: str = ARCHITECTURE
+    out_relative: str = OUT_RELATIVE
+    run_stem: str = RUN_STEM
+    fresh_x64_preparation: dict = None
 
 
 def _canonical_bytes(value):
@@ -550,10 +559,19 @@ def _freeze_stdout(
     return {**snapshot, "path": str(pair.logical)}
 
 
-def _pre_run_snapshot(out):
+def _pre_run_snapshot(out, require_absent_history=False):
+    if require_absent_history:
+        for name in (".ninja_log", ".ninja_deps"):
+            if os.path.lexists(str(out / name)):
+                raise RunnerError("fresh x64 pre-run Ninja history is not absent")
+        history = {"ninja_log": None, "ninja_deps": None}
+    else:
+        history = {
+            "ninja_log": build_pipeline._regular_file_snapshot(out / ".ninja_log"),
+            "ninja_deps": build_pipeline._regular_file_snapshot(out / ".ninja_deps"),
+        }
     return {
-        "ninja_log": build_pipeline._regular_file_snapshot(out / ".ninja_log"),
-        "ninja_deps": build_pipeline._regular_file_snapshot(out / ".ninja_deps"),
+        **history,
         "build_ninja": build_pipeline._regular_file_snapshot(out / "build.ninja"),
         "toolchain_inventory": build_pipeline._toolchain_inventory(out),
     }
@@ -597,11 +615,11 @@ def _shell_script(argv, environment, physical_stdout):
     return script
 
 
-def _fixed_evidence(logical_logs, physical_logs):
+def _fixed_evidence(logical_logs, physical_logs, run_stem=RUN_STEM):
     evidence = {}
     for name, suffix in EVIDENCE_SUFFIXES.items():
-        logical = logical_logs / (RUN_STEM + suffix)
-        physical = physical_logs / (RUN_STEM + suffix)
+        logical = logical_logs / (run_stem + suffix)
+        physical = physical_logs / (run_stem + suffix)
         _safe_fixed_pair(
             logical_logs, physical_logs, logical, physical, name + " evidence"
         )
@@ -609,9 +627,14 @@ def _fixed_evidence(logical_logs, physical_logs):
     return evidence
 
 
-def create_plan(source_root, developer_dir):
+def create_plan(source_root, developer_dir, architecture=ARCHITECTURE):
     if sys.platform != "darwin":
         raise RunnerError("official alias resume runner is macOS-only")
+    if type(architecture) is not str or architecture not in ARCHITECTURE_CONFIGS:
+        raise RunnerError("architecture must be exactly arm64 or x64")
+    configuration = ARCHITECTURE_CONFIGS[architecture]
+    out_relative = configuration["out_relative"]
+    run_stem = configuration["run_stem"]
     source_input = Path(os.path.abspath(os.path.expanduser(str(source_root))))
     source = build_pipeline.resolve_source(
         source_input, allow_recorded_home_alias=True
@@ -619,10 +642,33 @@ def create_plan(source_root, developer_dir):
     developer = Path(os.path.abspath(os.path.expanduser(str(developer_dir))))
     alias_path, alias = build_pipeline.home_alias_receipt_contract(source, developer)
     context = build_pipeline._recorded_alias_context(source, developer)
-    build_pipeline.preparation_contract(source, alias_context=context)
-    build_pipeline.onboarding_alias_root_receipt_contract(source)
+    fresh_x64_preparation = None
+    if architecture == "x64":
+        receipt_path, receipt = build_pipeline.fresh_x64_preparation_contract(
+            source, developer
+        )
+        receipt_snapshot = _snapshot_regular(
+            receipt_path,
+            "fresh x64 preparation receipt",
+            max_bytes=build_pipeline.MAX_RECEIPT_BYTES,
+        )
+        if receipt_snapshot["mode"] & 0o022:
+            raise RunnerError(
+                "fresh x64 preparation receipt is group/world writable"
+            )
+        fresh_x64_preparation = {
+            "receipt": {
+                "path": str(receipt_path),
+                "bytes": receipt_snapshot["bytes"],
+                "sha256": receipt_snapshot["sha256"],
+            },
+            "contract_sha256": _sha256_bytes(_canonical_bytes(receipt)),
+        }
+    else:
+        build_pipeline.preparation_contract(source, alias_context=context)
+        build_pipeline.onboarding_alias_root_receipt_contract(source)
     ninja = build_pipeline.ninja_contract(source)
-    if ninja.get("architecture") != ARCHITECTURE:
+    if ninja.get("architecture") != "arm64":
         raise RunnerError("resume3 requires the pinned arm64 host Ninja")
     workspace = context.logical_workspace
     physical_workspace = context.physical_workspace
@@ -636,7 +682,7 @@ def create_plan(source_root, developer_dir):
         physical_logs_stat.st_ino,
     ):
         raise RunnerError("canonical log directories are not the same inode")
-    evidence = _fixed_evidence(logs, physical_logs)
+    evidence = _fixed_evidence(logs, physical_logs, run_stem)
     for name, pair in evidence.items():
         if os.path.lexists(str(pair.logical)) or os.path.lexists(str(pair.physical)):
             raise RunnerError("fixed {} evidence already exists".format(name))
@@ -645,16 +691,25 @@ def create_plan(source_root, developer_dir):
         )
         if os.path.lexists(str(temporary)):
             raise RunnerError("fixed {} temporary evidence exists".format(name))
-    out = source / OUT_RELATIVE
-    physical_out = context.physical_source / OUT_RELATIVE
-    _safe_fixed_pair(source, context.physical_source, out, physical_out, "arm64 out")
-    logical_out_stat = _ensure_safe_directory(out, "logical arm64 out")
-    physical_out_stat = _ensure_safe_directory(physical_out, "physical arm64 out")
+    out = source / out_relative
+    physical_out = context.physical_source / out_relative
+    _safe_fixed_pair(
+        source, context.physical_source, out, physical_out,
+        "{} out".format(architecture),
+    )
+    logical_out_stat = _ensure_safe_directory(
+        out, "logical {} out".format(architecture)
+    )
+    physical_out_stat = _ensure_safe_directory(
+        physical_out, "physical {} out".format(architecture)
+    )
     if (logical_out_stat.st_dev, logical_out_stat.st_ino) != (
         physical_out_stat.st_dev,
         physical_out_stat.st_ino,
     ):
-        raise RunnerError("arm64 output logical/physical inode mismatch")
+        raise RunnerError(
+            "{} output logical/physical inode mismatch".format(architecture)
+        )
     autoninja = source.parent / "depot_tools/autoninja"
     physical_autoninja = context.physical_source.parent / "depot_tools/autoninja"
     if (
@@ -668,7 +723,7 @@ def create_plan(source_root, developer_dir):
         str(autoninja),
         "-j8",
         "-C",
-        OUT_RELATIVE,
+        out_relative,
         *TARGETS,
     )
     environment = _base_environment(
@@ -697,6 +752,10 @@ def create_plan(source_root, developer_dir):
         environment=environment,
         shell_script=script,
         evidence=evidence,
+        architecture=architecture,
+        out_relative=out_relative,
+        run_stem=run_stem,
+        fresh_x64_preparation=fresh_x64_preparation,
     )
 
 
@@ -718,12 +777,12 @@ def _identity_value(plan):
 
 def _pre_launch_value(plan, stdout_initial):
     runner_snapshot = _snapshot_regular(Path(__file__).resolve(), "resume runner")
-    return {
+    value = {
         "schema": 1,
         "kind": "focus-macos-alias-resume3-pre-launch",
-        "run_id": RUN_STEM,
+        "run_id": plan.run_stem,
         "created_at_ns": time.time_ns(),
-        "architecture": ARCHITECTURE,
+        "architecture": plan.architecture,
         "logical": {
             "home": plan.alias_receipt["logical_home"],
             "workspace": str(plan.workspace),
@@ -740,7 +799,9 @@ def _pre_launch_value(plan, stdout_initial):
             "jobs": JOBS,
         },
         "identity": _identity_value(plan),
-        "pre_run": _pre_run_snapshot(plan.out),
+        "pre_run": _pre_run_snapshot(
+            plan.out, require_absent_history=plan.architecture == "x64"
+        ),
         "stdout_log": {
             "logical_path": str(plan.evidence["stdout"].logical),
             "physical_path": str(plan.evidence["stdout"].physical),
@@ -770,6 +831,9 @@ def _pre_launch_value(plan, stdout_initial):
             "final_success_requires_popen_wait_zero": True,
         },
     }
+    if plan.architecture == "x64":
+        value["fresh_x64_preparation"] = plan.fresh_x64_preparation
+    return value
 
 
 def validate_pre_launch(
@@ -1118,10 +1182,10 @@ def _primary_value(plan, process, pre_publication, members, stdout_initial):
     dynamic_descendants = [
         item for item in members if item["role"] == "dynamic_descendant"
     ]
-    return {
+    value = {
         "schema": 2,
         "kind": "focus-macos-alias-raw-ninja-live-process-chain-observation",
-        "run_id": RUN_STEM,
+        "run_id": plan.run_stem,
         "observed_at_ns": observed_at,
         "observation_methods": ["ps", "lsof", "proc_pidpath"],
         "pre_launch": {
@@ -1135,6 +1199,9 @@ def _primary_value(plan, process, pre_publication, members, stdout_initial):
         },
         "stdout_log_live_snapshot": stdout,
     }
+    if plan.architecture == "x64":
+        value["architecture"] = plan.architecture
+    return value
 
 
 def _extract_environment(raw, name):
@@ -1193,10 +1260,10 @@ def _supplement_value(plan, primary, primary_publication):
                 "ps_eww_sha256": _sha256_bytes(raw.encode("utf-8")),
             }
         )
-    return {
+    value = {
         "schema": 2,
         "kind": "focus-macos-alias-raw-ninja-live-process-chain-observation-supplement",
-        "run_id": RUN_STEM,
+        "run_id": plan.run_stem,
         "observed_at_ns": time.time_ns(),
         "observation_method": "ps eww",
         "primary_observation": {
@@ -1205,6 +1272,9 @@ def _supplement_value(plan, primary, primary_publication):
         },
         "processes": processes,
     }
+    if plan.architecture == "x64":
+        value["architecture"] = plan.architecture
+    return value
 
 
 def _script_identity(path, label):
@@ -1265,10 +1335,10 @@ def _revalidation_value(
         ),
         _script_identity(Path(__file__).resolve(), "resume runner script"),
     ]
-    return {
+    value = {
         "schema": 2,
         "kind": "focus-macos-alias-raw-ninja-live-process-chain-revalidation",
-        "run_id": RUN_STEM,
+        "run_id": plan.run_stem,
         "capture_started_at_ns": started_at,
         "capture_finished_at_ns": time.time_ns(),
         "observation_methods": ["ps", "lsof", "proc_pidpath"],
@@ -1295,6 +1365,9 @@ def _revalidation_value(
         "script_identities": scripts,
         "stdout_log_live_snapshot": _stdout_live_snapshot(plan, stdout_initial),
     }
+    if plan.architecture == "x64":
+        value["architecture"] = plan.architecture
+    return value
 
 
 def _wait_until_pre_launch_is_historical(pre_publication):
@@ -1782,10 +1855,10 @@ def _exit_status_value(
         and stdout_final is not None
         and post_run is not None
     )
-    return {
+    value = {
         "schema": 2,
         "kind": "focus-macos-alias-resume3-popen-exit-status",
-        "run_id": RUN_STEM,
+        "run_id": plan.run_stem,
         "pid": process.pid,
         "pgid": process.pid,
         "wait_observation": {
@@ -1810,6 +1883,9 @@ def _exit_status_value(
         "explicit_gn_gen_command": False,
         "network_operations": 0,
     }
+    if plan.architecture == "x64":
+        value["architecture"] = plan.architecture
+    return value
 
 
 def validate_exit_status(
@@ -1840,18 +1916,22 @@ def validate_exit_status(
         "explicit_gn_gen_command",
         "network_operations",
     }
+    if plan.architecture == "x64":
+        root_keys.add("architecture")
     if not isinstance(value, dict) or set(value) != root_keys:
         raise RunnerError("runner-owned exit-status evidence mismatch")
     scalar_expected = {
         "schema": 2,
         "kind": "focus-macos-alias-resume3-popen-exit-status",
-        "run_id": RUN_STEM,
+        "run_id": plan.run_stem,
         "pid": process.pid,
         "pgid": process.pid,
         "pipefail": True,
         "explicit_gn_gen_command": False,
         "network_operations": 0,
     }
+    if plan.architecture == "x64":
+        scalar_expected["architecture"] = plan.architecture
     for name, expected in scalar_expected.items():
         _strict_equal(value[name], expected, "exit-status.{}".format(name))
     if type(observed_returncode) is not int:
@@ -2292,10 +2372,10 @@ def _final_record(
         "post_run": exit_value["post_run"],
         "explicit_gn_gen_command": False,
     }
-    return {
+    value = {
         "schema": 3,
         "kind": "focus-macos-alias-raw-ninja-execution",
-        "architecture": ARCHITECTURE,
+        "architecture": plan.architecture,
         "logical": pre_value["logical"],
         "process": {
             "pid": process.pid,
@@ -2337,6 +2417,9 @@ def _final_record(
         },
         "runner": pre_value["runner"],
     }
+    if plan.architecture == "x64":
+        value["fresh_x64_preparation"] = plan.fresh_x64_preparation
+    return value
 
 
 def _validate_final_or_remove(plan, final_publication):
@@ -2345,7 +2428,7 @@ def _validate_final_or_remove(plan, final_publication):
         plan.alias_receipt,
         plan.source,
         plan.developer_dir,
-        ARCHITECTURE,
+        plan.architecture,
         plan.out,
         plan.ninja,
     )
@@ -2387,7 +2470,9 @@ def execute(plan, execute_requested, confirmation, test_hook=None):
             "official resume3 requires --execute and --confirm-official-resume3"
         )
     # Re-plan immediately so no caller can execute stale paths or identities.
-    expected = create_plan(plan.source, plan.developer_dir)
+    expected = create_plan(
+        plan.source, plan.developer_dir, architecture=plan.architecture
+    )
     if expected != plan:
         raise RunnerError("official resume3 plan changed before execution")
     build_pipeline.require_free(plan.source, build_pipeline.SOFT_FLOOR_GIB, "resume3")
@@ -2604,7 +2689,7 @@ def execute(plan, execute_requested, confirmation, test_hook=None):
         plan.evidence["final"], final_value, "final schema3 execution record"
     )
     validation = _validate_final_or_remove(plan, final_publication)
-    return {
+    result = {
         "stage": "official-resume3-run",
         "record": {
             "path": str(plan.evidence["final"].logical),
@@ -2619,12 +2704,17 @@ def execute(plan, execute_requested, confirmation, test_hook=None):
         "explicit_gn_gen_command": False,
         "network_operations": 0,
     }
+    if plan.architecture == "x64":
+        result.update(
+            {"architecture": plan.architecture, "run_id": plan.run_stem}
+        )
+    return result
 
 
 def _plan_report(plan):
-    return {
+    report = {
         "stage": "official-resume3-run",
-        "run_id": RUN_STEM,
+        "run_id": plan.run_stem,
         "source_root": str(plan.source),
         "developer_dir": str(plan.developer_dir),
         "out": str(plan.out),
@@ -2637,6 +2727,10 @@ def _plan_report(plan):
         "network_operations": 0,
         "read_only": True,
     }
+    if plan.architecture == "x64":
+        report["architecture"] = plan.architecture
+        report["fresh_x64_preparation"] = plan.fresh_x64_preparation
+    return report
 
 
 def parser():
@@ -2645,6 +2739,9 @@ def parser():
     run = subparsers.add_parser("run")
     run.add_argument("--source-root", required=True)
     run.add_argument("--developer-dir", required=True)
+    run.add_argument(
+        "--architecture", choices=tuple(ARCHITECTURE_CONFIGS), default=ARCHITECTURE
+    )
     run.add_argument("--execute", action="store_true")
     run.add_argument("--confirm-official-resume3", action="store_true")
     return root
@@ -2653,7 +2750,9 @@ def parser():
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
-        plan = create_plan(args.source_root, args.developer_dir)
+        plan = create_plan(
+            args.source_root, args.developer_dir, architecture=args.architecture
+        )
         if not args.execute:
             report = _plan_report(plan)
         else:
