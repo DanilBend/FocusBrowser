@@ -5846,6 +5846,194 @@ class BuildPipelineTests(unittest.TestCase):
             )
         )
 
+    def test_resume4_profile_is_fixed_to_j6_and_the_dedicated_runner(self):
+        record = {"prior_memory_abort": {"fixture": True}}
+        accepted = Path(
+            build_pipeline.X64_MEMORY_SAFE_RESUME_STEM + ".execution.json"
+        )
+        profile = build_pipeline._resume3_run_profile(accepted, record, "x64")
+        self.assertTrue(profile["memory_safe_resume"])
+        self.assertEqual(6, profile["jobs"])
+        self.assertEqual(
+            "x64_abort_resume_runner.py", Path(profile["runner"]).name
+        )
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "resume4 run"):
+            build_pipeline._resume3_run_profile(
+                Path("build-x64-resume4-forged.execution.json"), record, "x64"
+            )
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "resume3 run"):
+            build_pipeline._resume3_run_profile(accepted, {}, "x64")
+        ordinary = build_pipeline._resume3_run_profile(
+            Path("build-x64-resume3-fixture.execution.json"), {}, "x64"
+        )
+        self.assertFalse(ordinary["memory_safe_resume"])
+        self.assertEqual(build_pipeline.BUILD_JOBS, ordinary["jobs"])
+        self.assertEqual("alias_resume_runner.py", Path(ordinary["runner"]).name)
+
+    def test_resume4_history_requires_abort_prefix_and_changed_dependencies(self):
+        out = self.source / build_pipeline.X64_OUT
+        out.mkdir(parents=True, exist_ok=True)
+        ninja_log = out / ".ninja_log"
+        ninja_deps = out / ".ninja_deps"
+        ninja_log.write_bytes(b"prior log\n")
+        ninja_deps.write_bytes(b"prior dependency state\n")
+        pre = {
+            "ninja_log": build_pipeline._regular_file_snapshot(ninja_log),
+            "ninja_deps": build_pipeline._regular_file_snapshot(ninja_deps),
+            "build_ninja": {"fixture": "graph"},
+            "toolchain_inventory": {"fixture": "toolchains"},
+        }
+        ninja_log.write_bytes(b"prior log\ncontinued log\n")
+        ninja_deps.write_bytes(b"rewritten dependency state after continuation\n")
+        newer = max(
+            pre["ninja_log"]["mtime_ns"], pre["ninja_deps"]["mtime_ns"]
+        ) + 1_000_000
+        os.utime(ninja_log, ns=(newer, newer))
+        os.utime(ninja_deps, ns=(newer, newer))
+        post = {
+            "ninja_log": build_pipeline._regular_file_snapshot(ninja_log),
+            "ninja_deps": build_pipeline._regular_file_snapshot(ninja_deps),
+            "build_ninja": pre["build_ninja"],
+            "toolchain_inventory": pre["toolchain_inventory"],
+        }
+        self.assertTrue(
+            build_pipeline._resume3_ninja_history_transition_contract(
+                pre,
+                post,
+                "x64",
+                1,
+                resume_after_memory_abort=True,
+                out=out,
+            )
+        )
+        forged_prefix = json.loads(json.dumps(pre))
+        forged_prefix["ninja_log"]["sha256"] = "0" * 64
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "abort prefix"):
+            build_pipeline._resume3_ninja_history_transition_contract(
+                forged_prefix,
+                post,
+                "x64",
+                1,
+                resume_after_memory_abort=True,
+                out=out,
+            )
+        unchanged_deps = json.loads(json.dumps(post))
+        unchanged_deps["ninja_deps"] = pre["ninja_deps"]
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "did not grow"):
+            build_pipeline._resume3_ninja_history_transition_contract(
+                pre,
+                unchanged_deps,
+                "x64",
+                1,
+                resume_after_memory_abort=True,
+                out=out,
+            )
+
+    def test_memory_abort_monitor_rejects_forged_threshold_or_non_sustained_abort(self):
+        memory = {
+            "samples": 20,
+            "minimum_free_percent": 6,
+            "maximum_swap_used_bytes": 4 * build_pipeline.GIB,
+            "maximum_swap_total_bytes": 5 * build_pipeline.GIB,
+            "last": {
+                "memory_total_bytes": 16 * build_pipeline.GIB,
+                "free_percent": 6,
+                "swap_total_bytes": 5 * build_pipeline.GIB,
+                "swap_used_bytes": 4 * build_pipeline.GIB,
+                "swap_free_bytes": 1 * build_pipeline.GIB,
+            },
+            "critical_free_consecutive": 3,
+            "critical_swap_consecutive": 0,
+            "maximum_critical_free_consecutive": 3,
+            "maximum_critical_swap_consecutive": 0,
+            "probe_every_checks": 5,
+            "thresholds": {
+                "immediate_free_percent": 5,
+                "sustained_free_percent": 10,
+                "sustained_free_samples": 3,
+                "swap_free_percent": 15,
+                "swap_used_bytes": 8 * build_pipeline.GIB,
+                "swap_sustained_samples": 2,
+            },
+        }
+        monitor = {
+            "checks": 100,
+            "minimum_free_bytes": {
+                "source": 40 * build_pipeline.GIB,
+                "logs": 40 * build_pipeline.GIB,
+            },
+            "last_free_bytes": {
+                "source": 40 * build_pipeline.GIB,
+                "logs": 40 * build_pipeline.GIB,
+            },
+            "maximum_stdout_bytes": 123,
+            "hard_floor_bytes": build_pipeline.HARD_FLOOR_GIB * build_pipeline.GIB,
+            "stdout_limit_bytes": build_pipeline.MAX_RESUME_STDOUT_BYTES,
+            "poll_interval_ms": 1000,
+            "source_path": str(self.source.resolve()),
+            "logs_path": str(self.root.resolve()),
+            "process_group_absent": True,
+            "memory": memory,
+        }
+        self.assertIs(
+            monitor,
+            build_pipeline._x64_memory_abort_monitor_contract(
+                monitor, self.source, self.root, 123
+            ),
+        )
+        forged = json.loads(json.dumps(monitor))
+        forged["memory"]["thresholds"]["sustained_free_percent"] = 11
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "free<10"):
+            build_pipeline._x64_memory_abort_monitor_contract(
+                forged, self.source, self.root, 123
+            )
+        non_sustained = json.loads(json.dumps(monitor))
+        non_sustained["memory"]["critical_free_consecutive"] = 2
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "free<10"):
+            build_pipeline._x64_memory_abort_monitor_contract(
+                non_sustained, self.source, self.root, 123
+            )
+
+    def test_resume4_prior_abort_binding_rejects_forged_hash_and_history(self):
+        out = self.source / build_pipeline.X64_OUT
+        out.mkdir(parents=True, exist_ok=True)
+        path = self.root / "prior.exit-status.json"
+        path.write_text('{"fixture":true}\n', encoding="utf-8")
+        snapshot = build_pipeline._regular_file_snapshot(path)
+        pre_run = {"ninja_log": {"sha256": "a" * 64}}
+        value = {"post_run": pre_run}
+        supplied = {
+            "exit_status": {
+                "path": str(path),
+                "bytes": snapshot["bytes"],
+                "sha256": snapshot["sha256"],
+            },
+            "contract_sha256": snapshot["sha256"],
+        }
+        with mock.patch.object(
+            build_pipeline,
+            "_x64_memory_abort_evidence_contract",
+            return_value=(path, value, snapshot["sha256"]),
+        ):
+            result = build_pipeline._x64_memory_abort_resume_binding(
+                self.source, self.developer, out, supplied, pre_run
+            )
+            self.assertEqual(supplied, result["link"])
+            forged = json.loads(json.dumps(supplied))
+            forged["contract_sha256"] = "0" * 64
+            with self.assertRaisesRegex(build_pipeline.PipelineError, "exact memory"):
+                build_pipeline._x64_memory_abort_resume_binding(
+                    self.source, self.developer, out, forged, pre_run
+                )
+            with self.assertRaisesRegex(build_pipeline.PipelineError, "exact memory"):
+                build_pipeline._x64_memory_abort_resume_binding(
+                    self.source,
+                    self.developer,
+                    out,
+                    supplied,
+                    {"ninja_log": {"sha256": "b" * 64}},
+                )
+
     def test_home_alias_resume_cli_is_explicit_and_has_no_gn_option(self):
         adopt = build_pipeline.parser().parse_args(
             [

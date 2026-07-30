@@ -48,6 +48,13 @@ SOFT_FLOOR_GIB = 35
 HARD_FLOOR_GIB = 30
 BOOTSTRAP_POST_GIB = 70
 BUILD_JOBS = 8
+X64_MEMORY_SAFE_RESUME_JOBS = 6
+X64_MEMORY_ABORT_PRIOR_STEM = (
+    "build-x64-resume3-home-alias-20260730T203200MSK"
+)
+X64_MEMORY_SAFE_RESUME_STEM = (
+    "build-x64-resume4-memory-safe-20260730T222000MSK"
+)
 POLL_SECONDS = 2.0
 DMG_RUNTIME_CANDIDATE_PREFIX = ".focusbrowser-runtime-candidate-"
 
@@ -8665,7 +8672,7 @@ def _resume3_member_contract(member, role, expected_pgid, label):
 
 
 def _resume3_process_group_contract(
-    primary, record, source, out, ninja, physical_stdout
+    primary, record, source, out, ninja, physical_stdout, expected_jobs=BUILD_JOBS
 ):
     group = primary.get("process_group")
     _resume3_exact_keys(group, {"pgid", "members", "dynamic_descendants"}, "resume3 process group")
@@ -8757,7 +8764,7 @@ def _resume3_process_group_contract(
         "-f -c" not in leader_command
         or "set -o pipefail" not in leader_command
         or str(record["process"]["argv"][0]) not in leader_command
-        or " -j8 " not in " " + leader_command + " "
+        or " -j{} ".format(expected_jobs) not in " " + leader_command + " "
         or str(physical_stdout) not in leader_command
         or "gn gen" in leader_command
         or "http://" in leader_command
@@ -9030,7 +9037,12 @@ def _fresh_x64_resume_preparation_binding(
 
 
 def _resume3_ninja_history_transition_contract(
-    pre_run, post, architecture, process_started_at_ns
+    pre_run,
+    post,
+    architecture,
+    process_started_at_ns,
+    resume_after_memory_abort=False,
+    out=None,
 ):
     """Validate ARM incremental history or fresh-x64 absent-to-created history."""
     if (
@@ -9040,6 +9052,35 @@ def _resume3_ninja_history_transition_contract(
         )
     ):
         raise PipelineError("resume3 Ninja graph changed during execution")
+    if architecture == "x64" and resume_after_memory_abort:
+        for name in ("ninja_log", "ninja_deps"):
+            before = pre_run[name]
+            after = post[name]
+            if (
+                not isinstance(before, dict)
+                or not isinstance(after, dict)
+                or after.get("bytes", 0) <= 0
+                or after.get("mtime_ns", 0) <= before.get("mtime_ns", 0)
+                or after.get("mtime_ns", 0) < process_started_at_ns
+                or after.get("sha256") == before.get("sha256")
+            ):
+                raise PipelineError(
+                    "resume4 x86_64 {} did not grow after the memory abort".format(
+                        name
+                    )
+                )
+        if (
+            post["ninja_log"]["bytes"] <= pre_run["ninja_log"]["bytes"]
+            or out is None
+            or _sha256_file_prefix(
+                Path(out) / ".ninja_log", pre_run["ninja_log"]["bytes"]
+            )
+            != pre_run["ninja_log"]["sha256"]
+        ):
+            raise PipelineError(
+                "resume4 x86_64 Ninja log does not preserve the abort prefix"
+            )
+        return True
     if architecture == "x64":
         if pre_run["ninja_log"] is not None or pre_run["ninja_deps"] is not None:
             raise PipelineError("resume3 fresh x86_64 history was not absent")
@@ -9069,6 +9110,584 @@ def _resume3_ninja_history_transition_contract(
     return True
 
 
+def _x64_memory_abort_exact_sibling(exit_path, link, alias_receipt, suffix, label):
+    """Read one immutable evidence file from the one authorized abort run."""
+    if not isinstance(link, dict) or set(link) != {"path", "sha256"}:
+        raise PipelineError("{} link schema mismatch".format(label))
+    expected = Path(exit_path).with_name(X64_MEMORY_ABORT_PRIOR_STEM + suffix)
+    path = _execution_evidence_path(link.get("path", ""), alias_receipt, label)
+    if path != expected:
+        raise PipelineError("{} is not the fixed memory-abort sibling".format(label))
+    if _volume_identity(path)["volume_uuid"] != alias_receipt["volume"][
+        "volume_uuid"
+    ]:
+        raise PipelineError("{} volume changed".format(label))
+    value, observed_hash, _identity = _descriptor_bound_immutable_json(path, label)
+    if link.get("sha256") != observed_hash:
+        raise PipelineError("{} hash changed".format(label))
+    return path, value
+
+
+def _x64_memory_abort_monitor_contract(monitor, source, logs, stdout_bytes):
+    """Accept only the recorded sustained-free-memory safety abort."""
+    keys = {
+        "checks",
+        "minimum_free_bytes",
+        "last_free_bytes",
+        "maximum_stdout_bytes",
+        "hard_floor_bytes",
+        "stdout_limit_bytes",
+        "poll_interval_ms",
+        "source_path",
+        "logs_path",
+        "process_group_absent",
+        "memory",
+    }
+    _resume3_exact_keys(monitor, keys, "x64 memory-abort monitor")
+    hard_floor = HARD_FLOOR_GIB * GIB
+    if (
+        type(monitor["checks"]) is not int
+        or monitor["checks"] < 3
+        or type(monitor["poll_interval_ms"]) is not int
+        or monitor["poll_interval_ms"] <= 0
+        or monitor["hard_floor_bytes"] != hard_floor
+        or monitor["stdout_limit_bytes"] != MAX_RESUME_STDOUT_BYTES
+        or monitor["maximum_stdout_bytes"] != stdout_bytes
+        or monitor["source_path"] != str(Path(source).resolve(strict=True))
+        or monitor["logs_path"] != str(Path(logs).resolve(strict=True))
+        or monitor["process_group_absent"] is not True
+    ):
+        raise PipelineError("x64 memory-abort monitor is incomplete")
+    for field in ("minimum_free_bytes", "last_free_bytes"):
+        values = monitor[field]
+        _resume3_exact_keys(values, {"source", "logs"}, "x64 memory-abort " + field)
+        if any(type(item) is not int or item < hard_floor for item in values.values()):
+            raise PipelineError("x64 memory-abort crossed the disk hard floor")
+    memory = monitor["memory"]
+    memory_keys = {
+        "samples",
+        "minimum_free_percent",
+        "maximum_swap_used_bytes",
+        "maximum_swap_total_bytes",
+        "last",
+        "critical_free_consecutive",
+        "critical_swap_consecutive",
+        "maximum_critical_free_consecutive",
+        "maximum_critical_swap_consecutive",
+        "probe_every_checks",
+        "thresholds",
+    }
+    _resume3_exact_keys(memory, memory_keys, "x64 memory-abort memory")
+    thresholds = {
+        "immediate_free_percent": 5,
+        "sustained_free_percent": 10,
+        "sustained_free_samples": 3,
+        "swap_free_percent": 15,
+        "swap_used_bytes": 8 * GIB,
+        "swap_sustained_samples": 2,
+    }
+    last = memory.get("last")
+    _resume3_exact_keys(
+        last,
+        {
+            "memory_total_bytes",
+            "free_percent",
+            "swap_total_bytes",
+            "swap_used_bytes",
+            "swap_free_bytes",
+        },
+        "x64 memory-abort last sample",
+    )
+    integer_names = memory_keys - {"last", "thresholds"}
+    if (
+        not _strict_json_identity(memory["thresholds"], thresholds)
+        or any(type(memory[name]) is not int or memory[name] < 0 for name in integer_names)
+        or any(type(last[name]) is not int for name in last)
+        or memory["samples"] < thresholds["sustained_free_samples"]
+        or memory["samples"] > monitor["checks"]
+        or memory["probe_every_checks"] != 5
+        or not thresholds["immediate_free_percent"]
+        < memory["minimum_free_percent"]
+        < thresholds["sustained_free_percent"]
+        or not thresholds["immediate_free_percent"]
+        < last["free_percent"]
+        < thresholds["sustained_free_percent"]
+        or memory["critical_free_consecutive"]
+        < thresholds["sustained_free_samples"]
+        or memory["maximum_critical_free_consecutive"]
+        < memory["critical_free_consecutive"]
+        or memory["critical_swap_consecutive"]
+        >= thresholds["swap_sustained_samples"]
+        or memory["maximum_critical_swap_consecutive"]
+        >= thresholds["swap_sustained_samples"]
+        or last["memory_total_bytes"] <= 0
+        or min(last["swap_total_bytes"], last["swap_used_bytes"], last["swap_free_bytes"])
+        < 0
+        or abs(
+            last["swap_total_bytes"]
+            - last["swap_used_bytes"]
+            - last["swap_free_bytes"]
+        )
+        > 2 * 1024 ** 2
+    ):
+        raise PipelineError(
+            "x64 memory-abort is not specifically a sustained free<10% abort"
+        )
+    return monitor
+
+
+def _x64_memory_abort_fresh_binding(source, developer_dir, out, supplied, pre_run):
+    """Bind the abort to fresh-GN evidence without rehashing legacy objects."""
+    if not isinstance(supplied, dict) or set(supplied) != {
+        "receipt", "contract_sha256"
+    }:
+        raise PipelineError("x64 memory-abort fresh preparation link mismatch")
+    link = supplied["receipt"]
+    if not isinstance(link, dict) or set(link) != {"path", "bytes", "sha256"}:
+        raise PipelineError("x64 memory-abort fresh receipt snapshot mismatch")
+    receipt_path = in_source(
+        source,
+        FRESH_X64_PREPARATION_RECEIPT,
+        "x64 memory-abort fresh preparation receipt",
+        must_exist=True,
+    )
+    receipt_stat = os.stat(str(receipt_path), follow_symlinks=False)
+    if (
+        receipt_path.is_symlink()
+        or receipt_stat.st_uid != os.getuid()
+        or stat.S_IMODE(receipt_stat.st_mode) & 0o022
+    ):
+        raise PipelineError("x64 memory-abort fresh receipt mode is unsafe")
+    snapshot = _regular_file_snapshot(receipt_path)
+    receipt = load_json(receipt_path, "x64 memory-abort fresh preparation receipt")
+    if snapshot != _regular_file_snapshot(receipt_path):
+        raise PipelineError("x64 memory-abort fresh receipt changed while reading")
+    receipt_hash = snapshot["sha256"]
+    if (
+        link != {
+            "path": str(receipt_path),
+            "bytes": snapshot["bytes"],
+            "sha256": snapshot["sha256"],
+        }
+        or supplied["contract_sha256"] != receipt_hash
+        or receipt_hash != snapshot["sha256"]
+        or receipt.get("schema") != 1
+        or receipt.get("stage") != "prepare-fresh-x64"
+        or receipt.get("source_root") != str(source)
+        or receipt.get("developer_dir") != str(developer_dir)
+        or receipt.get("fresh_out") != str(out)
+        or receipt.get("legacy_preserved") is not True
+        or receipt.get("legacy_deleted") is not False
+        or receipt.get("gn_gen_executed") is not True
+        or receipt.get("gn_gen_succeeded") is not True
+        or receipt.get("ninja_executed") is not False
+        or receipt.get("build_executed") is not False
+        or receipt.get("signing_executed") is not False
+        or receipt.get("packaging_executed") is not False
+        or receipt.get("offline") is not True
+        or receipt.get("network_operations") != 0
+        or pre_run.get("ninja_log") is not None
+        or pre_run.get("ninja_deps") is not None
+    ):
+        raise PipelineError("x64 memory-abort fresh receipt contract mismatch")
+    graph = receipt.get("generated_graph")
+    if not isinstance(graph, dict):
+        raise PipelineError("x64 memory-abort fresh graph is missing")
+    args_snapshot = _regular_file_snapshot(Path(out) / "args.gn")
+    dependency_snapshot = _regular_file_snapshot(Path(out) / "build.ninja.d")
+    recorded_toolchains = [
+        {
+            "path": item["relative_path"],
+            "bytes": item["bytes"],
+            "sha256": item["sha256"],
+        }
+        for item in pre_run["toolchain_inventory"]["files"]
+    ]
+    if (
+        {key: pre_run["build_ninja"][key] for key in ("bytes", "sha256")}
+        != graph.get("build_ninja")
+        or recorded_toolchains != graph.get("toolchains")
+        or graph.get("llvm_strip_occurrences") != 0
+        or graph.get("toolchain_file_count") != len(recorded_toolchains)
+        or graph.get("root") != str(out)
+        or {key: args_snapshot[key] for key in ("bytes", "sha256")}
+        != graph.get("args_gn")
+        or {key: dependency_snapshot[key] for key in ("bytes", "sha256")}
+        != graph.get("build_ninja_d")
+        or graph.get("linkedit_strip", {}).get(
+            "all_linker_rules_use_selected_strip"
+        )
+        is not True
+        or graph.get("linkedit_strip", {}).get("llvm_strip_selected") is not False
+    ):
+        raise PipelineError("x64 memory-abort fresh graph binding changed")
+    live_linkedit = generated_linkedit_strip_contract(
+        out, receipt.get("linkedit_strip_tools")
+    )
+    if live_linkedit != graph.get("linkedit_strip"):
+        raise PipelineError("x64 memory-abort linker strip graph changed")
+    return {"receipt": receipt, "graph": graph, "link": supplied}
+
+
+def _x64_memory_abort_evidence_contract(
+    source,
+    developer_dir,
+    prior_exit_path,
+    *,
+    require_current_history,
+    require_unfinished,
+):
+    """Validate the immutable failed j8 run without treating it as success."""
+    source = Path(source)
+    developer_dir = Path(developer_dir)
+    _alias_path, alias_receipt = home_alias_receipt_contract(source, developer_dir)
+    logical_workspace = Path(alias_receipt["mappings"]["workspace"]["logical"])
+    expected_exit = (
+        logical_workspace
+        / "work/logs"
+        / (X64_MEMORY_ABORT_PRIOR_STEM + ".exit-status.json")
+    )
+    exit_path = _execution_evidence_path(
+        prior_exit_path, alias_receipt, "x64 memory-abort exit status"
+    )
+    if exit_path != expected_exit:
+        raise PipelineError("x64 memory-abort exit path is not the fixed prior run")
+    if _volume_identity(exit_path)["volume_uuid"] != alias_receipt["volume"][
+        "volume_uuid"
+    ]:
+        raise PipelineError("x64 memory-abort exit volume changed")
+    status, status_hash, _identity = _descriptor_bound_immutable_json(
+        exit_path, "x64 memory-abort exit status"
+    )
+    status_keys = {
+        "schema",
+        "kind",
+        "run_id",
+        "architecture",
+        "pid",
+        "pgid",
+        "wait_observation",
+        "pipefail",
+        "outcome",
+        "failure",
+        "monitor",
+        "evidence_complete",
+        "pipeline_success_derived",
+        "pre_launch",
+        "live_evidence",
+        "stdout_log",
+        "post_run",
+        "explicit_gn_gen_command",
+        "network_operations",
+    }
+    _resume3_exact_keys(status, status_keys, "x64 memory-abort exit status")
+    wait = status["wait_observation"]
+    _resume3_exact_keys(
+        wait,
+        {"api", "returncode", "wait_returned_at_ns", "runner_pid"},
+        "x64 memory-abort wait observation",
+    )
+    expected_failure = {
+        "primary": {
+            "type": "RunnerError",
+            "stage": "runtime-monitor",
+            "message": (
+                "MemoryPressureAbort: memory free percentage stayed below "
+                "the sustained threshold"
+            ),
+        },
+        "secondary": [],
+    }
+    if (
+        status["schema"] != 2
+        or status["kind"] != "focus-macos-alias-resume3-popen-exit-status"
+        or status["run_id"] != X64_MEMORY_ABORT_PRIOR_STEM
+        or status["architecture"] != "x64"
+        or type(status["pid"]) is not int
+        or status["pid"] <= 1
+        or status["pgid"] != status["pid"]
+        or wait["api"] != "subprocess.Popen.wait"
+        or wait["returncode"] != -signal.SIGTERM
+        or type(wait["wait_returned_at_ns"]) is not int
+        or wait["wait_returned_at_ns"] <= 0
+        or type(wait["runner_pid"]) is not int
+        or wait["runner_pid"] <= 1
+        or status["pipefail"] is not True
+        or status["outcome"] != "memory-pressure-abort"
+        or not _strict_json_identity(status["failure"], expected_failure)
+        or status["evidence_complete"] is not True
+        or status["pipeline_success_derived"] is not False
+        or status["explicit_gn_gen_command"] is not False
+        or status["network_operations"] != 0
+    ):
+        raise PipelineError("x64 prior run is not the authorized memory abort")
+    pre_path, pre = _x64_memory_abort_exact_sibling(
+        exit_path,
+        status["pre_launch"],
+        alias_receipt,
+        ".pre-launch.json",
+        "x64 memory-abort pre-launch",
+    )
+    live = status["live_evidence"]
+    _resume3_exact_keys(live, {"primary", "supplement", "revalidation"}, "x64 memory-abort live evidence")
+    primary_path, primary = _x64_memory_abort_exact_sibling(
+        exit_path, live["primary"], alias_receipt,
+        ".live-process-observation.json", "x64 memory-abort primary observation"
+    )
+    supplement_path, supplement = _x64_memory_abort_exact_sibling(
+        exit_path, live["supplement"], alias_receipt,
+        ".live-environment-supplement.json", "x64 memory-abort supplement"
+    )
+    revalidation_path, revalidation = _x64_memory_abort_exact_sibling(
+        exit_path, live["revalidation"], alias_receipt,
+        ".live-process-revalidation.json", "x64 memory-abort revalidation"
+    )
+    out = in_source(source, X64_OUT, "x64 memory-abort output", must_exist=True, directory=True)
+    expected_logical = {
+        "home": alias_receipt["logical_home"],
+        "workspace": str(logical_workspace),
+        "source": str(source),
+        "developer_dir": str(developer_dir),
+        "out": str(out),
+    }
+    ninja = ninja_contract(source)
+    expected_argv = [
+        str(source.parent / "depot_tools/autoninja"),
+        "-j{}".format(BUILD_JOBS),
+        "-C", X64_OUT, "chrome", "chrome/installer/mac:copies",
+    ]
+    expected_environment = {
+        "HOME": alias_receipt["logical_home"], "LANG": "C", "LC_ALL": "C",
+        "TZ": "UTC", "DEVELOPER_DIR": str(developer_dir),
+        "PATH": os.pathsep.join((str(source.parent / "depot_tools"), str(Path(ninja["path"]).parent), SYSTEM_PATH)),
+        "DEPOT_TOOLS_UPDATE": "0", "DEPOT_TOOLS_METRICS": "0",
+        "GCLIENT_FILE": str(source.parent / ".gclient"),
+        "PYTHONDONTWRITEBYTECODE": "1", "NINJA_SUMMARIZE_BUILD": "1",
+    }
+    expected_stdout_logical = exit_path.with_name(
+        X64_MEMORY_ABORT_PRIOR_STEM + ".log"
+    )
+    expected_stdout_physical = _physical_execution_path(
+        expected_stdout_logical, alias_receipt, "x64 memory-abort stdout"
+    )
+    environment_order = (
+        "HOME", "LANG", "LC_ALL", "TZ", "DEVELOPER_DIR", "PATH",
+        "DEPOT_TOOLS_UPDATE", "DEPOT_TOOLS_METRICS", "GCLIENT_FILE",
+        "PYTHONDONTWRITEBYTECODE", "NINJA_SUMMARIZE_BUILD",
+    )
+    expected_shell_script = (
+        "set -o pipefail\n/usr/bin/env -i {} {} 2>&1 | /usr/bin/tee -a {}"
+    ).format(
+        " ".join(
+            "{}={}".format(name, shlex.quote(expected_environment[name]))
+            for name in environment_order
+        ),
+        " ".join(shlex.quote(item) for item in expected_argv),
+        shlex.quote(str(expected_stdout_physical)),
+    )
+    alias_identity = dict(alias_receipt["alias"])
+    alias_identity.pop("root_owned", None)
+    alias_identity.pop("absolute_exact_target", None)
+    alias_identity.pop("target_identity", None)
+    expected_identity = {
+        "alias": alias_identity,
+        "source": _execution_identity_mapping(alias_receipt["mappings"]["source"]),
+        "developer": _execution_identity_mapping(alias_receipt["mappings"]["developer"]),
+    }
+    pre_keys = {
+        "schema", "kind", "run_id", "created_at_ns", "architecture", "logical",
+        "planned_process", "identity", "pre_run", "stdout_log", "runner", "policy",
+        "fresh_x64_preparation",
+    }
+    _resume3_exact_keys(pre, pre_keys, "x64 memory-abort pre-launch")
+    planned = pre["planned_process"]
+    _resume3_exact_keys(planned, {"cwd", "argv", "environment", "shell_argv", "start_new_session", "jobs"}, "x64 memory-abort planned process")
+    expected_runner = (MACOS_DIR / "alias_resume_runner.py").resolve(strict=True)
+    runner = pre["runner"]
+    _resume3_exact_keys(runner, {"path", "bytes", "sha256"}, "x64 memory-abort runner")
+    if (
+        pre["schema"] != 1
+        or pre["kind"] != "focus-macos-alias-resume3-pre-launch"
+        or pre["run_id"] != X64_MEMORY_ABORT_PRIOR_STEM
+        or pre["architecture"] != "x64"
+        or pre["logical"] != expected_logical
+        or planned["cwd"] != str(source)
+        or planned["argv"] != expected_argv
+        or planned["environment"] != expected_environment
+        or planned["shell_argv"]
+        != ["/bin/zsh", "-f", "-c", expected_shell_script]
+        or planned["jobs"] != BUILD_JOBS
+        or planned["start_new_session"] is not True
+        or not isinstance(planned["shell_argv"], list)
+        or len(planned["shell_argv"]) != 4
+        or "gn gen" in planned["shell_argv"][-1]
+        or "http://" in planned["shell_argv"][-1]
+        or "https://" in planned["shell_argv"][-1]
+        or planned["shell_argv"][-1].count("-j8") != 1
+        or pre["policy"] != {
+            "explicit_gn_gen_command": False,
+            "network_operations": 0,
+            "single_run": True,
+            "final_success_requires_popen_wait_zero": True,
+        }
+        or pre["identity"] != expected_identity
+        or Path(runner["path"]).resolve(strict=True) != expected_runner
+        or runner["bytes"] != expected_runner.stat().st_size
+        or runner["sha256"] != sha256_file(expected_runner)
+    ):
+        raise PipelineError("x64 memory-abort pre-launch or runner was forged")
+    initial_stdout = pre["stdout_log"]
+    _resume3_exact_keys(
+        initial_stdout,
+        {
+            "logical_path", "physical_path", "device", "inode", "uid", "gid",
+            "mode", "bytes", "mtime_ns", "birth_time_ns",
+        },
+        "x64 memory-abort initial stdout",
+    )
+    if (
+        initial_stdout["logical_path"] != str(expected_stdout_logical)
+        or initial_stdout["physical_path"] != str(expected_stdout_physical)
+        or initial_stdout["bytes"] != 0
+        or initial_stdout["mode"] & 0o022
+    ):
+        raise PipelineError("x64 memory-abort initial stdout identity mismatch")
+    pre_run = pre["pre_run"]
+    _resume3_exact_keys(pre_run, {"ninja_log", "ninja_deps", "build_ninja", "toolchain_inventory"}, "x64 memory-abort pre-run")
+    if pre_run["ninja_log"] is not None or pre_run["ninja_deps"] is not None:
+        raise PipelineError("x64 memory-abort was not the first fresh Ninja run")
+    _x64_memory_abort_fresh_binding(
+        source, developer_dir, out, pre["fresh_x64_preparation"], pre_run
+    )
+    if status["pre_launch"] != {"path": str(pre_path), "sha256": sha256_file(pre_path)}:
+        raise PipelineError("x64 memory-abort pre-launch hash changed")
+    if primary.get("schema") != 2 or primary.get("kind") != "focus-macos-alias-raw-ninja-live-process-chain-observation" or primary.get("run_id") != X64_MEMORY_ABORT_PRIOR_STEM or primary.get("architecture") != "x64" or primary.get("pre_launch") != status["pre_launch"]:
+        raise PipelineError("x64 memory-abort primary evidence mismatch")
+    _resume3_process_group_contract(
+        primary,
+        {"process": {"pgid": status["pgid"], "argv": expected_argv}},
+        source,
+        out,
+        ninja,
+        expected_stdout_physical,
+        expected_jobs=BUILD_JOBS,
+    )
+    if supplement.get("schema") != 2 or supplement.get("kind") != "focus-macos-alias-raw-ninja-live-process-chain-observation-supplement" or supplement.get("run_id") != X64_MEMORY_ABORT_PRIOR_STEM or supplement.get("architecture") != "x64" or supplement.get("primary_observation") != live["primary"]:
+        raise PipelineError("x64 memory-abort supplement evidence mismatch")
+    if revalidation.get("schema") != 2 or revalidation.get("kind") != "focus-macos-alias-raw-ninja-live-process-chain-revalidation" or revalidation.get("run_id") != X64_MEMORY_ABORT_PRIOR_STEM or revalidation.get("architecture") != "x64" or revalidation.get("linked_evidence") != {"pre_launch": status["pre_launch"], "primary_observation": live["primary"], "environment_supplement": live["supplement"]}:
+        raise PipelineError("x64 memory-abort revalidation evidence mismatch")
+    stdout = _resume3_snapshot_contract(status["stdout_log"], "x64 memory-abort stdout")
+    expected_stdout = expected_stdout_logical
+    if Path(stdout["path"]) != expected_stdout or stdout["mode"] & 0o222 or stdout["bytes"] <= 0 or stdout["bytes"] > MAX_RESUME_STDOUT_BYTES or _regular_file_snapshot(expected_stdout) != {key: stdout[key] for key in ("path", "bytes", "mtime_ns", "sha256")}:
+        raise PipelineError("x64 memory-abort stdout changed")
+    if (
+        stdout["device"] != initial_stdout["device"]
+        or stdout["inode"] != initial_stdout["inode"]
+        or stdout["birth_time_ns"] != initial_stdout["birth_time_ns"]
+    ):
+        raise PipelineError("x64 memory-abort stdout inode changed")
+    _x64_memory_abort_monitor_contract(
+        status["monitor"], source, exit_path.parent, stdout["bytes"]
+    )
+    if _process_group_exists(status["pgid"]):
+        raise PipelineError("x64 memory-abort process group still exists")
+    post = status["post_run"]
+    _resume3_exact_keys(post, {"ninja_log", "ninja_deps", "build_ninja", "toolchain_inventory"}, "x64 memory-abort post-run")
+    for name, relative in (("ninja_log", ".ninja_log"), ("ninja_deps", ".ninja_deps"), ("build_ninja", "build.ninja")):
+        _validate_recorded_file_snapshot(post[name], out / relative, "x64 memory-abort post-run " + name)
+    _validate_recorded_toolchain_inventory(post["toolchain_inventory"])
+    current_graph = {
+        "build_ninja": _regular_file_snapshot(out / "build.ninja"),
+        "toolchain_inventory": _toolchain_inventory(out),
+    }
+    if post["build_ninja"] != current_graph["build_ninja"] or post["toolchain_inventory"] != current_graph["toolchain_inventory"]:
+        raise PipelineError("x64 memory-abort graph or toolchains changed")
+    if require_current_history:
+        _ninja_history_exact_contract(
+            {"ninja_log": post["ninja_log"], "ninja_deps": post["ninja_deps"]},
+            out,
+            "x64 memory-abort post-run",
+        )
+    if require_unfinished and (
+        os.path.lexists(str(out / APP_NAME))
+        or os.path.lexists(str(out / SLICE_RECEIPT_NAME))
+    ):
+        raise PipelineError("x64 memory-abort unexpectedly has a finished app or receipt")
+    # Bind timestamps after every linked file has passed its content contract.
+    if not (
+        pre["created_at_ns"] < primary["observed_at_ns"]
+        <= supplement["observed_at_ns"]
+        <= revalidation["capture_finished_at_ns"]
+        < wait["wait_returned_at_ns"]
+    ):
+        raise PipelineError("x64 memory-abort evidence chronology mismatch")
+    return exit_path, status, status_hash
+
+
+def x64_memory_abort_resume_contract(source, developer_dir, prior_exit_path):
+    """Public fail-closed gate authorizing one lower-concurrency x64 resume."""
+    path, value, _sha256 = _x64_memory_abort_evidence_contract(
+        source,
+        developer_dir,
+        prior_exit_path,
+        require_current_history=True,
+        require_unfinished=True,
+    )
+    return path, value
+
+
+def _x64_memory_abort_resume_binding(source, developer_dir, out, supplied, pre_run):
+    if not isinstance(supplied, dict) or set(supplied) != {
+        "exit_status", "contract_sha256"
+    }:
+        raise PipelineError("resume4 prior memory-abort link mismatch")
+    link = supplied["exit_status"]
+    if not isinstance(link, dict) or set(link) != {"path", "bytes", "sha256"}:
+        raise PipelineError("resume4 prior memory-abort snapshot mismatch")
+    path, value, observed_hash = _x64_memory_abort_evidence_contract(
+        source,
+        developer_dir,
+        link.get("path", ""),
+        require_current_history=False,
+        require_unfinished=False,
+    )
+    snapshot = _regular_file_snapshot(path)
+    if (
+        link != {"path": str(path), "bytes": snapshot["bytes"], "sha256": snapshot["sha256"]}
+        or supplied["contract_sha256"] != observed_hash
+        or observed_hash != snapshot["sha256"]
+        or pre_run != value["post_run"]
+        or Path(out) != in_source(source, X64_OUT, "resume4 x64 output")
+    ):
+        raise PipelineError("resume4 is not bound to the exact memory-abort post-state")
+    return {"link": supplied, "exit_status": value}
+
+
+def _resume3_run_profile(record_path, record, architecture):
+    """Select one immutable execution profile without weakening resume3."""
+    memory_safe = architecture == "x64" and "prior_memory_abort" in record
+    stem = Path(record_path).name[: -len(".execution.json")]
+    if memory_safe:
+        if stem != X64_MEMORY_SAFE_RESUME_STEM:
+            raise PipelineError("resume4 run identifier mismatch")
+        return {
+            "memory_safe_resume": True,
+            "jobs": X64_MEMORY_SAFE_RESUME_JOBS,
+            "runner": MACOS_DIR / "x64_abort_resume_runner.py",
+        }
+    pattern = {
+        "arm64": r"build-arm64-resume3-[A-Za-z0-9][A-Za-z0-9._-]*",
+        "x64": r"build-x64-resume3-[A-Za-z0-9][A-Za-z0-9._-]*",
+    }.get(architecture)
+    if pattern is None or re.fullmatch(pattern, stem) is None:
+        raise PipelineError("resume3 run identifier mismatch")
+    return {
+        "memory_safe_resume": False,
+        "jobs": BUILD_JOBS,
+        "runner": MACOS_DIR / "alias_resume_runner.py",
+    }
+
+
 def _resume3_execution_record_contract(
     record_path,
     record,
@@ -9082,6 +9701,9 @@ def _resume3_execution_record_contract(
     allow_history_growth=False,
     authorized_history=None,
 ):
+    profile = _resume3_run_profile(record_path, record, architecture)
+    memory_safe_resume = profile["memory_safe_resume"]
+    expected_jobs = profile["jobs"]
     root_keys = {
         "schema",
         "kind",
@@ -9101,6 +9723,8 @@ def _resume3_execution_record_contract(
     }
     if architecture == "x64":
         root_keys.add("fresh_x64_preparation")
+    if memory_safe_resume:
+        root_keys.add("prior_memory_abort")
     _resume3_exact_keys(record, root_keys, "resume3 execution record")
     if (
         type(record["schema"]) is not int
@@ -9110,12 +9734,6 @@ def _resume3_execution_record_contract(
     ):
         raise PipelineError("resume3 execution identity mismatch")
     stem = record_path.name[: -len(".execution.json")]
-    run_pattern = {
-        "arm64": r"build-arm64-resume3-[A-Za-z0-9][A-Za-z0-9._-]*",
-        "x64": r"build-x64-resume3-[A-Za-z0-9][A-Za-z0-9._-]*",
-    }.get(architecture)
-    if run_pattern is None or not re.fullmatch(run_pattern, stem):
-        raise PipelineError("resume3 run identifier mismatch")
     expected_stdout_logical = record_path.with_name(stem + ".log")
     expected_stdout_physical = _physical_execution_path(
         expected_stdout_logical, alias_receipt, "resume3 stdout"
@@ -9165,7 +9783,7 @@ def _resume3_execution_record_contract(
     }
     expected_argv = [
         str(Path(source).parent / "depot_tools" / "autoninja"),
-        "-j{}".format(BUILD_JOBS),
+        "-j{}".format(expected_jobs),
         "-C",
         str(Path(out).relative_to(source)),
         "chrome",
@@ -9262,6 +9880,8 @@ def _resume3_execution_record_contract(
     }
     if architecture == "x64":
         pre_keys.add("fresh_x64_preparation")
+    if memory_safe_resume:
+        pre_keys.add("prior_memory_abort")
     _resume3_exact_keys(pre, pre_keys, "resume3 pre-launch")
     planned = pre["planned_process"]
     _resume3_exact_keys(
@@ -9287,7 +9907,7 @@ def _resume3_execution_record_contract(
         or not _strict_json_identity(shell_argv, expected_shell)
         or planned["start_new_session"] is not True
         or type(planned["jobs"]) is not int
-        or planned["jobs"] != BUILD_JOBS
+        or planned["jobs"] != expected_jobs
         or not _strict_json_identity(pre["identity"], record["identity"])
         or not _strict_json_identity(pre["pre_run"], record["pre_run"])
         or (
@@ -9295,6 +9915,12 @@ def _resume3_execution_record_contract(
             and not _strict_json_identity(
                 pre["fresh_x64_preparation"],
                 record["fresh_x64_preparation"],
+            )
+        )
+        or (
+            memory_safe_resume
+            and not _strict_json_identity(
+                pre["prior_memory_abort"], record["prior_memory_abort"]
             )
         )
     ):
@@ -9312,7 +9938,7 @@ def _resume3_execution_record_contract(
         raise PipelineError("resume3 pre-launch policy mismatch")
     runner_identity = pre["runner"]
     _resume3_exact_keys(runner_identity, {"path", "bytes", "sha256"}, "resume3 runner identity")
-    expected_runner = (MACOS_DIR / "alias_resume_runner.py").resolve(strict=True)
+    expected_runner = Path(profile["runner"]).resolve(strict=True)
     if (
         Path(runner_identity["path"]).resolve(strict=True) != expected_runner
         or type(runner_identity["bytes"]) is not int
@@ -9333,7 +9959,7 @@ def _resume3_execution_record_contract(
         {"ninja_log", "ninja_deps", "build_ninja", "toolchain_inventory"},
         "resume3 pre-run",
     )
-    if architecture == "x64":
+    if architecture == "x64" and not memory_safe_resume:
         if pre_run["ninja_log"] is not None or pre_run["ninja_deps"] is not None:
             raise PipelineError("resume3 fresh x86_64 pre-run history is not absent")
         _validate_recorded_file_snapshot(
@@ -9354,14 +9980,40 @@ def _resume3_execution_record_contract(
             )
     _validate_recorded_toolchain_inventory(pre_run["toolchain_inventory"])
     fresh_x64_binding = None
+    prior_memory_abort_binding = None
     if architecture == "x64":
-        fresh_x64_binding = _fresh_x64_resume_preparation_binding(
+        fresh_pre_run = pre_run
+        if memory_safe_resume:
+            fresh_pre_run = dict(pre_run)
+            fresh_pre_run["ninja_log"] = None
+            fresh_pre_run["ninja_deps"] = None
+        fresh_binding_contract = (
+            _x64_memory_abort_fresh_binding
+            if memory_safe_resume
+            else _fresh_x64_resume_preparation_binding
+        )
+        fresh_x64_binding = fresh_binding_contract(
             source,
             developer_dir,
             out,
             record["fresh_x64_preparation"],
-            pre_run,
+            fresh_pre_run,
         )
+        if memory_safe_resume:
+            prior_memory_abort_binding = _x64_memory_abort_resume_binding(
+                source,
+                developer_dir,
+                out,
+                record["prior_memory_abort"],
+                pre_run,
+            )
+            prior_wait_ns = prior_memory_abort_binding["exit_status"][
+                "wait_observation"
+            ]["wait_returned_at_ns"]
+            if pre["created_at_ns"] <= prior_wait_ns:
+                raise PipelineError(
+                    "resume4 pre-launch does not follow the memory abort"
+                )
     initial_stdout = pre["stdout_log"]
     _resume3_exact_keys(
         initial_stdout,
@@ -9407,7 +10059,13 @@ def _resume3_execution_record_contract(
     ):
         raise PipelineError("resume3 primary observation mismatch")
     stable_roles = _resume3_process_group_contract(
-        primary, record, source, out, ninja, physical_stdout
+        primary,
+        record,
+        source,
+        out,
+        ninja,
+        physical_stdout,
+        expected_jobs=expected_jobs,
     )
     primary_stdout = _resume3_snapshot_contract(primary["stdout_log_live_snapshot"], "resume3 primary stdout")
     if (
@@ -9727,7 +10385,12 @@ def _resume3_execution_record_contract(
     elif not _strict_json_identity(post, current_post):
         raise PipelineError("resume3 post-run snapshot changed")
     _resume3_ninja_history_transition_contract(
-        pre_run, post, architecture, process["started_at_ns"]
+        pre_run,
+        post,
+        architecture,
+        process["started_at_ns"],
+        resume_after_memory_abort=memory_safe_resume,
+        out=out if memory_safe_resume else None,
     )
     for evidence_path, earliest, latest, label in (
         (primary_path, primary["observed_at_ns"], supplement["observed_at_ns"], "primary"),
@@ -9753,6 +10416,8 @@ def _resume3_execution_record_contract(
     }
     if architecture == "x64":
         result["fresh_x64_preparation"] = fresh_x64_binding["link"]
+    if memory_safe_resume:
+        result["prior_memory_abort"] = prior_memory_abort_binding["link"]
     return result
 
 
