@@ -7,6 +7,7 @@ import json
 import os
 import plistlib
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -494,7 +495,7 @@ class LocalDmgPackagerTests(unittest.TestCase):
         self.assertEqual(1, os.lstat(str(fixture["output"])).st_nlink)
         self.assertEqual(b"accepted DMG payload", fixture["output"].read_bytes())
 
-    def test_keyboard_interrupt_after_real_link_rolls_back_actual_inode(self):
+    def test_ambiguous_interrupt_inside_link_preserves_matching_entry(self):
         fixture = self.publish_fixture()
         real_link = os.link
 
@@ -507,9 +508,9 @@ class LocalDmgPackagerTests(unittest.TestCase):
         ):
             self.publish(fixture)
 
-        self.assertFalse(os.path.lexists(str(fixture["output"])))
+        self.assertEqual(b"accepted DMG payload", fixture["output"].read_bytes())
         self.assertTrue(fixture["candidate"].is_file())
-        self.assertEqual(1, os.lstat(str(fixture["candidate"])).st_nlink)
+        self.assertEqual(2, os.lstat(str(fixture["candidate"])).st_nlink)
 
     def test_output_parent_fsync_failure_rolls_back_and_fsyncs_removal(self):
         fixture = self.publish_fixture()
@@ -528,7 +529,7 @@ class LocalDmgPackagerTests(unittest.TestCase):
         ):
             self.publish(fixture)
 
-        self.assertEqual(3, calls)
+        self.assertEqual(4, calls)
         self.assertFalse(os.path.lexists(str(fixture["output"])))
         self.assertEqual(1, os.lstat(str(fixture["candidate"])).st_nlink)
 
@@ -539,6 +540,14 @@ class LocalDmgPackagerTests(unittest.TestCase):
             self.publish(fixture)
         self.assertFalse(os.path.lexists(str(fixture["output"])))
         self.assertEqual(2, os.lstat(str(fixture["candidate"])).st_nlink)
+
+    def test_preexisting_same_inode_output_is_never_rolled_back(self):
+        fixture = self.publish_fixture()
+        os.link(str(fixture["candidate"]), str(fixture["output"]))
+        with self.assertRaisesRegex(package_local_dmg.PackageError, "one link"):
+            self.publish(fixture)
+        self.assertEqual(b"accepted DMG payload", fixture["output"].read_bytes())
+        self.assertEqual(2, os.lstat(str(fixture["output"])).st_nlink)
 
     def test_candidate_with_unsafe_mode_is_rejected(self):
         fixture = self.publish_fixture()
@@ -619,12 +628,264 @@ class LocalDmgPackagerTests(unittest.TestCase):
         self.assertEqual(b"accepted DMG payload", fixture["output"].read_bytes())
         self.assertEqual(2, os.lstat(str(fixture["output"])).st_nlink)
 
+    def test_rollback_quarantine_restores_leaf_replacement_without_deleting_it(self):
+        fixture = self.publish_fixture()
+        os.link(str(fixture["candidate"]), str(fixture["output"]))
+        owned_moved = self.root / "owned-output-moved-by-race.dmg"
+        real_rename = package_local_dmg._rename_no_replace
+        swapped = False
+
+        def swap_public_leaf_then_rename(*args, **kwargs):
+            nonlocal swapped
+            if not swapped:
+                fixture["output"].rename(owned_moved)
+                fixture["output"].write_bytes(b"rival replacement")
+                swapped = True
+            return real_rename(*args, **kwargs)
+
+        root_fd = os.open(str(fixture["root"]), package_local_dmg._directory_flags())
+        parent_fd = os.open(str(self.root), package_local_dmg._directory_flags())
+        try:
+            with mock.patch.object(
+                package_local_dmg,
+                "_rename_no_replace",
+                side_effect=swap_public_leaf_then_rename,
+            ):
+                removed = package_local_dmg._rollback_exact_output(
+                    parent_fd,
+                    root_fd,
+                    fixture["output"].name,
+                    fixture["identity"],
+                )
+        finally:
+            os.close(parent_fd)
+            os.close(root_fd)
+
+        self.assertTrue(swapped)
+        self.assertFalse(removed)
+        self.assertEqual(b"rival replacement", fixture["output"].read_bytes())
+        self.assertEqual(b"accepted DMG payload", owned_moved.read_bytes())
+        self.assertEqual(2, os.lstat(str(owned_moved)).st_nlink)
+
+    def test_private_cleanup_quarantine_restores_replacement_rival(self):
+        fixture = self.publish_fixture()
+        owned_moved = fixture["root"] / "owned-candidate-moved-by-race.dmg"
+        real_rename = package_local_dmg._rename_no_replace
+        swapped = False
+
+        def swap_private_leaf_then_rename(*args, **kwargs):
+            nonlocal swapped
+            if not swapped:
+                fixture["candidate"].rename(owned_moved)
+                fixture["candidate"].write_bytes(b"private rival")
+                swapped = True
+            return real_rename(*args, **kwargs)
+
+        root_fd = os.open(str(fixture["root"]), package_local_dmg._directory_flags())
+        try:
+            with mock.patch.object(
+                package_local_dmg,
+                "_rename_no_replace",
+                side_effect=swap_private_leaf_then_rename,
+            ), self.assertRaisesRegex(
+                package_local_dmg.PackageError, "changed during cleanup"
+            ):
+                package_local_dmg.remove_private_entry_exact(
+                    root_fd,
+                    fixture["candidate"].name,
+                    fixture["identity"],
+                )
+        finally:
+            os.close(root_fd)
+
+        self.assertTrue(swapped)
+        self.assertEqual(b"private rival", fixture["candidate"].read_bytes())
+        self.assertEqual(b"accepted DMG payload", owned_moved.read_bytes())
+
+    def test_committed_outcome_survives_temporary_cleanup_failure(self):
+        output = self.root / "committed-cleanup-error.dmg"
+        runner = self.command_runner()
+        committed_identity = None
+
+        def commit_then_fail(candidate, final, identity, *_args):
+            nonlocal committed_identity
+            os.link(str(candidate), str(final))
+            candidate.unlink()
+            committed_identity = tuple(identity)
+            raise package_local_dmg.CommittedPublishError(
+                "synthetic committed cleanup failure", identity
+            )
+
+        with mock.patch.object(package_local_dmg, "require_system_tools"), mock.patch.object(
+            package_local_dmg, "checked_run", side_effect=runner
+        ), mock.patch("os.path.ismount", return_value=True), mock.patch(
+            "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
+        ), mock.patch.object(
+            package_local_dmg,
+            "durable_publish_candidate",
+            side_effect=commit_then_fail,
+        ), mock.patch.object(
+            tempfile.TemporaryDirectory,
+            "cleanup",
+            side_effect=OSError("synthetic temporary cleanup failure"),
+        ), mock.patch(
+            "tempfile._warnings.warn"
+        ), self.assertRaisesRegex(
+            package_local_dmg.CommittedPublishError,
+            "temporary cleanup also failed",
+        ) as raised:
+            package_local_dmg.package_local_dmg(self.app, output)
+
+        self.assertEqual(committed_identity, raised.exception.final_identity)
+        self.assertEqual(b"verified mock DMG payload", output.read_bytes())
+        self.assertEqual(1, os.lstat(str(output)).st_nlink)
+        if self.staging is not None and self.staging.parent.exists():
+            shutil.rmtree(self.staging.parent)
+
+    def test_retained_rival_quarantine_disables_recursive_temp_cleanup(self):
+        output = self.root / "retained-rival.dmg"
+        runner = self.command_runner()
+        retained = []
+
+        def retain_rival(candidate, *_args):
+            quarantine = candidate.parent / ".dmg-rollback-retained-fixture"
+            quarantine.write_bytes(b"retained rival bytes")
+            retained.append(quarantine)
+            raise package_local_dmg.RetainedQuarantineError(
+                "synthetic retained rival",
+                quarantine.name,
+                quarantine_path=str(quarantine),
+            )
+
+        with mock.patch.object(package_local_dmg, "require_system_tools"), mock.patch.object(
+            package_local_dmg, "checked_run", side_effect=runner
+        ), mock.patch("os.path.ismount", return_value=True), mock.patch(
+            "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
+        ), mock.patch.object(
+            package_local_dmg,
+            "durable_publish_candidate",
+            side_effect=retain_rival,
+        ), self.assertRaisesRegex(
+            package_local_dmg.RetainedQuarantineError,
+            "retained rival",
+        ):
+            package_local_dmg.package_local_dmg(self.app, output)
+
+        self.assertEqual(1, len(retained))
+        self.assertEqual(b"retained rival bytes", retained[0].read_bytes())
+        self.assertTrue(retained[0].parent.is_dir())
+        shutil.rmtree(retained[0].parent)
+
+    def test_interrupted_successful_quarantine_rename_retains_private_root(self):
+        output = self.root / "interrupted-quarantine.dmg"
+        runner = self.command_runner()
+        real_hash = package_local_dmg._sha256_fd
+        real_rename = package_local_dmg._rename_no_replace
+        hash_calls = 0
+
+        def fail_after_owned_public_link(descriptor):
+            nonlocal hash_calls
+            hash_calls += 1
+            if hash_calls == 2:
+                raise package_local_dmg.PackageError(
+                    "synthetic post-link validation failure"
+                )
+            return real_hash(descriptor)
+
+        def rename_then_interrupt(*args, **kwargs):
+            real_rename(*args, **kwargs)
+            raise KeyboardInterrupt("synthetic interruption after rename")
+
+        with mock.patch.object(package_local_dmg, "require_system_tools"), mock.patch.object(
+            package_local_dmg, "checked_run", side_effect=runner
+        ), mock.patch("os.path.ismount", return_value=True), mock.patch(
+            "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
+        ), mock.patch.object(
+            package_local_dmg,
+            "_sha256_fd",
+            side_effect=fail_after_owned_public_link,
+        ), mock.patch.object(
+            package_local_dmg,
+            "_rename_no_replace",
+            side_effect=rename_then_interrupt,
+        ), self.assertRaises(
+            package_local_dmg.RetainedQuarantineError
+        ) as raised:
+            package_local_dmg.package_local_dmg(self.app, output)
+
+        quarantine = Path(raised.exception.quarantine_path)
+        self.assertTrue(quarantine.is_file())
+        self.assertEqual(b"verified mock DMG payload", quarantine.read_bytes())
+        self.assertFalse(os.path.lexists(str(output)))
+        shutil.rmtree(quarantine.parent)
+
+    def test_retention_fsync_failure_cannot_reenable_recursive_cleanup(self):
+        output = self.root / "retention-fsync-failure.dmg"
+        runner = self.command_runner()
+        real_hash = package_local_dmg._sha256_fd
+        real_rename = package_local_dmg._rename_no_replace
+        real_fsync = os.fsync
+        hash_calls = 0
+        failed_retention_fsync = False
+
+        def fail_after_owned_public_link(descriptor):
+            nonlocal hash_calls
+            hash_calls += 1
+            if hash_calls == 2:
+                raise package_local_dmg.PackageError(
+                    "synthetic post-link validation failure"
+                )
+            return real_hash(descriptor)
+
+        def rename_then_interrupt(*args, **kwargs):
+            real_rename(*args, **kwargs)
+            raise KeyboardInterrupt("synthetic interruption after rename")
+
+        def fail_first_retention_directory_fsync(descriptor):
+            nonlocal failed_retention_fsync
+            observed = os.fstat(descriptor)
+            if stat.S_ISDIR(observed.st_mode) and not failed_retention_fsync:
+                failed_retention_fsync = True
+                raise OSError("synthetic retention fsync failure")
+            return real_fsync(descriptor)
+
+        with mock.patch.object(package_local_dmg, "require_system_tools"), mock.patch.object(
+            package_local_dmg, "checked_run", side_effect=runner
+        ), mock.patch("os.path.ismount", return_value=True), mock.patch(
+            "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
+        ), mock.patch.object(
+            package_local_dmg,
+            "_sha256_fd",
+            side_effect=fail_after_owned_public_link,
+        ), mock.patch.object(
+            package_local_dmg,
+            "_rename_no_replace",
+            side_effect=rename_then_interrupt,
+        ), mock.patch(
+            "os.fsync",
+            side_effect=fail_first_retention_directory_fsync,
+        ), self.assertRaisesRegex(
+            package_local_dmg.RetainedQuarantineError,
+            "quarantine fsync failures",
+        ) as raised:
+            package_local_dmg.package_local_dmg(self.app, output)
+
+        self.assertTrue(failed_retention_fsync)
+        quarantine = Path(raised.exception.quarantine_path)
+        self.assertTrue(quarantine.is_file())
+        self.assertEqual(b"verified mock DMG payload", quarantine.read_bytes())
+        self.assertFalse(os.path.lexists(str(output)))
+        shutil.rmtree(quarantine.parent)
+
     def test_post_commit_candidate_cleanup_failure_preserves_final_inode(self):
         fixture = self.publish_fixture()
         real_unlink = os.unlink
 
         def reject_candidate_cleanup(path, *args, **kwargs):
-            if path == fixture["candidate"].name and kwargs.get("dir_fd") is not None:
+            if (
+                str(path).startswith(".dmg-cleanup-")
+                and kwargs.get("dir_fd") is not None
+            ):
                 raise OSError("synthetic candidate cleanup failure")
             return real_unlink(path, *args, **kwargs)
 

@@ -11300,31 +11300,116 @@ def _candidate_package_command(command, planned_output, candidate):
 def _cleanup_private_dmg_candidate(
     temporary_root, root_identity, candidate, candidate_identity=None
 ):
-    """Unlink only the expected candidate, then remove its exact empty root."""
+    """Quarantine-remove only an identified candidate and its exact root."""
     temporary_root = Path(temporary_root)
     candidate = Path(candidate)
     if candidate.parent != temporary_root:
         raise PipelineError("DMG runtime candidate escaped its private root")
-    if _private_candidate_root_identity(temporary_root) != tuple(root_identity):
-        raise PipelineError("DMG runtime candidate root identity changed")
-    if os.path.lexists(str(candidate)):
-        observed = os.lstat(str(candidate))
-        if not stat.S_ISREG(observed.st_mode):
-            raise PipelineError("refusing to remove unsafe DMG runtime candidate")
-        if candidate_identity is not None and (
-            observed.st_dev,
-            observed.st_ino,
-        ) != tuple(candidate_identity):
-            raise PipelineError("DMG runtime candidate identity changed")
-        candidate.unlink()
+    root_fd = parent_fd = None
     try:
-        temporary_root.rmdir()
-    except OSError as exc:
-        raise PipelineError(
-            "private DMG runtime candidate root is not safely empty; retained at {}".format(
-                temporary_root
+        root_fd = os.open(
+            str(temporary_root), package_local_dmg._directory_flags()
+        )
+        root_stat = os.fstat(root_fd)
+        if (
+            (root_stat.st_dev, root_stat.st_ino) != tuple(root_identity)
+            or _private_candidate_root_identity(temporary_root)
+            != tuple(root_identity)
+        ):
+            raise PipelineError("DMG runtime candidate root identity changed")
+        candidate_stat = package_local_dmg._entry_stat(candidate.name, root_fd)
+        if candidate_stat is not None:
+            if candidate_identity is None:
+                raise PipelineError(
+                    "DMG runtime candidate identity is unknown; private root "
+                    "retained at {}".format(temporary_root)
+                )
+            try:
+                package_local_dmg.remove_private_entry_exact(
+                    root_fd,
+                    candidate.name,
+                    candidate_identity,
+                )
+            except package_local_dmg.PackageError as exc:
+                raise PipelineError(str(exc)) from exc
+        if os.listdir(root_fd):
+            raise PipelineError(
+                "private DMG runtime candidate root is not safely empty; "
+                "retained at {}".format(temporary_root)
             )
-        ) from exc
+        os.fsync(root_fd)
+
+        parent_fd = os.open(
+            str(temporary_root.parent), package_local_dmg._directory_flags()
+        )
+        quarantine_name = package_local_dmg._unused_quarantine_name(
+            parent_fd, "dmg-root-cleanup"
+        )
+        try:
+            deferred_interrupt = package_local_dmg._rename_no_replace_observed(
+                temporary_root.name,
+                parent_fd,
+                quarantine_name,
+                parent_fd,
+            )
+        except (OSError, package_local_dmg.PackageError) as exc:
+            raise PipelineError(
+                "failed to quarantine private DMG root: {}".format(exc)
+            ) from exc
+        if deferred_interrupt is not None:
+            os.fsync(parent_fd)
+            raise PipelineError(
+                "private DMG root quarantine completed but was interrupted; "
+                "retained at {}".format(
+                    temporary_root.parent / quarantine_name
+                )
+            ) from deferred_interrupt
+        moved = package_local_dmg._entry_stat(quarantine_name, parent_fd)
+        if moved is None or not stat.S_ISDIR(moved.st_mode) or (
+            moved.st_dev,
+            moved.st_ino,
+        ) != tuple(root_identity):
+            try:
+                deferred_interrupt = package_local_dmg._rename_no_replace_observed(
+                    quarantine_name,
+                    parent_fd,
+                    temporary_root.name,
+                    parent_fd,
+                )
+            except BaseException as restore_error:
+                os.fsync(parent_fd)
+                raise PipelineError(
+                    "private DMG root changed during quarantine and could not "
+                    "be restored; retained as {}: {!r}".format(
+                        temporary_root.parent / quarantine_name,
+                        restore_error,
+                    )
+                ) from restore_error
+            os.fsync(parent_fd)
+            if deferred_interrupt is not None:
+                raise PipelineError(
+                    "replacement DMG root was restored after interrupted quarantine"
+                ) from deferred_interrupt
+            raise PipelineError("DMG runtime candidate root identity changed")
+        try:
+            os.rmdir(quarantine_name, dir_fd=parent_fd)
+        except OSError as exc:
+            os.fsync(parent_fd)
+            raise PipelineError(
+                "exact private DMG root could not be removed; retained at {}".format(
+                    temporary_root.parent / quarantine_name
+                )
+            ) from exc
+        if package_local_dmg._entry_stat(quarantine_name, parent_fd) is not None:
+            raise PipelineError("failed to remove exact private DMG root")
+        os.fsync(parent_fd)
+    finally:
+        for descriptor in (parent_fd, root_fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
 
 
 def _publish_accepted_dmg(candidate, candidate_identity, output, size, digest):

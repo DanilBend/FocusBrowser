@@ -3592,7 +3592,7 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertEqual(1, len(candidates))
         self.assertFalse(candidates[0].parent.exists())
 
-    def test_package_post_run_failure_cleans_private_candidate(self):
+    def test_package_post_run_failure_retains_candidate_with_unknown_identity(self):
         fixture = self.prepare_execute_merge_fixture()
         candidates = []
 
@@ -3615,7 +3615,15 @@ class BuildPipelineTests(unittest.TestCase):
 
         self.assertFalse(fixture["output"].exists())
         self.assertEqual(1, len(candidates))
-        self.assertFalse(candidates[0].parent.exists())
+        self.assertEqual(
+            b"packager completed before monitor failed",
+            candidates[0].read_bytes(),
+        )
+        self.assertEqual(
+            0o700,
+            stat.S_IMODE(os.lstat(str(candidates[0].parent)).st_mode),
+        )
+        shutil.rmtree(candidates[0].parent)
 
     def test_atomic_publish_race_preserves_rival_and_cleans_candidate(self):
         fixture = self.prepare_execute_merge_fixture()
@@ -3705,7 +3713,7 @@ class BuildPipelineTests(unittest.TestCase):
             if (
                 not rejected_once
                 and kwargs.get("dir_fd") is not None
-                and Path(path).name == fixture["output"].name
+                and str(path).startswith(".dmg-cleanup-")
             ):
                 rejected_once = True
                 raise OSError("synthetic descriptor-relative cleanup failure")
@@ -3831,6 +3839,49 @@ class BuildPipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(build_pipeline.PipelineError, "changed DMG"):
             build_pipeline._unlink_created_dmg(output, identity)
         self.assertEqual(b"unrelated replacement", output.read_bytes())
+
+    def test_private_root_swap_during_cleanup_preserves_replacement(self):
+        temporary_root = self.root / ".focusbrowser-runtime-candidate-race"
+        temporary_root.mkdir(mode=0o700)
+        temporary_root.chmod(0o700)
+        candidate = temporary_root / "candidate.dmg"
+        candidate.write_bytes(b"owned candidate")
+        root_stat = os.lstat(str(temporary_root))
+        candidate_stat = os.lstat(str(candidate))
+        root_identity = (root_stat.st_dev, root_stat.st_ino)
+        candidate_identity = (candidate_stat.st_dev, candidate_stat.st_ino)
+        moved_original = self.root / "moved-original-private-root"
+        real_remove = build_pipeline.package_local_dmg.remove_private_entry_exact
+
+        def remove_then_replace(*args, **kwargs):
+            result = real_remove(*args, **kwargs)
+            temporary_root.rename(moved_original)
+            temporary_root.mkdir(mode=0o700)
+            temporary_root.chmod(0o700)
+            (temporary_root / candidate.name).write_bytes(b"rival candidate")
+            return result
+
+        with mock.patch.object(
+            build_pipeline.package_local_dmg,
+            "remove_private_entry_exact",
+            side_effect=remove_then_replace,
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "root identity changed"
+        ):
+            build_pipeline._cleanup_private_dmg_candidate(
+                temporary_root,
+                root_identity,
+                candidate,
+                candidate_identity,
+            )
+
+        self.assertEqual(
+            b"rival candidate", (temporary_root / candidate.name).read_bytes()
+        )
+        self.assertTrue(moved_original.is_dir())
+        self.assertEqual([], list(moved_original.iterdir()))
+        shutil.rmtree(temporary_root)
+        moved_original.rmdir()
 
     def test_recursive_reclamation_requires_explicit_flag(self):
         with self.assertRaisesRegex(build_pipeline.PipelineError, "allow-reclaim"):

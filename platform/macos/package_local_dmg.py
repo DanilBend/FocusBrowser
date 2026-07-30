@@ -2,10 +2,13 @@
 """Safely package an already-signed Focus Browser app into a local DMG."""
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import json
 import os
 import plistlib
+import secrets
 import stat
 import subprocess
 import sys
@@ -40,9 +43,19 @@ class PackageError(RuntimeError):
 class CommittedPublishError(PackageError):
     """Publication committed durably, but candidate cleanup did not finish."""
 
-    def __init__(self, message, final_identity):
+    def __init__(self, message, final_identity, retained_quarantine=None):
         super().__init__(message)
         self.final_identity = tuple(final_identity)
+        self.retained_quarantine = retained_quarantine
+
+
+class RetainedQuarantineError(PackageError):
+    """A namespace rival was preserved in private quarantine."""
+
+    def __init__(self, message, quarantine_name, quarantine_path=None):
+        super().__init__(message)
+        self.quarantine_name = quarantine_name
+        self.quarantine_path = quarantine_path
 
 
 def _directory_flags():
@@ -134,8 +147,136 @@ def _sha256_fd(file_fd):
     return digest.hexdigest()
 
 
-def _rollback_exact_output(parent_fd, output_name, identity):
-    """Rollback only our exact output inode and durably record its removal."""
+_RENAME_EXCL = 0x00000004
+
+
+def _rename_no_replace(source_name, source_fd, destination_name, destination_fd):
+    """Atomically rename one descriptor-relative leaf without replacement."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        renameatx = libc.renameatx_np
+    except AttributeError as exc:
+        raise PackageError("renameatx_np is required for safe DMG quarantine") from exc
+    renameatx.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameatx.restype = ctypes.c_int
+    result = renameatx(
+        source_fd,
+        os.fsencode(source_name),
+        destination_fd,
+        os.fsencode(destination_name),
+        _RENAME_EXCL,
+    )
+    if result:
+        error_number = ctypes.get_errno()
+        if error_number == errno.EEXIST:
+            raise FileExistsError(
+                error_number, os.strerror(error_number), destination_name
+            )
+        if error_number == errno.ENOENT:
+            raise FileNotFoundError(
+                error_number, os.strerror(error_number), source_name
+            )
+        raise OSError(error_number, os.strerror(error_number), source_name)
+
+
+def _rename_no_replace_observed(
+    source_name, source_fd, destination_name, destination_fd
+):
+    """Return an ambiguous interruption if the destination proves the rename."""
+    try:
+        _rename_no_replace(
+            source_name,
+            source_fd,
+            destination_name,
+            destination_fd,
+        )
+    except (OSError, PackageError):
+        raise
+    except BaseException as exc:
+        # A signal can be delivered after renameatx_np committed but before
+        # Python records its normal return.  Destination existence is enough
+        # to prohibit ordinary cleanup; the caller either restores it or marks
+        # that exact quarantine as retained.
+        if _entry_stat(destination_name, destination_fd) is not None:
+            return exc
+        raise
+    return None
+
+
+def _unused_quarantine_name(directory_fd, prefix):
+    """Choose an unpredictable absent leaf inside a descriptor-pinned root."""
+    for _ in range(16):
+        name = ".{}-{}".format(prefix, secrets.token_hex(16))
+        if _entry_stat(name, directory_fd) is None:
+            return name
+    raise PackageError("could not allocate a private DMG quarantine leaf")
+
+
+def _retained_quarantine_exception(message, quarantine_name, *directory_fds):
+    """Create an irrevocable retained outcome, appending fsync failures."""
+    sync_errors = []
+    seen = set()
+    for directory_fd in directory_fds:
+        if directory_fd in seen:
+            continue
+        seen.add(directory_fd)
+        try:
+            os.fsync(directory_fd)
+        except BaseException as exc:
+            sync_errors.append(repr(exc))
+    if sync_errors:
+        message = "{}; quarantine fsync failures={}".format(
+            message,
+            "; ".join(sync_errors),
+        )
+    return RetainedQuarantineError(message, quarantine_name)
+
+
+def _restore_quarantined_rival(
+    quarantine_name,
+    root_fd,
+    output_name,
+    parent_fd,
+    rival_identity,
+):
+    """Atomically restore a moved rival, never overwriting a new entry."""
+    try:
+        deferred_interrupt = _rename_no_replace_observed(
+            quarantine_name,
+            root_fd,
+            output_name,
+            parent_fd,
+        )
+    except FileExistsError as exc:
+        raise _retained_quarantine_exception(
+            "DMG rollback found a rival and retained it in private quarantine "
+            "as {!r} because the public leaf was occupied again".format(
+                quarantine_name
+            ),
+            quarantine_name,
+            root_fd,
+            parent_fd,
+        ) from exc
+    restored = _entry_stat(output_name, parent_fd)
+    if restored is None or (
+        restored.st_dev,
+        restored.st_ino,
+    ) != tuple(rival_identity):
+        raise PackageError("restored DMG rival changed during quarantine recovery")
+    os.fsync(root_fd)
+    os.fsync(parent_fd)
+    if deferred_interrupt is not None:
+        raise deferred_interrupt
+
+
+def _rollback_exact_output(parent_fd, root_fd, output_name, identity):
+    """Withdraw only our exact public inode via private atomic quarantine."""
     observed = _entry_stat(output_name, parent_fd)
     if observed is None:
         return False
@@ -144,10 +285,122 @@ def _rollback_exact_output(parent_fd, output_name, identity):
         observed.st_ino,
     ) != tuple(identity):
         return False
-    os.unlink(output_name, dir_fd=parent_fd)
-    if _entry_stat(output_name, parent_fd) is not None:
-        raise PackageError("failed to remove rejected DMG output inode")
+    quarantine_name = _unused_quarantine_name(root_fd, "dmg-rollback")
+    try:
+        deferred_interrupt = _rename_no_replace_observed(
+            output_name,
+            parent_fd,
+            quarantine_name,
+            root_fd,
+        )
+    except FileNotFoundError:
+        return False
+    if deferred_interrupt is not None:
+        raise _retained_quarantine_exception(
+            "DMG rollback rename completed but was interrupted; entry retained "
+            "as {!r}".format(quarantine_name),
+            quarantine_name,
+            root_fd,
+            parent_fd,
+        ) from deferred_interrupt
+    moved = _entry_stat(quarantine_name, root_fd)
+    if moved is None:
+        raise PackageError("DMG rollback quarantine entry disappeared")
+    moved_identity = (moved.st_dev, moved.st_ino)
+    if not stat.S_ISREG(moved.st_mode) or moved_identity != tuple(identity):
+        _restore_quarantined_rival(
+            quarantine_name,
+            root_fd,
+            output_name,
+            parent_fd,
+            moved_identity,
+        )
+        return False
+    # The random quarantine leaf lives under the pinned private 0700 root.
+    # Public namespace mutation can no longer redirect this unlink.
+    os.unlink(quarantine_name, dir_fd=root_fd)
+    if _entry_stat(quarantine_name, root_fd) is not None:
+        raise PackageError("failed to remove exact quarantined DMG output inode")
+    os.fsync(root_fd)
     os.fsync(parent_fd)
+    return True
+
+
+def remove_private_entry_exact(directory_fd, name, identity):
+    """Remove one known private entry through no-replace quarantine."""
+    if identity is None:
+        raise PackageError("private DMG entry identity is unknown; retained")
+    observed = _entry_stat(name, directory_fd)
+    if observed is None:
+        return False
+    quarantine_name = _unused_quarantine_name(directory_fd, "dmg-cleanup")
+    deferred_interrupt = _rename_no_replace_observed(
+        name,
+        directory_fd,
+        quarantine_name,
+        directory_fd,
+    )
+    if deferred_interrupt is not None:
+        raise _retained_quarantine_exception(
+            "private DMG cleanup rename completed but was interrupted; "
+            "entry retained as {!r}".format(quarantine_name),
+            quarantine_name,
+            directory_fd,
+        ) from deferred_interrupt
+    moved = _entry_stat(quarantine_name, directory_fd)
+    if moved is None:
+        raise PackageError("private DMG cleanup quarantine disappeared")
+    moved_identity = (moved.st_dev, moved.st_ino)
+    if not stat.S_ISREG(moved.st_mode) or moved_identity != tuple(identity):
+        try:
+            deferred_interrupt = _rename_no_replace_observed(
+                quarantine_name,
+                directory_fd,
+                name,
+                directory_fd,
+            )
+        except FileExistsError as exc:
+            raise _retained_quarantine_exception(
+                "private DMG cleanup found a rival; retained as {!r}".format(
+                    quarantine_name
+                ),
+                quarantine_name,
+                directory_fd,
+            ) from exc
+        os.fsync(directory_fd)
+        if deferred_interrupt is not None:
+            raise deferred_interrupt
+        raise PackageError("private DMG entry changed during cleanup and was restored")
+    try:
+        os.unlink(quarantine_name, dir_fd=directory_fd)
+    except BaseException as exc:
+        try:
+            deferred_interrupt = _rename_no_replace_observed(
+                quarantine_name,
+                directory_fd,
+                name,
+                directory_fd,
+            )
+        except BaseException as restore_error:
+            raise _retained_quarantine_exception(
+                "exact private DMG entry could not be removed and was retained "
+                "as {!r}: original={!r}; restore={!r}".format(
+                    quarantine_name,
+                    exc,
+                    restore_error,
+                ),
+                quarantine_name,
+                directory_fd,
+            ) from exc
+        os.fsync(directory_fd)
+        if deferred_interrupt is not None:
+            raise deferred_interrupt
+        raise PackageError(
+            "exact private DMG entry cleanup failed and its original name was restored"
+        ) from exc
+    if _entry_stat(quarantine_name, directory_fd) is not None:
+        raise PackageError("failed to remove exact private DMG entry")
+    os.fsync(directory_fd)
     return True
 
 
@@ -182,7 +435,7 @@ def durable_publish_candidate(
 
     root_fd = parent_fd = candidate_fd = output_fd = None
     committed = False
-    link_syscall_rejected = False
+    owned_link_confirmed = False
     try:
         root_fd = os.open(str(candidate.parent), _directory_flags())
         parent_fd = os.open(str(output.parent), _directory_flags())
@@ -228,14 +481,17 @@ def durable_publish_candidate(
                 dst_dir_fd=parent_fd,
                 follow_symlinks=False,
             )
+            # Only a normal syscall return authorizes later rollback.  An
+            # interruption raised from inside os.link is ambiguous even when
+            # the public inode happens to match, because a racing same-inode
+            # hardlink cannot be distinguished safely.
+            owned_link_confirmed = True
         except FileExistsError as exc:
             # A real link(2) EEXIST proves this call did not create the entry.
             # It can even be a racing hardlink to the candidate itself, so
             # inode equality alone is not authority to remove it.
-            link_syscall_rejected = True
             raise PackageError("refusing to overwrite existing DMG output") from exc
         except OSError as exc:
-            link_syscall_rejected = True
             raise PackageError(
                 "failed to atomically place DMG output: {}".format(exc)
             ) from exc
@@ -270,15 +526,12 @@ def durable_publish_candidate(
         committed = True
 
         try:
-            candidate_name = _entry_stat(candidate.name, root_fd)
-            if candidate_name is None or not _same_inode(
-                candidate_name, pinned_candidate
+            if not remove_private_entry_exact(
+                root_fd,
+                candidate.name,
+                expected_identity,
             ):
-                raise PackageError("DMG candidate pathname changed during cleanup")
-            os.unlink(candidate.name, dir_fd=root_fd)
-            if _entry_stat(candidate.name, root_fd) is not None:
-                raise PackageError("failed to unlink private DMG candidate")
-            os.fsync(root_fd)
+                raise PackageError("private DMG candidate disappeared during cleanup")
             _require_pinned_directory(candidate.parent, root_fd, private=True)
             _require_pinned_directory(output.parent, parent_fd)
             final_stat = os.fstat(output_fd)
@@ -295,21 +548,44 @@ def durable_publish_candidate(
                 raise PackageError("final DMG inode changed after candidate cleanup")
             return final_stat
         except BaseException as exc:
+            retained_quarantine = None
+            if isinstance(exc, RetainedQuarantineError):
+                retained_quarantine = str(
+                    candidate.parent / exc.quarantine_name
+                )
             raise CommittedPublishError(
                 "DMG output is durably committed, but private candidate cleanup "
                 "did not complete: {!r}".format(exc),
                 expected_identity,
+                retained_quarantine=retained_quarantine,
             ) from exc
     except BaseException as original_error:
         if committed or isinstance(original_error, CommittedPublishError):
             raise
         rollback_error = None
-        if parent_fd is not None and not link_syscall_rejected:
+        if parent_fd is not None and owned_link_confirmed:
             try:
-                _rollback_exact_output(parent_fd, output.name, expected_identity)
+                _rollback_exact_output(
+                    parent_fd,
+                    root_fd,
+                    output.name,
+                    expected_identity,
+                )
             except BaseException as exc:
                 rollback_error = exc
         if rollback_error is not None:
+            if isinstance(rollback_error, RetainedQuarantineError):
+                quarantine_path = str(
+                    candidate.parent / rollback_error.quarantine_name
+                )
+                raise RetainedQuarantineError(
+                    "DMG publication failed and a racing rival was retained: "
+                    "original={!r}; rollback={!r}".format(
+                        original_error, rollback_error
+                    ),
+                    rollback_error.quarantine_name,
+                    quarantine_path=quarantine_path,
+                ) from original_error
             raise PackageError(
                 "DMG publication failed and exact-inode rollback also failed: "
                 "original={!r}; rollback={!r}".format(
@@ -605,13 +881,17 @@ def package_local_dmg(app_value, output_value, require_universal=False):
                 raise PackageError("refusing to overwrite output created during packaging: {}".format(output))
             candidate_stat = os.lstat(str(candidate))
             candidate_identity = (candidate_stat.st_dev, candidate_stat.st_ino)
-            durable_publish_candidate(
-                candidate,
-                output,
-                candidate_identity,
-                size,
-                digest,
-            )
+            try:
+                durable_publish_candidate(
+                    candidate,
+                    output,
+                    candidate_identity,
+                    size,
+                    digest,
+                )
+            except CommittedPublishError:
+                publication_committed = True
+                raise
             publication_committed = True
             report = {
                 "app": str(app),
@@ -629,14 +909,36 @@ def package_local_dmg(app_value, output_value, require_universal=False):
                 "local_only": True,
             }
         finally:
-            try:
-                temporary_manager.cleanup()
-            except BaseException as exc:
-                if not publication_committed or isinstance(
-                    exc, (KeyboardInterrupt, SystemExit)
-                ):
-                    raise
-                temporary_cleanup_warning = repr(exc)
+            active_error = sys.exc_info()[1]
+            retained_quarantine = getattr(
+                active_error, "retained_quarantine", None
+            ) or getattr(active_error, "quarantine_path", None)
+            if retained_quarantine is not None:
+                # Recursive TemporaryDirectory cleanup would destroy the rival
+                # that the quarantine protocol intentionally preserved.
+                temporary_manager._finalizer.detach()  # pylint: disable=protected-access
+                temporary_cleanup_warning = (
+                    "private quarantine retained at {}".format(
+                        retained_quarantine
+                    )
+                )
+            else:
+                try:
+                    temporary_manager.cleanup()
+                except BaseException as exc:
+                    if isinstance(active_error, CommittedPublishError):
+                        raise CommittedPublishError(
+                            "{}; temporary cleanup also failed: {!r}".format(
+                                active_error, exc
+                            ),
+                            active_error.final_identity,
+                            retained_quarantine=active_error.retained_quarantine,
+                        ) from active_error
+                    if not publication_committed or isinstance(
+                        exc, (KeyboardInterrupt, SystemExit)
+                    ):
+                        raise
+                    temporary_cleanup_warning = repr(exc)
     except BaseException:
         # durable_publish_candidate owns all pre-commit exact-inode rollback.
         # Once committed, no later cleanup or reporting failure may remove the
