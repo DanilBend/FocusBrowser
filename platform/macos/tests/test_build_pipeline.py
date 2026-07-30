@@ -5237,6 +5237,9 @@ class BuildPipelineTests(unittest.TestCase):
                 paths["transaction_root"]
                 / build_pipeline.FRESH_X64_TRANSACTION_PREPARED
             ),
+            "fresh_failed": str(paths["fresh_failed"]),
+            "transaction_failed": str(paths["transaction_failed"]),
+            "receipt_failed": str(paths["receipt_failed"]),
             "legacy_inventory": legacy,
             "fresh_profile": {
                 "flags_file": "fixture-x64.gn",
@@ -5362,6 +5365,101 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(str(paths["legacy_root"])))
         self.assertFalse(os.path.lexists(str(paths["transaction_root"])))
         self.assertFalse(os.path.lexists(str(paths["receipt"])))
+        self.assertTrue(paths["fresh_failed"].is_dir())
+        self.assertTrue(paths["transaction_failed"].is_dir())
+
+    def test_fresh_x64_exclusive_rename_never_replaces_rival(self):
+        source = self.root / "rename-source"
+        destination = self.root / "rename-destination"
+        source.mkdir()
+        destination.mkdir()
+        (source / "source-marker").write_bytes(b"source")
+        (destination / "rival-marker").write_bytes(b"rival")
+        identity = build_pipeline._fresh_x64_directory_identity(
+            source, "rename fixture"
+        )
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "destination exists"):
+            build_pipeline._rename_owned_directory(
+                source, destination, identity, "rename fixture"
+            )
+        self.assertEqual(b"source", (source / "source-marker").read_bytes())
+        self.assertEqual(b"rival", (destination / "rival-marker").read_bytes())
+
+    def test_fresh_x64_post_rename_failure_recovers_legacy_by_inode(self):
+        out, args_text = self.write_invalid_legacy_x64_graph()
+        marker = out / "keep-me.bin"
+        marker.write_bytes(b"legacy survives post-rename exception")
+        expected_hashes = dict(build_pipeline.SWIFTSHADER_DISABLED_ARGS_SHA256)
+        expected_hashes["x64"] = hashlib.sha256(
+            args_text.encode("utf-8")
+        ).hexdigest()
+        real_rename = build_pipeline._rename_owned_directory
+        calls = {"count": 0}
+
+        def fail_after_first_rename(*args):
+            calls["count"] += 1
+            result = real_rename(*args)
+            if calls["count"] == 1:
+                raise build_pipeline.PipelineError("injected post-rename failure")
+            return result
+
+        with mock.patch.object(
+            build_pipeline, "SWIFTSHADER_DISABLED_ARGS_SHA256", expected_hashes
+        ):
+            plan = self.fresh_x64_execution_plan(args_text)
+            with mock.patch.object(
+                build_pipeline, "fresh_x64_preparation_plan", return_value=plan
+            ), mock.patch.object(
+                build_pipeline, "require_free"
+            ), mock.patch.object(
+                build_pipeline,
+                "_rename_owned_directory",
+                side_effect=fail_after_first_rename,
+            ):
+                with self.assertRaisesRegex(
+                    build_pipeline.PipelineError, "post-rename failure"
+                ):
+                    build_pipeline.execute_fresh_x64_preparation(
+                        self.source, self.developer, plan, True
+                    )
+        self.assertEqual(
+            b"legacy survives post-rename exception", marker.read_bytes()
+        )
+        paths = build_pipeline._fresh_x64_fixed_paths(self.source)
+        self.assertFalse(os.path.lexists(str(paths["transaction_root"])))
+        self.assertTrue(paths["transaction_failed"].is_dir())
+
+    def test_fresh_x64_marker_failure_quarantines_transaction_and_keeps_legacy(self):
+        out, args_text = self.write_invalid_legacy_x64_graph()
+        marker = out / "keep-me.bin"
+        marker.write_bytes(b"legacy survives marker failure")
+        expected_hashes = dict(build_pipeline.SWIFTSHADER_DISABLED_ARGS_SHA256)
+        expected_hashes["x64"] = hashlib.sha256(
+            args_text.encode("utf-8")
+        ).hexdigest()
+        with mock.patch.object(
+            build_pipeline, "SWIFTSHADER_DISABLED_ARGS_SHA256", expected_hashes
+        ):
+            plan = self.fresh_x64_execution_plan(args_text)
+            with mock.patch.object(
+                build_pipeline, "fresh_x64_preparation_plan", return_value=plan
+            ), mock.patch.object(
+                build_pipeline, "require_free"
+            ), mock.patch.object(
+                build_pipeline,
+                "atomic_json",
+                side_effect=build_pipeline.PipelineError("injected marker failure"),
+            ):
+                with self.assertRaisesRegex(
+                    build_pipeline.PipelineError, "marker failure"
+                ):
+                    build_pipeline.execute_fresh_x64_preparation(
+                        self.source, self.developer, plan, True
+                    )
+        self.assertEqual(b"legacy survives marker failure", marker.read_bytes())
+        paths = build_pipeline._fresh_x64_fixed_paths(self.source)
+        self.assertFalse(os.path.lexists(str(paths["transaction_root"])))
+        self.assertTrue(paths["transaction_failed"].is_dir())
 
     def test_fresh_x64_execution_runs_only_gn_and_preserves_legacy_graph(self):
         out, args_text = self.write_invalid_legacy_x64_graph()

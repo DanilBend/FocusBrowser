@@ -9,6 +9,8 @@ non-macOS platform.
 """
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -59,6 +61,9 @@ FRESH_X64_PREPARATION_RECEIPT = "out/FocusMacFreshX64Preparation.json"
 FRESH_X64_LEGACY_ROOT = "out/FocusMacX64LegacyInvalid"
 FRESH_X64_TRANSACTION_ROOT = "out/.FocusMacX64LegacyInvalid.part"
 FRESH_X64_TRANSACTION_PREPARED = "prepared.json"
+FRESH_X64_FAILED_ROOT = "out/FocusMacX64FreshFailed"
+FRESH_X64_TRANSACTION_FAILED_ROOT = "out/FocusMacX64TransactionFailed"
+FRESH_X64_RECEIPT_FAILED = "out/FocusMacFreshX64PreparationFailed.json"
 STAGING_ROOT = "out/FocusMacStaging"
 STAGED_ARM_APP = STAGING_ROOT + "/arm64/" + APP_NAME
 STAGE_RECEIPT = STAGING_ROOT + "/arm64-receipt.json"
@@ -4754,15 +4759,30 @@ def generated_linkedit_strip_contract(out, tools):
     }
 
 
+def _rename_exclusive(source_path, destination_path, label):
+    """Use Darwin's atomic RENAME_EXCL primitive; never replace a rival."""
+    if sys.platform != "darwin":
+        raise PipelineError("{} exclusive rename requires macOS".format(label))
+    libc = ctypes.CDLL(None, use_errno=True)
+    renamex = libc.renamex_np
+    renamex.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    renamex.restype = ctypes.c_int
+    result = renamex(
+        os.fsencode(source_path), os.fsencode(destination_path), 0x00000004
+    )
+    if result != 0:
+        error = ctypes.get_errno()
+        detail = "destination exists" if error == errno.EEXIST else os.strerror(error)
+        raise PipelineError("{} exclusive rename failed: {}".format(label, detail))
+
+
 def _rename_owned_directory(source_path, destination_path, expected_identity, label):
-    """Rename one exact directory without replacing any destination."""
+    """Exclusively rename one exact directory and prove its identity afterward."""
     source_path = Path(source_path)
     destination_path = Path(destination_path)
-    if os.path.lexists(str(destination_path)):
-        raise PipelineError("{} destination already exists".format(label))
     if _fresh_x64_directory_identity(source_path, label) != expected_identity:
         raise PipelineError("{} identity changed before rename".format(label))
-    os.rename(str(source_path), str(destination_path))
+    _rename_exclusive(source_path, destination_path, label)
     _fsync_directory(source_path.parent)
     if destination_path.parent != source_path.parent:
         _fsync_directory(destination_path.parent)
@@ -4774,17 +4794,31 @@ def _rename_owned_directory(source_path, destination_path, expected_identity, la
         raise PipelineError("{} rename identity mismatch".format(label))
 
 
-def _remove_created_fresh_x64(path, expected_identity):
-    """Remove only the exact newly-created GN output during rollback."""
+def _locate_fresh_x64_directory(expected_identity, candidates, label):
+    """Locate one inode across known transaction states without changing it."""
+    matches = []
+    for candidate in map(Path, candidates):
+        if not os.path.lexists(str(candidate)):
+            continue
+        try:
+            current = _fresh_x64_directory_identity(candidate, label)
+        except (OSError, PipelineError):
+            continue
+        if current == expected_identity:
+            matches.append(candidate)
+    if len(matches) != 1:
+        raise PipelineError(
+            "{} identity has {} known locations".format(label, len(matches))
+        )
+    return matches[0]
+
+
+def _quarantine_owned_directory(path, destination, expected_identity, label):
+    """Move rollback material aside atomically; never recursively delete it."""
     path = Path(path)
-    if not os.path.lexists(str(path)):
-        return
-    if _fresh_x64_directory_identity(path, "fresh x86_64 rollback output") != expected_identity:
-        raise PipelineError("fresh x86_64 rollback output identity changed")
-    shutil.rmtree(str(path))
-    _fsync_directory(path.parent)
-    if os.path.lexists(str(path)):
-        raise PipelineError("fresh x86_64 rollback output remains")
+    destination = Path(destination)
+    _rename_owned_directory(path, destination, expected_identity, label)
+    return destination
 
 
 def _fresh_x64_fixed_paths(source):
@@ -4800,6 +4834,17 @@ def _fresh_x64_fixed_paths(source):
         ),
         "transaction_root": in_source(
             source, FRESH_X64_TRANSACTION_ROOT, "fresh x86_64 transaction"
+        ),
+        "fresh_failed": in_source(
+            source, FRESH_X64_FAILED_ROOT, "failed fresh x86_64 output"
+        ),
+        "transaction_failed": in_source(
+            source,
+            FRESH_X64_TRANSACTION_FAILED_ROOT,
+            "failed fresh x86_64 transaction",
+        ),
+        "receipt_failed": in_source(
+            source, FRESH_X64_RECEIPT_FAILED, "failed fresh x86_64 receipt"
         ),
     }
 
@@ -4847,7 +4892,14 @@ def fresh_x64_preparation_plan(source, developer_dir):
         alias_context=alias_context,
     )
     paths = _fresh_x64_fixed_paths(source)
-    for key in ("receipt", "legacy_root", "transaction_root"):
+    for key in (
+        "receipt",
+        "legacy_root",
+        "transaction_root",
+        "fresh_failed",
+        "transaction_failed",
+        "receipt_failed",
+    ):
         if os.path.lexists(str(paths[key])):
             raise PipelineError(
                 "fresh x86_64 {} already exists".format(key.replace("_", " "))
@@ -4883,6 +4935,9 @@ def fresh_x64_preparation_plan(source, developer_dir):
         "transaction_prepared": str(
             paths["transaction_root"] / FRESH_X64_TRANSACTION_PREPARED
         ),
+        "fresh_failed": str(paths["fresh_failed"]),
+        "transaction_failed": str(paths["transaction_failed"]),
+        "receipt_failed": str(paths["receipt_failed"]),
         "legacy_inventory": legacy,
         "fresh_profile": {
             "flags_file": profile["flags_file"],
@@ -4923,21 +4978,38 @@ def fresh_x64_preparation_plan(source, developer_dir):
     }
 
 
-def _fresh_x64_rollback_container(container, legacy_child):
-    """Remove only our prepared marker after the old graph is restored."""
-    container = Path(container)
-    if not os.path.lexists(str(container)):
-        return
-    if os.path.lexists(str(legacy_child)):
-        raise PipelineError("legacy x86_64 tree remains inside rollback container")
-    entries = list(container.iterdir())
-    if len(entries) != 1 or entries[0].name != FRESH_X64_TRANSACTION_PREPARED:
-        raise PipelineError("fresh x86_64 rollback container has unknown entries")
-    marker = entries[0]
-    marker_identity = _lstat_identity(marker)
-    _unlink_regular_identity(marker, marker_identity, "fresh x86_64 prepared marker")
-    container.rmdir()
-    _fsync_directory(container.parent)
+def _quarantine_fresh_x64_receipt(
+    receipt_path, failed_path, expected_value, publication
+):
+    """Move only our exact receipt aside; never unlink a possible replacement."""
+    receipt_path = Path(receipt_path)
+    failed_path = Path(failed_path)
+    if not os.path.lexists(str(receipt_path)):
+        return None
+    expected_bytes = (
+        json.dumps(expected_value, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    snapshot = _regular_file_snapshot(receipt_path)
+    identity = _lstat_identity(receipt_path)
+    if (
+        snapshot["bytes"] != len(expected_bytes)
+        or snapshot["sha256"] != hashlib.sha256(expected_bytes).hexdigest()
+        or (
+            publication is not None
+            and identity != publication.publication_identity
+        )
+    ):
+        raise PipelineError("fresh x86_64 rollback receipt is not our inode")
+    _rename_exclusive(
+        receipt_path, failed_path, "failed fresh x86_64 preparation receipt"
+    )
+    _fsync_directory(receipt_path.parent)
+    if (
+        os.path.lexists(str(receipt_path))
+        or _lstat_identity(failed_path) != identity
+    ):
+        raise PipelineError("fresh x86_64 receipt quarantine identity mismatch")
+    return failed_path
 
 
 def execute_fresh_x64_preparation(
@@ -4954,12 +5026,13 @@ def execute_fresh_x64_preparation(
     require_free(source, SOFT_FLOOR_GIB, "fresh x86_64 GN preparation")
     paths = {name: Path(expected[name]) for name in (
         "out", "receipt", "legacy_root", "legacy_out", "transaction_root",
-        "transaction_legacy_out", "transaction_prepared",
+        "transaction_legacy_out", "transaction_prepared", "fresh_failed",
+        "transaction_failed", "receipt_failed",
     )}
     transaction_identity = None
     fresh_identity = None
     receipt_publication = None
-    legacy_location = paths["out"]
+    receipt_value = None
     try:
         paths["transaction_root"].mkdir(mode=0o700, parents=False, exist_ok=False)
         transaction_identity = _fresh_x64_directory_identity(
@@ -4986,9 +5059,8 @@ def execute_fresh_x64_preparation(
             expected["legacy_inventory"]["identity"],
             "legacy x86_64 output",
         )
-        legacy_location = paths["transaction_legacy_out"]
         _verify_legacy_x64_inventory(
-            legacy_location, expected["legacy_inventory"]
+            paths["transaction_legacy_out"], expected["legacy_inventory"]
         )
         paths["out"].mkdir(mode=0o755, parents=False, exist_ok=False)
         fresh_identity = _fresh_x64_directory_identity(
@@ -5035,9 +5107,8 @@ def execute_fresh_x64_preparation(
             transaction_identity,
             "fresh x86_64 legacy container",
         )
-        legacy_location = paths["legacy_out"]
         _verify_legacy_x64_inventory(
-            legacy_location, expected["legacy_inventory"]
+            paths["legacy_out"], expected["legacy_inventory"]
         )
         prepared_final = paths["legacy_root"] / FRESH_X64_TRANSACTION_PREPARED
         receipt_value = {
@@ -5091,20 +5162,37 @@ def execute_fresh_x64_preparation(
     except BaseException as original_error:
         rollback_errors = []
         try:
-            if receipt_publication is not None and os.path.lexists(str(paths["receipt"])):
-                _unlink_regular_identity(
+            if receipt_value is not None:
+                _quarantine_fresh_x64_receipt(
                     paths["receipt"],
-                    receipt_publication.publication_identity,
-                    "fresh x86_64 preparation receipt",
+                    paths["receipt_failed"],
+                    receipt_value,
+                    receipt_publication,
                 )
         except BaseException as exc:
             rollback_errors.append("receipt={!r}".format(exc))
         try:
             if fresh_identity is not None:
-                _remove_created_fresh_x64(paths["out"], fresh_identity)
+                fresh_location = _locate_fresh_x64_directory(
+                    fresh_identity,
+                    (paths["out"], paths["fresh_failed"]),
+                    "fresh x86_64 rollback output",
+                )
+                if fresh_location == paths["out"]:
+                    _quarantine_owned_directory(
+                        fresh_location,
+                        paths["fresh_failed"],
+                        fresh_identity,
+                        "fresh x86_64 rollback output",
+                    )
         except BaseException as exc:
             rollback_errors.append("fresh_output={!r}".format(exc))
         try:
+            legacy_location = _locate_fresh_x64_directory(
+                expected["legacy_inventory"]["identity"],
+                (paths["out"], paths["transaction_legacy_out"], paths["legacy_out"]),
+                "legacy x86_64 rollback",
+            )
             if legacy_location != paths["out"]:
                 _verify_legacy_x64_inventory(
                     legacy_location, expected["legacy_inventory"]
@@ -5117,14 +5205,29 @@ def execute_fresh_x64_preparation(
                     expected["legacy_inventory"]["identity"],
                     "legacy x86_64 rollback",
                 )
-                container = (
-                    paths["legacy_root"]
-                    if legacy_location == paths["legacy_out"]
-                    else paths["transaction_root"]
-                )
-                _fresh_x64_rollback_container(container, legacy_location)
+            _verify_legacy_x64_inventory(paths["out"], expected["legacy_inventory"])
         except BaseException as exc:
             rollback_errors.append("legacy_restore={!r}".format(exc))
+        try:
+            if transaction_identity is not None:
+                container = _locate_fresh_x64_directory(
+                    transaction_identity,
+                    (
+                        paths["transaction_root"],
+                        paths["legacy_root"],
+                        paths["transaction_failed"],
+                    ),
+                    "fresh x86_64 rollback transaction",
+                )
+                if container != paths["transaction_failed"]:
+                    _quarantine_owned_directory(
+                        container,
+                        paths["transaction_failed"],
+                        transaction_identity,
+                        "fresh x86_64 rollback transaction",
+                    )
+        except BaseException as exc:
+            rollback_errors.append("transaction={!r}".format(exc))
         if rollback_errors:
             raise PipelineError(
                 "fresh x86_64 preparation failed and rollback failed closed: "
