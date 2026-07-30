@@ -198,9 +198,11 @@ python3 platform/macos/build_pipeline.py merge-sign-package \
 The DMG path must be absolute, absent, and below a real non-symlink parent.
 The pipeline verifies the completed disabled-SwiftShader signing receipt and
 exact signing sources, combines both apps, signs nested code with Chromium's
-generated scripts, requires `Signature=adhoc`, verifies the complete signature
-and both architectures, then runs the local DMG packager as a monitored
-process. The source and DMG filesystems are watched throughout packaging.
+generated scripts, consumes Chromium's deterministic unpackaged `stable/`
+distribution output, requires `Signature=adhoc`, verifies the complete
+signature and both architectures, then runs the local DMG packager as a
+monitored process. The source and DMG filesystems are watched throughout
+packaging.
 
 ## Disk safety and interrupted runs
 

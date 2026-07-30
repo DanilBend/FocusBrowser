@@ -53,6 +53,7 @@ STAGE_RECEIPT = STAGING_ROOT + "/arm64-receipt.json"
 RECLAIM_RECEIPT = STAGING_ROOT + "/arm64-reclaim-complete.json"
 UNSIGNED_ROOT = "out/FocusMacUnsignedUniversal"
 SIGNED_ROOT = "out/FocusMacSignedUniversal"
+SIGNED_DISTRIBUTION_DIR = "stable"
 SLICE_RECEIPT_NAME = "FocusMacBuild.json"
 GN_COMPAT_RECEIPT = "out/FocusMacGnCompatibility.json"
 GN_COMPAT_PATCH = MACOS_DIR / "patches/gn-disabled-feature-compat.patch"
@@ -3097,7 +3098,7 @@ def merge_plan(source, developer_dir, dmg_output):
             python,
             str(MACOS_DIR / "package_local_dmg.py"),
             "--app",
-            str(signed_root / APP_NAME),
+            str(signed_root / SIGNED_DISTRIBUTION_DIR / APP_NAME),
             "--output",
             str(output),
             "--require-universal",
@@ -3170,7 +3171,9 @@ def execute_merge(source, developer_dir, plan):
     if packaging_python_contract(source) != current_python:
         raise PipelineError("packaging Python changed before signing")
     run_monitored(plan["commands"]["sign"], source, environment)
-    signed_app = Path(plan["signed_root"]) / APP_NAME
+    signed_app = (
+        Path(plan["signed_root"]) / SIGNED_DISTRIBUTION_DIR / APP_NAME
+    )
     app_report(signed_app, ("arm64", "x86_64"))
     capture(
         [

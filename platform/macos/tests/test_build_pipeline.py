@@ -1790,6 +1790,16 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertIn("--development", sign)
         self.assertIn("--disable-packaging", sign)
         self.assertEqual("none", sign[sign.index("--notarize") + 1])
+        package = plan["commands"]["package"]
+        self.assertEqual(
+            str(
+                self.source
+                / build_pipeline.SIGNED_ROOT
+                / build_pipeline.SIGNED_DISTRIBUTION_DIR
+                / build_pipeline.APP_NAME
+            ),
+            package[package.index("--app") + 1],
+        )
         joined = " ".join(sign).lower()
         self.assertNotIn("developer id", joined)
         self.assertNotIn("notarytool", joined)
