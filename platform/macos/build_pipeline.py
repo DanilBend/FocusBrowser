@@ -17,6 +17,7 @@ import plistlib
 import re
 import selectors
 import shutil
+import shlex
 import signal
 import stat
 import struct
@@ -7097,6 +7098,71 @@ def _linked_execution_evidence(link, alias_receipt, label):
     return path, load_json(path, label)
 
 
+def _descriptor_bound_immutable_json(path, label):
+    """Read/hash/parse one immutable JSON inode through a single descriptor."""
+    path = Path(path)
+    descriptor = None
+    try:
+        descriptor = os.open(
+            str(path),
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) & 0o222
+            or before.st_size <= 0
+            or before.st_size > MAX_RECEIPT_BYTES
+        ):
+            raise PipelineError("{} ownership, mode, or size is unsafe".format(label))
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(65536, MAX_RECEIPT_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_RECEIPT_BYTES:
+                raise PipelineError("{} exceeded its byte bound".format(label))
+        after = os.fstat(descriptor)
+        if (
+            _stat_identity_value(before) != _stat_identity_value(after)
+            or total != after.st_size
+        ):
+            raise PipelineError("{} changed during descriptor-bound read".format(label))
+        data = b"".join(chunks)
+    except OSError as exc:
+        raise PipelineError("cannot descriptor-read {}: {}".format(label, path)) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    current = os.stat(str(path), follow_symlinks=False)
+    if _stat_identity_value(current) != _stat_identity_value(after):
+        raise PipelineError("{} path no longer names the read inode".format(label))
+
+    def object_without_duplicates(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise PipelineError("duplicate {} key: {}".format(label, key))
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(
+            data.decode("utf-8"), object_pairs_hook=object_without_duplicates
+        )
+    except (ValueError, TypeError, UnicodeDecodeError) as exc:
+        raise PipelineError("invalid {}: {}".format(label, path)) from exc
+    if not isinstance(value, dict):
+        raise PipelineError("{} root must be an object".format(label))
+    return value, hashlib.sha256(data).hexdigest(), _stat_identity_value(after)
+
+
 def _validate_live_process_observation(
     observation, initial_path, initial_hash, record, alias_receipt, ninja
 ):
@@ -7591,6 +7657,988 @@ def _resume_execution_initial_basename(record_path, architecture):
     return name + ".part"
 
 
+def _resume3_exact_keys(value, keys, label):
+    if not isinstance(value, dict) or set(value) != set(keys):
+        raise PipelineError("{} schema mismatch".format(label))
+    return value
+
+
+def _resume3_exact_link(record_path, link, alias_receipt, suffix, label):
+    if not isinstance(link, dict) or set(link) != {"path", "sha256"}:
+        raise PipelineError("{} link schema mismatch".format(label))
+    if not isinstance(link["sha256"], str) or not re.fullmatch(
+        r"[0-9a-f]{64}", link["sha256"]
+    ):
+        raise PipelineError("{} link hash is invalid".format(label))
+    path = _execution_evidence_path(link["path"], alias_receipt, label)
+    stem = record_path.name[: -len(".execution.json")]
+    expected = record_path.with_name(stem + suffix)
+    if Path(link["path"]) != expected or path != expected:
+        raise PipelineError("{} is not the exact run sibling".format(label))
+    if _volume_identity(path)["volume_uuid"] != alias_receipt["volume"][
+        "volume_uuid"
+    ]:
+        raise PipelineError("{} volume changed".format(label))
+    value, observed_hash, _identity = _descriptor_bound_immutable_json(path, label)
+    if observed_hash != link["sha256"]:
+        raise PipelineError("{} hash changed".format(label))
+    return path, value
+
+
+def _resume3_snapshot_contract(value, label):
+    keys = {
+        "device",
+        "inode",
+        "uid",
+        "gid",
+        "mode",
+        "bytes",
+        "mtime_ns",
+        "ctime_ns",
+        "birth_time_ns",
+        "path",
+        "sha256",
+    }
+    _resume3_exact_keys(value, keys, label)
+    integer_keys = keys - {"path", "sha256"}
+    if (
+        any(type(value[key]) is not int for key in integer_keys)
+        or any(value[key] < 0 for key in integer_keys)
+        or not isinstance(value["path"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", value["sha256"])
+    ):
+        raise PipelineError("{} values are invalid".format(label))
+    return value
+
+
+def _resume3_member_contract(member, role, expected_pgid, label):
+    keys = {
+        "role",
+        "pid",
+        "ppid",
+        "pgid",
+        "ps_command",
+        "started_at_ns",
+        "cwd_physical",
+        "executable",
+        "executable_bytes",
+        "executable_inode",
+        "executable_sha256",
+    }
+    _resume3_exact_keys(member, keys, label)
+    if (
+        member["role"] != role
+        or any(
+            type(member[name]) is not int
+            for name in (
+                "pid",
+                "ppid",
+                "pgid",
+                "started_at_ns",
+                "executable_bytes",
+                "executable_inode",
+            )
+        )
+        or member["pid"] <= 1
+        or member["ppid"] <= 1
+        or member["pgid"] != expected_pgid
+        or member["started_at_ns"] <= 0
+        or member["executable_bytes"] <= 0
+        or member["executable_inode"] <= 0
+        or not isinstance(member["ps_command"], str)
+        or not member["ps_command"]
+        or not isinstance(member["cwd_physical"], str)
+        or not Path(member["cwd_physical"]).is_absolute()
+        or not isinstance(member["executable"], str)
+        or not Path(member["executable"]).is_absolute()
+        or not re.fullmatch(r"[0-9a-f]{64}", member["executable_sha256"])
+    ):
+        raise PipelineError("{} values are invalid".format(label))
+    executable = Path(member["executable"])
+    observed = os.stat(str(executable), follow_symlinks=False)
+    if (
+        not stat.S_ISREG(observed.st_mode)
+        or member["executable_bytes"] != observed.st_size
+        or member["executable_inode"] != observed.st_ino
+        or member["executable_sha256"] != sha256_file(executable)
+    ):
+        raise PipelineError("{} executable identity changed".format(label))
+    return member
+
+
+def _resume3_process_group_contract(
+    primary, record, source, out, ninja, physical_stdout
+):
+    group = primary.get("process_group")
+    _resume3_exact_keys(group, {"pgid", "members", "dynamic_descendants"}, "resume3 process group")
+    if type(group["pgid"]) is not int or group["pgid"] != record["process"]["pgid"]:
+        raise PipelineError("resume3 process group PGID mismatch")
+    expected_roles = (
+        "pipeline_shell_group_leader",
+        "autoninja_shell",
+        "stdout_tee",
+        "depot_python_launcher_shell",
+        "autoninja_python",
+        "pinned_ninja",
+        "ninja_caffeinate",
+    )
+    members = group["members"]
+    dynamic = group["dynamic_descendants"]
+    if not isinstance(members, list) or not isinstance(dynamic, list):
+        raise PipelineError("resume3 process group members are not lists")
+    by_role = {}
+    by_pid = {}
+    for index, member in enumerate(members):
+        if not isinstance(member, dict) or member.get("role") not in expected_roles:
+            raise PipelineError("resume3 stable process role is invalid")
+        role = member["role"]
+        if role in by_role:
+            raise PipelineError("resume3 stable process role is duplicated")
+        _resume3_member_contract(
+            member, role, group["pgid"], "resume3 stable member {}".format(index)
+        )
+        if member["pid"] in by_pid:
+            raise PipelineError("resume3 process PID is duplicated")
+        by_role[role] = member
+        by_pid[member["pid"]] = member
+    if set(by_role) != set(expected_roles):
+        raise PipelineError("resume3 stable process roles mismatch")
+    for index, member in enumerate(dynamic):
+        _resume3_member_contract(
+            member,
+            "dynamic_descendant",
+            group["pgid"],
+            "resume3 dynamic descendant {}".format(index),
+        )
+        if member["pid"] in by_pid:
+            raise PipelineError("resume3 dynamic process PID is duplicated")
+        by_pid[member["pid"]] = member
+    leader = by_role["pipeline_shell_group_leader"]
+    shell = by_role["autoninja_shell"]
+    tee = by_role["stdout_tee"]
+    launcher = by_role["depot_python_launcher_shell"]
+    python = by_role["autoninja_python"]
+    pinned = by_role["pinned_ninja"]
+    caffeinate = by_role["ninja_caffeinate"]
+    if (
+        leader["pid"] != group["pgid"]
+        or shell["ppid"] != leader["pid"]
+        or tee["ppid"] != leader["pid"]
+        or launcher["ppid"] != shell["pid"]
+        or python["ppid"] != launcher["pid"]
+        or pinned["ppid"] != python["pid"]
+        or caffeinate["ppid"] != pinned["pid"]
+    ):
+        raise PipelineError("resume3 stable process ancestry mismatch")
+    expected_executables = {
+        "pipeline_shell_group_leader": Path("/bin/zsh"),
+        "autoninja_shell": Path("/bin/bash"),
+        "stdout_tee": Path("/usr/bin/tee"),
+        "depot_python_launcher_shell": Path("/bin/bash"),
+        "autoninja_python": (
+            Path(source).resolve(strict=True).parent
+            / "depot_tools"
+            / PACKAGING_PYTHON_RELDIR
+            / "python3.11"
+        ).resolve(strict=True),
+        "pinned_ninja": Path(ninja["path"]).resolve(strict=True),
+        "ninja_caffeinate": Path("/usr/bin/caffeinate"),
+    }
+    physical_source = Path(source).resolve(strict=True)
+    physical_out = Path(out).resolve(strict=True)
+    for role, member in by_role.items():
+        expected_cwd = physical_out if role == "pinned_ninja" else physical_source
+        if (
+            Path(member["executable"]).resolve(strict=True)
+            != expected_executables[role].resolve(strict=True)
+            or Path(member["cwd_physical"]).resolve(strict=True) != expected_cwd
+        ):
+            raise PipelineError("resume3 {} path identity mismatch".format(role))
+    leader_command = leader["ps_command"]
+    if (
+        "-f -c" not in leader_command
+        or "set -o pipefail" not in leader_command
+        or str(record["process"]["argv"][0]) not in leader_command
+        or " -j8 " not in " " + leader_command + " "
+        or str(physical_stdout) not in leader_command
+        or "gn gen" in leader_command
+        or "http://" in leader_command
+        or "https://" in leader_command
+    ):
+        raise PipelineError("resume3 no-rc pipeline leader command mismatch")
+    if str(record["process"]["argv"][0]) not in shell["ps_command"]:
+        raise PipelineError("resume3 autoninja shell command mismatch")
+    if str(ninja["path"]) not in pinned["ps_command"]:
+        raise PipelineError("resume3 pinned Ninja command mismatch")
+    for member in dynamic:
+        cursor = member
+        visited = set()
+        while cursor["pid"] != pinned["pid"]:
+            if cursor["pid"] in visited:
+                raise PipelineError("resume3 dynamic ancestry contains a cycle")
+            visited.add(cursor["pid"])
+            cursor = by_pid.get(cursor["ppid"])
+            if cursor is None:
+                raise PipelineError("resume3 dynamic ancestry does not reach Ninja")
+    return by_role
+
+
+def _resume3_monitor_contract(monitor, source, logs):
+    keys = {
+        "checks",
+        "minimum_free_bytes",
+        "last_free_bytes",
+        "maximum_stdout_bytes",
+        "hard_floor_bytes",
+        "stdout_limit_bytes",
+        "poll_interval_ms",
+        "source_path",
+        "logs_path",
+        "process_group_absent",
+        "memory",
+    }
+    _resume3_exact_keys(monitor, keys, "resume3 runtime monitor")
+    hard_floor = HARD_FLOOR_GIB * GIB
+    if (
+        type(monitor["checks"]) is not int
+        or monitor["checks"] < 2
+        or type(monitor["maximum_stdout_bytes"]) is not int
+        or not 0 <= monitor["maximum_stdout_bytes"] <= MAX_RESUME_STDOUT_BYTES
+        or type(monitor["poll_interval_ms"]) is not int
+        or monitor["poll_interval_ms"] <= 0
+        or monitor["hard_floor_bytes"] != hard_floor
+        or monitor["stdout_limit_bytes"] != MAX_RESUME_STDOUT_BYTES
+        or monitor["source_path"] != str(Path(source).resolve(strict=True))
+        or monitor["logs_path"] != str(Path(logs).resolve(strict=True))
+        or monitor["process_group_absent"] is not True
+    ):
+        raise PipelineError("resume3 runtime monitor success proof mismatch")
+    for name in ("minimum_free_bytes", "last_free_bytes"):
+        values = monitor[name]
+        _resume3_exact_keys(values, {"source", "logs"}, "resume3 {}".format(name))
+        if any(type(value) is not int or value < hard_floor for value in values.values()):
+            raise PipelineError("resume3 free-space proof crossed the hard floor")
+    for name in ("source", "logs"):
+        if monitor["minimum_free_bytes"][name] > monitor["last_free_bytes"][name]:
+            raise PipelineError("resume3 free-space aggregate is inconsistent")
+    memory = monitor["memory"]
+    memory_keys = {
+        "samples",
+        "minimum_free_percent",
+        "maximum_swap_used_bytes",
+        "maximum_swap_total_bytes",
+        "last",
+        "critical_free_consecutive",
+        "critical_swap_consecutive",
+        "maximum_critical_free_consecutive",
+        "maximum_critical_swap_consecutive",
+        "probe_every_checks",
+        "thresholds",
+    }
+    _resume3_exact_keys(memory, memory_keys, "resume3 memory monitor")
+    thresholds = {
+        "immediate_free_percent": 5,
+        "sustained_free_percent": 10,
+        "sustained_free_samples": 3,
+        "swap_free_percent": 15,
+        "swap_used_bytes": 8 * GIB,
+        "swap_sustained_samples": 2,
+    }
+    if not _strict_json_identity(memory["thresholds"], thresholds):
+        raise PipelineError("resume3 memory thresholds mismatch")
+    integer_names = (
+        "samples",
+        "minimum_free_percent",
+        "maximum_swap_used_bytes",
+        "maximum_swap_total_bytes",
+        "critical_free_consecutive",
+        "critical_swap_consecutive",
+        "maximum_critical_free_consecutive",
+        "maximum_critical_swap_consecutive",
+        "probe_every_checks",
+    )
+    if (
+        any(type(memory[name]) is not int or memory[name] < 0 for name in integer_names)
+        or memory["samples"] < 2
+        or memory["samples"] > monitor["checks"]
+        or memory["probe_every_checks"] != 5
+        or not 0 <= memory["minimum_free_percent"] <= 100
+        or memory["minimum_free_percent"] <= thresholds["immediate_free_percent"]
+        or memory["maximum_critical_free_consecutive"]
+        >= thresholds["sustained_free_samples"]
+        or memory["maximum_critical_swap_consecutive"]
+        >= thresholds["swap_sustained_samples"]
+        or memory["maximum_critical_free_consecutive"]
+        < memory["critical_free_consecutive"]
+        or memory["maximum_critical_swap_consecutive"]
+        < memory["critical_swap_consecutive"]
+    ):
+        raise PipelineError("resume3 memory aggregate proof mismatch")
+    last = memory["last"]
+    last_keys = {
+        "memory_total_bytes",
+        "free_percent",
+        "swap_total_bytes",
+        "swap_used_bytes",
+        "swap_free_bytes",
+    }
+    _resume3_exact_keys(last, last_keys, "resume3 last memory sample")
+    if (
+        any(type(last[name]) is not int for name in last_keys)
+        or last["memory_total_bytes"] <= 0
+        or not 0 <= last["free_percent"] <= 100
+        or min(last["swap_total_bytes"], last["swap_used_bytes"], last["swap_free_bytes"])
+        < 0
+        or memory["minimum_free_percent"] > last["free_percent"]
+        or memory["maximum_swap_used_bytes"] < last["swap_used_bytes"]
+        or memory["maximum_swap_total_bytes"] < last["swap_total_bytes"]
+        or abs(
+            last["swap_total_bytes"]
+            - last["swap_used_bytes"]
+            - last["swap_free_bytes"]
+        )
+        > 2 * 1024 ** 2
+    ):
+        raise PipelineError("resume3 last memory sample is inconsistent")
+    return monitor
+
+
+def _resume3_execution_record_contract(
+    record_path,
+    record,
+    record_sha256,
+    alias_receipt,
+    source,
+    developer_dir,
+    architecture,
+    out,
+    ninja,
+    allow_history_growth=False,
+    authorized_history=None,
+):
+    root_keys = {
+        "schema",
+        "kind",
+        "architecture",
+        "logical",
+        "process",
+        "identity",
+        "pre_run",
+        "stdout_log",
+        "completion",
+        "pre_launch",
+        "exit_status",
+        "live_process_observation",
+        "live_process_environment_supplement",
+        "live_process_revalidation",
+        "runner",
+    }
+    _resume3_exact_keys(record, root_keys, "resume3 execution record")
+    if (
+        type(record["schema"]) is not int
+        or record["schema"] != 3
+        or record["kind"] != "focus-macos-alias-raw-ninja-execution"
+        or record["architecture"] != architecture
+    ):
+        raise PipelineError("resume3 execution identity mismatch")
+    stem = record_path.name[: -len(".execution.json")]
+    if architecture != "arm64" or not re.fullmatch(
+        r"build-arm64-resume3-[A-Za-z0-9][A-Za-z0-9._-]*", stem
+    ):
+        raise PipelineError("resume3 run identifier mismatch")
+    expected_stdout_logical = record_path.with_name(stem + ".log")
+    expected_stdout_physical = _physical_execution_path(
+        expected_stdout_logical, alias_receipt, "resume3 stdout"
+    )
+    pre_path, pre = _resume3_exact_link(
+        record_path,
+        record["pre_launch"],
+        alias_receipt,
+        ".pre-launch.json",
+        "resume3 pre-launch evidence",
+    )
+    primary_path, primary = _resume3_exact_link(
+        record_path,
+        record["live_process_observation"],
+        alias_receipt,
+        ".live-process-observation.json",
+        "resume3 primary observation",
+    )
+    supplement_path, supplement = _resume3_exact_link(
+        record_path,
+        record["live_process_environment_supplement"],
+        alias_receipt,
+        ".live-environment-supplement.json",
+        "resume3 environment supplement",
+    )
+    revalidation_path, revalidation = _resume3_exact_link(
+        record_path,
+        record["live_process_revalidation"],
+        alias_receipt,
+        ".live-process-revalidation.json",
+        "resume3 process revalidation",
+    )
+    status_path, status = _resume3_exact_link(
+        record_path,
+        record["exit_status"],
+        alias_receipt,
+        ".exit-status.json",
+        "resume3 exit status",
+    )
+    logical_workspace = Path(alias_receipt["mappings"]["workspace"]["logical"])
+    expected_logical = {
+        "home": alias_receipt["logical_home"],
+        "workspace": str(logical_workspace),
+        "source": str(source),
+        "developer_dir": str(developer_dir),
+        "out": str(out),
+    }
+    expected_argv = [
+        str(Path(source).parent / "depot_tools" / "autoninja"),
+        "-j{}".format(BUILD_JOBS),
+        "-C",
+        str(Path(out).relative_to(source)),
+        "chrome",
+        "chrome/installer/mac:copies",
+    ]
+    expected_environment = {
+        "HOME": alias_receipt["logical_home"],
+        "LANG": "C",
+        "LC_ALL": "C",
+        "TZ": "UTC",
+        "DEVELOPER_DIR": str(developer_dir),
+        "PATH": os.pathsep.join(
+            (
+                str(Path(source).parent / "depot_tools"),
+                str(Path(ninja["path"]).parent),
+                SYSTEM_PATH,
+            )
+        ),
+        "DEPOT_TOOLS_UPDATE": "0",
+        "DEPOT_TOOLS_METRICS": "0",
+        "GCLIENT_FILE": str(Path(source).parent / ".gclient"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "NINJA_SUMMARIZE_BUILD": "1",
+    }
+    environment_order = (
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "TZ",
+        "DEVELOPER_DIR",
+        "PATH",
+        "DEPOT_TOOLS_UPDATE",
+        "DEPOT_TOOLS_METRICS",
+        "GCLIENT_FILE",
+        "PYTHONDONTWRITEBYTECODE",
+        "NINJA_SUMMARIZE_BUILD",
+    )
+    environment_tokens = [
+        "{}={}".format(name, shlex.quote(expected_environment[name]))
+        for name in environment_order
+    ]
+    expected_command = " ".join(shlex.quote(item) for item in expected_argv)
+    expected_shell_script = (
+        "set -o pipefail\n/usr/bin/env -i {} {} 2>&1 | /usr/bin/tee -a {}"
+    ).format(
+        " ".join(environment_tokens),
+        expected_command,
+        shlex.quote(str(expected_stdout_physical)),
+    )
+    process = record["process"]
+    _resume3_exact_keys(
+        process,
+        {"pid", "pgid", "started_at_ns", "observed_live_at_ns", "cwd", "argv", "environment"},
+        "resume3 process",
+    )
+    if (
+        type(process["pid"]) is not int
+        or process["pid"] <= 1
+        or process["pgid"] != process["pid"]
+        or type(process["started_at_ns"]) is not int
+        or type(process["observed_live_at_ns"]) is not int
+        or process["started_at_ns"] <= 0
+        or process["observed_live_at_ns"] < process["started_at_ns"]
+        or process["cwd"] != str(source)
+        or not _strict_json_identity(process["argv"], expected_argv)
+        or not _strict_json_identity(process["environment"], expected_environment)
+        or not _strict_json_identity(record["logical"], expected_logical)
+    ):
+        raise PipelineError("resume3 process provenance mismatch")
+    alias_identity = dict(alias_receipt["alias"])
+    alias_identity.pop("root_owned", None)
+    alias_identity.pop("absolute_exact_target", None)
+    alias_identity.pop("target_identity", None)
+    expected_identity = {
+        "alias": alias_identity,
+        "source": _execution_identity_mapping(alias_receipt["mappings"]["source"]),
+        "developer": _execution_identity_mapping(alias_receipt["mappings"]["developer"]),
+    }
+    if not _strict_json_identity(record["identity"], expected_identity):
+        raise PipelineError("resume3 inode identity mismatch")
+    pre_keys = {
+        "schema",
+        "kind",
+        "run_id",
+        "created_at_ns",
+        "architecture",
+        "logical",
+        "planned_process",
+        "identity",
+        "pre_run",
+        "stdout_log",
+        "runner",
+        "policy",
+    }
+    _resume3_exact_keys(pre, pre_keys, "resume3 pre-launch")
+    planned = pre["planned_process"]
+    _resume3_exact_keys(
+        planned,
+        {"cwd", "argv", "environment", "shell_argv", "start_new_session", "jobs"},
+        "resume3 planned process",
+    )
+    expected_shell = ["/bin/zsh", "-f", "-c", expected_shell_script]
+    shell_argv = planned["shell_argv"]
+    if (
+        type(pre["schema"]) is not int
+        or pre["schema"] != 1
+        or pre["kind"] != "focus-macos-alias-resume3-pre-launch"
+        or pre["run_id"] != stem
+        or type(pre["created_at_ns"]) is not int
+        or pre["created_at_ns"] <= 0
+        or pre["architecture"] != architecture
+        or not _strict_json_identity(pre["logical"], expected_logical)
+        or planned["cwd"] != process["cwd"]
+        or not _strict_json_identity(planned["argv"], process["argv"])
+        or not _strict_json_identity(planned["environment"], process["environment"])
+        or not isinstance(shell_argv, list)
+        or not _strict_json_identity(shell_argv, expected_shell)
+        or planned["start_new_session"] is not True
+        or type(planned["jobs"]) is not int
+        or planned["jobs"] != BUILD_JOBS
+        or not _strict_json_identity(pre["identity"], record["identity"])
+        or not _strict_json_identity(pre["pre_run"], record["pre_run"])
+    ):
+        raise PipelineError("resume3 pre-launch provenance mismatch")
+    policy = pre["policy"]
+    if not _strict_json_identity(
+        policy,
+        {
+            "explicit_gn_gen_command": False,
+            "network_operations": 0,
+            "single_run": True,
+            "final_success_requires_popen_wait_zero": True,
+        },
+    ):
+        raise PipelineError("resume3 pre-launch policy mismatch")
+    runner_identity = pre["runner"]
+    _resume3_exact_keys(runner_identity, {"path", "bytes", "sha256"}, "resume3 runner identity")
+    expected_runner = (MACOS_DIR / "alias_resume_runner.py").resolve(strict=True)
+    if (
+        Path(runner_identity["path"]).resolve(strict=True) != expected_runner
+        or type(runner_identity["bytes"]) is not int
+        or runner_identity["bytes"] != expected_runner.stat().st_size
+        or runner_identity["sha256"] != sha256_file(expected_runner)
+        or not _strict_json_identity(record["runner"], runner_identity)
+    ):
+        raise PipelineError("resume3 runner identity changed")
+    pre_stat = os.stat(str(pre_path), follow_symlinks=False)
+    if (
+        pre["created_at_ns"] >= process["started_at_ns"]
+        or pre_stat.st_mtime_ns >= process["started_at_ns"]
+    ):
+        raise PipelineError("resume3 pre-launch evidence is not historical")
+    pre_run = record["pre_run"]
+    _resume3_exact_keys(
+        pre_run,
+        {"ninja_log", "ninja_deps", "build_ninja", "toolchain_inventory"},
+        "resume3 pre-run",
+    )
+    for name, relative in (
+        ("ninja_log", ".ninja_log"),
+        ("ninja_deps", ".ninja_deps"),
+        ("build_ninja", "build.ninja"),
+    ):
+        _validate_recorded_file_snapshot(pre_run[name], Path(out) / relative, "resume3 pre-run {}".format(name))
+    _validate_recorded_toolchain_inventory(pre_run["toolchain_inventory"])
+    initial_stdout = pre["stdout_log"]
+    _resume3_exact_keys(
+        initial_stdout,
+        {"logical_path", "physical_path", "device", "inode", "uid", "gid", "mode", "bytes", "mtime_ns", "birth_time_ns"},
+        "resume3 initial stdout",
+    )
+    logical_stdout = Path(record["stdout_log"]["path"])
+    physical_stdout = _physical_execution_path(logical_stdout, alias_receipt, "resume3 stdout")
+    if (
+        logical_stdout != expected_stdout_logical
+        or physical_stdout != expected_stdout_physical
+        or initial_stdout["logical_path"] != str(logical_stdout)
+        or initial_stdout["physical_path"] != str(physical_stdout)
+        or any(type(initial_stdout[name]) is not int for name in set(initial_stdout) - {"logical_path", "physical_path"})
+        or initial_stdout["bytes"] != 0
+        or initial_stdout["mode"] & 0o022
+        or record["stdout_log"]
+        != {
+            "path": str(logical_stdout),
+            "device": initial_stdout["device"],
+            "inode": initial_stdout["inode"],
+            "birth_time_ns": initial_stdout["birth_time_ns"],
+        }
+    ):
+        raise PipelineError("resume3 initial stdout identity mismatch")
+    primary_keys = {"schema", "kind", "run_id", "observed_at_ns", "observation_methods", "pre_launch", "process_group", "stdout_log_live_snapshot"}
+    _resume3_exact_keys(primary, primary_keys, "resume3 primary observation")
+    if (
+        type(primary["schema"]) is not int
+        or primary["schema"] != 2
+        or primary["kind"] != "focus-macos-alias-raw-ninja-live-process-chain-observation"
+        or primary["run_id"] != stem
+        or type(primary["observed_at_ns"]) is not int
+        or primary["observed_at_ns"] != process["observed_live_at_ns"]
+        or primary["observation_methods"] != ["ps", "lsof", "proc_pidpath"]
+        or not _strict_json_identity(primary["pre_launch"], record["pre_launch"])
+    ):
+        raise PipelineError("resume3 primary observation mismatch")
+    stable_roles = _resume3_process_group_contract(
+        primary, record, source, out, ninja, physical_stdout
+    )
+    primary_stdout = _resume3_snapshot_contract(primary["stdout_log_live_snapshot"], "resume3 primary stdout")
+    if (
+        Path(primary_stdout["path"]) != physical_stdout
+        or primary_stdout["inode"] != initial_stdout["inode"]
+        or primary_stdout["birth_time_ns"] != initial_stdout["birth_time_ns"]
+        or primary_stdout["bytes"] <= 0
+        or primary_stdout["bytes"] > MAX_RESUME_STDOUT_BYTES
+        or primary_stdout["mode"] & 0o022
+        or primary_stdout["mtime_ns"] > primary["observed_at_ns"]
+    ):
+        raise PipelineError("resume3 primary stdout mismatch")
+    supplement_keys = {"schema", "kind", "run_id", "observed_at_ns", "observation_method", "primary_observation", "processes"}
+    _resume3_exact_keys(supplement, supplement_keys, "resume3 environment supplement")
+    if (
+        type(supplement["schema"]) is not int
+        or supplement["schema"] != 2
+        or supplement["kind"]
+        != "focus-macos-alias-raw-ninja-live-process-chain-observation-supplement"
+        or supplement["run_id"] != stem
+        or type(supplement["observed_at_ns"]) is not int
+        or supplement["observed_at_ns"] < primary["observed_at_ns"]
+        or supplement["observation_method"] != "ps eww"
+        or not _strict_json_identity(
+            supplement["primary_observation"], record["live_process_observation"]
+        )
+        or not isinstance(supplement["processes"], list)
+        or len(supplement["processes"]) != 2
+    ):
+        raise PipelineError("resume3 environment supplement mismatch")
+    supplement_by_role = {}
+    supplement_process_keys = {
+        "role",
+        "pid",
+        "ppid",
+        "pgid",
+        "PATH",
+        "PWD",
+        "allowlisted_environment",
+        "ps_eww_bytes",
+        "ps_eww_sha256",
+    }
+    python_bin = (
+        Path(source).parent
+        / "depot_tools/python-bin/.."
+        / PACKAGING_PYTHON_RELDIR
+    )
+    expected_path = os.pathsep.join(
+        (str(python_bin), str(python_bin / "Scripts"), expected_environment["PATH"])
+    )
+    expected_allowlisted = dict(expected_environment)
+    expected_allowlisted.pop("PATH")
+    for item in supplement["processes"]:
+        _resume3_exact_keys(item, supplement_process_keys, "resume3 supplemented process")
+        role = item["role"]
+        if role not in {"autoninja_python", "pinned_ninja"} or role in supplement_by_role:
+            raise PipelineError("resume3 supplemented process role mismatch")
+        stable = stable_roles[role]
+        if (
+            type(item["pid"]) is not int
+            or type(item["ppid"]) is not int
+            or type(item["pgid"]) is not int
+            or item["pid"] != stable["pid"]
+            or item["ppid"] != stable["ppid"]
+            or item["pgid"] != process["pgid"]
+            or item["PATH"] != expected_path
+            or item["PWD"] != str(Path(source).resolve(strict=True))
+            or not _strict_json_identity(item["allowlisted_environment"], expected_allowlisted)
+            or type(item["ps_eww_bytes"]) is not int
+            or item["ps_eww_bytes"] <= 0
+            or not re.fullmatch(r"[0-9a-f]{64}", item["ps_eww_sha256"])
+        ):
+            raise PipelineError("resume3 supplemented process identity mismatch")
+        supplement_by_role[role] = item
+    revalidation_keys = {"schema", "kind", "run_id", "capture_started_at_ns", "capture_finished_at_ns", "observation_methods", "linked_evidence", "stable_spine", "dynamic_descendants", "script_identities", "stdout_log_live_snapshot"}
+    _resume3_exact_keys(revalidation, revalidation_keys, "resume3 process revalidation")
+    if (
+        type(revalidation["schema"]) is not int
+        or revalidation["schema"] != 2
+        or revalidation["kind"]
+        != "focus-macos-alias-raw-ninja-live-process-chain-revalidation"
+        or revalidation["run_id"] != stem
+        or type(revalidation["capture_started_at_ns"]) is not int
+        or type(revalidation["capture_finished_at_ns"]) is not int
+        or revalidation["capture_started_at_ns"] < supplement["observed_at_ns"]
+        or revalidation["capture_finished_at_ns"] < revalidation["capture_started_at_ns"]
+        or revalidation["observation_methods"] != ["ps", "lsof", "proc_pidpath"]
+        or not _strict_json_identity(
+            revalidation["linked_evidence"],
+            {
+                "pre_launch": record["pre_launch"],
+                "primary_observation": record["live_process_observation"],
+                "environment_supplement": record["live_process_environment_supplement"],
+            },
+        )
+    ):
+        raise PipelineError("resume3 process revalidation mismatch")
+    spine_keys = {"role", "pid", "ppid", "pgid", "started_at_ns", "cwd_physical", "executable", "ps_command"}
+    spine = revalidation["stable_spine"]
+    if not isinstance(spine, list) or len(spine) != len(stable_roles):
+        raise PipelineError("resume3 stable revalidation spine mismatch")
+    revalidated_by_role = {}
+    for item in spine:
+        _resume3_exact_keys(item, spine_keys, "resume3 stable revalidation member")
+        role = item["role"]
+        if role not in stable_roles or role in revalidated_by_role:
+            raise PipelineError("resume3 stable revalidation role mismatch")
+        expected = {key: stable_roles[role][key] for key in spine_keys}
+        if not _strict_json_identity(item, expected):
+            raise PipelineError("resume3 stable process changed during revalidation")
+        revalidated_by_role[role] = item
+    dynamic_revalidation = revalidation["dynamic_descendants"]
+    if not isinstance(dynamic_revalidation, list):
+        raise PipelineError("resume3 dynamic revalidation is not a list")
+    revalidation_pids = {item["pid"]: item for item in spine}
+    for item in dynamic_revalidation:
+        _resume3_exact_keys(item, spine_keys, "resume3 revalidated dynamic process")
+        if (
+            item["role"] != "dynamic_descendant"
+            or any(type(item[name]) is not int for name in ("pid", "ppid", "pgid", "started_at_ns"))
+            or item["pid"] <= 1
+            or item["ppid"] <= 1
+            or item["pgid"] != process["pgid"]
+            or item["pid"] in revalidation_pids
+        ):
+            raise PipelineError("resume3 revalidated dynamic process mismatch")
+        revalidation_pids[item["pid"]] = item
+    pinned_pid = stable_roles["pinned_ninja"]["pid"]
+    for item in dynamic_revalidation:
+        cursor = item
+        visited = set()
+        while cursor["pid"] != pinned_pid:
+            if cursor["pid"] in visited:
+                raise PipelineError("resume3 revalidated dynamic ancestry cycle")
+            visited.add(cursor["pid"])
+            cursor = revalidation_pids.get(cursor["ppid"])
+            if cursor is None:
+                raise PipelineError("resume3 revalidated dynamic ancestry does not reach Ninja")
+    scripts = revalidation["script_identities"]
+    script_keys = {"path", "bytes", "inode", "uid", "gid", "mode", "sha256"}
+    expected_scripts = {
+        (Path(source).parent / "depot_tools/autoninja").resolve(strict=True),
+        (Path(source).parent / "depot_tools/autoninja.py").resolve(strict=True),
+        expected_runner,
+    }
+    if not isinstance(scripts, list) or len(scripts) != len(expected_scripts):
+        raise PipelineError("resume3 script identity list mismatch")
+    observed_scripts = set()
+    for item in scripts:
+        _resume3_exact_keys(item, script_keys, "resume3 script identity")
+        path = Path(item["path"]).resolve(strict=True)
+        observed = os.stat(str(path), follow_symlinks=False)
+        if (
+            path not in expected_scripts
+            or path in observed_scripts
+            or any(type(item[name]) is not int for name in ("bytes", "inode", "uid", "gid", "mode"))
+            or item["bytes"] != observed.st_size
+            or item["inode"] != observed.st_ino
+            or item["uid"] != observed.st_uid
+            or item["gid"] != observed.st_gid
+            or item["mode"] != stat.S_IMODE(observed.st_mode)
+            or item["sha256"] != sha256_file(path)
+        ):
+            raise PipelineError("resume3 script identity changed")
+        observed_scripts.add(path)
+    revalidation_stdout = _resume3_snapshot_contract(
+        revalidation["stdout_log_live_snapshot"], "resume3 revalidation stdout"
+    )
+    if (
+        Path(revalidation_stdout["path"]) != physical_stdout
+        or revalidation_stdout["inode"] != initial_stdout["inode"]
+        or revalidation_stdout["birth_time_ns"] != initial_stdout["birth_time_ns"]
+        or revalidation_stdout["bytes"] < primary_stdout["bytes"]
+        or revalidation_stdout["bytes"] > MAX_RESUME_STDOUT_BYTES
+        or revalidation_stdout["mode"] & 0o022
+        or revalidation_stdout["mtime_ns"] > revalidation["capture_finished_at_ns"]
+    ):
+        raise PipelineError("resume3 revalidation stdout mismatch")
+    status_keys = {"schema", "kind", "run_id", "pid", "pgid", "wait_observation", "pipefail", "outcome", "failure", "monitor", "evidence_complete", "pipeline_success_derived", "pre_launch", "live_evidence", "stdout_log", "post_run", "explicit_gn_gen_command", "network_operations"}
+    _resume3_exact_keys(status, status_keys, "resume3 exit status")
+    wait = status["wait_observation"]
+    _resume3_exact_keys(wait, {"api", "returncode", "wait_returned_at_ns", "runner_pid"}, "resume3 wait observation")
+    expected_live = {
+        "primary": record["live_process_observation"],
+        "supplement": record["live_process_environment_supplement"],
+        "revalidation": record["live_process_revalidation"],
+    }
+    if (
+        type(status["schema"]) is not int
+        or status["schema"] != 2
+        or status["kind"] != "focus-macos-alias-resume3-popen-exit-status"
+        or status["run_id"] != stem
+        or status["pid"] != process["pid"]
+        or status["pgid"] != process["pgid"]
+        or wait["api"] != "subprocess.Popen.wait"
+        or type(wait["returncode"]) is not int
+        or wait["returncode"] != 0
+        or type(wait["wait_returned_at_ns"]) is not int
+        or wait["wait_returned_at_ns"] <= revalidation["capture_finished_at_ns"]
+        or type(wait["runner_pid"]) is not int
+        or wait["runner_pid"] <= 1
+        or status["pipefail"] is not True
+        or status["outcome"] != "completed"
+        or status["failure"] is not None
+        or status["evidence_complete"] is not True
+        or status["pipeline_success_derived"] is not True
+        or not _strict_json_identity(status["pre_launch"], record["pre_launch"])
+        or not _strict_json_identity(status["live_evidence"], expected_live)
+        or status["explicit_gn_gen_command"] is not False
+        or type(status["network_operations"]) is not int
+        or status["network_operations"] != 0
+    ):
+        raise PipelineError("resume3 successful exit status mismatch")
+    logs = record_path.parent
+    _resume3_monitor_contract(status["monitor"], source, logs)
+    if _process_group_exists(process["pgid"]):
+        raise PipelineError("resume3 process group still exists after completion")
+    completion = record["completion"]
+    completion_keys = {"ended_at_ns", "observed_at_ns", "wrapper_exit_code", "pipefail", "pipeline_success_derived", "stdout_log", "post_run", "explicit_gn_gen_command"}
+    _resume3_exact_keys(completion, completion_keys, "resume3 completion")
+    if (
+        type(completion["ended_at_ns"]) is not int
+        or completion["ended_at_ns"] != wait["wait_returned_at_ns"]
+        or type(completion["observed_at_ns"]) is not int
+        or completion["observed_at_ns"] < completion["ended_at_ns"]
+        or type(completion["wrapper_exit_code"]) is not int
+        or completion["wrapper_exit_code"] != wait["returncode"]
+        or completion["pipefail"] is not True
+        or completion["pipeline_success_derived"] is not True
+        or completion["explicit_gn_gen_command"] is not False
+        or not _strict_json_identity(completion["stdout_log"], status["stdout_log"])
+        or not _strict_json_identity(completion["post_run"], status["post_run"])
+        or completion["ended_at_ns"] < process["observed_live_at_ns"]
+    ):
+        raise PipelineError("resume3 completion/status derivation mismatch")
+    final_stdout = _resume3_snapshot_contract(status["stdout_log"], "resume3 final stdout")
+    stdout_stat = os.stat(str(logical_stdout), follow_symlinks=False)
+    current_stdout = {
+        "device": stdout_stat.st_dev,
+        "inode": stdout_stat.st_ino,
+        "uid": stdout_stat.st_uid,
+        "gid": stdout_stat.st_gid,
+        "mode": stat.S_IMODE(stdout_stat.st_mode),
+        "bytes": stdout_stat.st_size,
+        "mtime_ns": stdout_stat.st_mtime_ns,
+        "ctime_ns": stdout_stat.st_ctime_ns,
+        "birth_time_ns": int(
+            getattr(stdout_stat, "st_birthtime", stdout_stat.st_ctime)
+            * 1_000_000_000
+        ),
+        "path": str(logical_stdout),
+        "sha256": sha256_file(logical_stdout),
+    }
+    if (
+        not _strict_json_identity(final_stdout, current_stdout)
+        or final_stdout["inode"] != initial_stdout["inode"]
+        or final_stdout["device"] != initial_stdout["device"]
+        or final_stdout["birth_time_ns"] != initial_stdout["birth_time_ns"]
+        or final_stdout["mode"] & 0o222
+        or final_stdout["bytes"] <= 0
+        or final_stdout["bytes"] > MAX_RESUME_STDOUT_BYTES
+        or primary_stdout["bytes"] > final_stdout["bytes"]
+        or revalidation_stdout["bytes"] > final_stdout["bytes"]
+        or _sha256_file_prefix(logical_stdout, primary_stdout["bytes"])
+        != primary_stdout["sha256"]
+        or _sha256_file_prefix(logical_stdout, revalidation_stdout["bytes"])
+        != revalidation_stdout["sha256"]
+        or status["monitor"]["maximum_stdout_bytes"] != final_stdout["bytes"]
+    ):
+        raise PipelineError("resume3 final stdout identity/prefix mismatch")
+    post = status["post_run"]
+    _resume3_exact_keys(
+        post,
+        {"ninja_log", "ninja_deps", "build_ninja", "toolchain_inventory"},
+        "resume3 post-run",
+    )
+    for name, relative in (
+        ("ninja_log", ".ninja_log"),
+        ("ninja_deps", ".ninja_deps"),
+        ("build_ninja", "build.ninja"),
+    ):
+        _validate_recorded_file_snapshot(post[name], Path(out) / relative, "resume3 post-run {}".format(name))
+    _validate_recorded_toolchain_inventory(post["toolchain_inventory"])
+    current_post = {
+        "ninja_log": _regular_file_snapshot(Path(out) / ".ninja_log"),
+        "ninja_deps": _regular_file_snapshot(Path(out) / ".ninja_deps"),
+        "build_ninja": _regular_file_snapshot(Path(out) / "build.ninja"),
+        "toolchain_inventory": _toolchain_inventory(out),
+    }
+    if allow_history_growth:
+        if authorized_history is None:
+            raise PipelineError("resume3 history growth lacks authorization")
+        if (
+            post["build_ninja"] != current_post["build_ninja"]
+            or post["toolchain_inventory"] != current_post["toolchain_inventory"]
+        ):
+            raise PipelineError("resume3 graph changed after completion")
+        _ninja_history_exact_contract(authorized_history, out, "authorized resumed Ninja phase")
+    elif not _strict_json_identity(post, current_post):
+        raise PipelineError("resume3 post-run snapshot changed")
+    if (
+        not _strict_json_identity(pre_run["build_ninja"], post["build_ninja"])
+        or not _strict_json_identity(
+            pre_run["toolchain_inventory"], post["toolchain_inventory"]
+        )
+        or pre_run["ninja_log"]["sha256"] == post["ninja_log"]["sha256"]
+        or post["ninja_log"]["mtime_ns"] <= pre_run["ninja_log"]["mtime_ns"]
+        or post["ninja_deps"]["mtime_ns"] < pre_run["ninja_deps"]["mtime_ns"]
+        or (
+            pre_run["ninja_deps"]["sha256"] == post["ninja_deps"]["sha256"]
+            and not _strict_json_identity(pre_run["ninja_deps"], post["ninja_deps"])
+        )
+    ):
+        raise PipelineError("resume3 Ninja history transition mismatch")
+    for evidence_path, earliest, latest, label in (
+        (primary_path, primary["observed_at_ns"], supplement["observed_at_ns"], "primary"),
+        (supplement_path, supplement["observed_at_ns"], revalidation["capture_finished_at_ns"], "supplement"),
+        (revalidation_path, revalidation["capture_finished_at_ns"], completion["ended_at_ns"], "revalidation"),
+        (status_path, completion["ended_at_ns"], completion["observed_at_ns"], "status"),
+    ):
+        observed = os.stat(str(evidence_path), follow_symlinks=False)
+        if observed.st_mtime_ns < earliest or observed.st_mtime_ns > latest + 1_000_000_000:
+            raise PipelineError("resume3 {} evidence timing mismatch".format(label))
+    return {
+        "path": str(record_path),
+        "sha256": record_sha256,
+        "started_at_ns": process["started_at_ns"],
+        "ended_at_ns": completion["ended_at_ns"],
+        "wrapper_exit_code": 0,
+        "pipefail": True,
+        "pipeline_success_derived": True,
+        "pre_run": pre_run,
+        "post_run": post,
+        "stdout_log": final_stdout,
+        "explicit_gn_gen_command": False,
+    }
+
+
 def resume_execution_record_contract(
     record_path,
     alias_receipt,
@@ -7617,16 +8665,28 @@ def resume_execution_record_contract(
         or not record_path.is_file()
     ):
         raise PipelineError("resume execution record must be a final regular JSON file")
-    record_stat = os.stat(str(record_path), follow_symlinks=False)
-    if (
-        record_stat.st_uid != os.getuid()
-        or stat.S_IMODE(record_stat.st_mode) & 0o222
-    ):
-        raise PipelineError("resume execution record ownership or mode is unsafe")
     expected_volume_uuid = alias_receipt.get("volume", {}).get("volume_uuid")
     if _volume_identity(record_path)["volume_uuid"] != expected_volume_uuid:
         raise PipelineError("resume execution record volume changed")
-    record = load_json(record_path, "resume execution record")
+    record, record_sha256, _record_identity = _descriptor_bound_immutable_json(
+        record_path, "resume execution record"
+    )
+    if isinstance(record, dict) and type(record.get("schema")) is int and record.get(
+        "schema"
+    ) == 3:
+        return _resume3_execution_record_contract(
+            record_path,
+            record,
+            record_sha256,
+            alias_receipt,
+            source,
+            developer_dir,
+            architecture,
+            out,
+            ninja,
+            allow_history_growth=allow_history_growth,
+            authorized_history=authorized_history,
+        )
     historical_keys = {
         "schema",
         "kind",
