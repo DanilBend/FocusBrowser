@@ -46,6 +46,9 @@ INVENTORY_KIND = "focus-macos-frozen-ninja-graph-inventory"
 TRIAL_KIND = "focus-macos-onboarding-alias-root-trials"
 RECEIPT_KIND = "focus-macos-onboarding-alias-root-compatibility"
 TRANSITION_KIND = "focus-macos-onboarding-home-alias-adoption-transition"
+PREPARATION_PROJECTION_KIND = (
+    "focus-macos-onboarding-preparation-dependency-tree-projection"
+)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 HUNK_RE = re.compile(
     r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$"
@@ -1982,6 +1985,79 @@ def transition_receipt_contract(
         "bytes": snapshot["record"]["bytes"],
         "sha256": snapshot["record"]["sha256"],
         "value": value,
+    }
+
+
+def preparation_dependency_tree_projection_contract(source_root, workspace_root):
+    """Project only the audited onboarding POST back to its preparation PRE line.
+
+    This validator deliberately does not call the HomeAlias contract.  It is the
+    cycle-free seam used while that contract is itself being recomputed.  The
+    caller must still perform a complete dependency-tree walk with the returned
+    one-file projection and call this function again after that walk.
+    """
+    source = _source_root(source_root)
+    initial = _source_contract(source)
+    if initial["state"] == "pre":
+        return None
+    if initial["state"] != "post":
+        raise AliasCompatError("preparation projection requires exact PRE or POST")
+    workspace, _, _, _ = _workspace_binding(workspace_root, source)
+    transition_path = _transition_path(workspace)
+    value, _ = _load_transition_receipt(transition_path)
+    graph = value.get("graph_inventory") if isinstance(value, dict) else None
+    trial = value.get("trial_evidence") if isinstance(value, dict) else None
+    transition = transition_receipt_contract(
+        source,
+        workspace,
+        graph,
+        trial,
+        require_complete=True,
+        allowed_source_states=("post",),
+    )
+    consumed = _transition_consumed_link(source, transition, create=False)
+    if consumed is None:
+        raise AliasCompatError(
+            "preparation projection requires the consumed transition hard link"
+        )
+    final = _source_contract(source)
+    if final["state"] != "post" or not _same_snapshot(
+        final["snapshot"], initial["snapshot"]
+    ):
+        raise AliasCompatError("preparation projection source raced during validation")
+    post = transition["value"]["source"]["post_before"]
+    pre = transition["value"]["source"]["pre_after"]
+    return {
+        "schema": 1,
+        "kind": PREPARATION_PROJECTION_KIND,
+        "workspace": str(workspace),
+        "tree_projection": {
+            "relative_path": SOURCE_RELATIVE,
+            "observed": {
+                "mode": post["mode"],
+                "bytes": post["bytes"],
+                "sha256": post["sha256"],
+            },
+            "projected": {
+                "mode": pre["mode"],
+                "bytes": pre["bytes"],
+                "sha256": pre["sha256"],
+            },
+        },
+        "transition": {
+            "path": transition["path"],
+            "bytes": transition["bytes"],
+            "sha256": transition["sha256"],
+            "consumed_link": consumed,
+        },
+        "safety": {
+            "projected_files": 1,
+            "source_state": "post",
+            "home_alias_validation_invocations": 0,
+            "network_operations": 0,
+            "gn_invocations": 0,
+            "ninja_invocations": 0,
+        },
     }
 
 

@@ -3784,6 +3784,71 @@ def execute_adhoc_runtime_signing(source, developer_dir, plan):
     }
 
 
+def _onboarding_preparation_projection(source, alias_context):
+    """Return the sole cycle-free POST projection allowed by preparation."""
+    if alias_context is None:
+        return None
+    if not isinstance(alias_context, AliasContext):
+        raise PipelineError("preparation alias context type mismatch")
+    if Path(source).resolve(strict=True) != alias_context.physical_source:
+        raise PipelineError("preparation alias source binding changed")
+    try:
+        projection = (
+            onboarding_alias_compat.preparation_dependency_tree_projection_contract(
+                source, alias_context.physical_workspace
+            )
+        )
+    except onboarding_alias_compat.AliasCompatError as exc:
+        raise PipelineError(str(exc)) from exc
+    if projection is None:
+        return None
+    expected_tree_projection = {
+        "relative_path": onboarding_alias_compat.SOURCE_RELATIVE,
+        "observed": {
+            "mode": 0o644,
+            "bytes": onboarding_alias_compat.POST_BYTES,
+            "sha256": onboarding_alias_compat.POST_SHA256,
+        },
+        "projected": {
+            "mode": 0o644,
+            "bytes": onboarding_alias_compat.PRE_BYTES,
+            "sha256": onboarding_alias_compat.PRE_SHA256,
+        },
+    }
+    if (
+        not isinstance(projection, dict)
+        or set(projection)
+        != {"schema", "kind", "workspace", "tree_projection", "transition", "safety"}
+        or type(projection.get("schema")) is not int
+        or projection["schema"] != 1
+        or projection.get("kind")
+        != onboarding_alias_compat.PREPARATION_PROJECTION_KIND
+        or projection.get("workspace") != str(alias_context.physical_workspace)
+        or projection.get("tree_projection") != expected_tree_projection
+    ):
+        raise PipelineError("onboarding preparation projection contract mismatch")
+    return projection
+
+
+def _strict_json_identity(left, right):
+    try:
+        return json.dumps(
+            left,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ) == json.dumps(
+            right,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def preparation_contract(
     source,
     allow_reclaimed_arm=False,
@@ -3933,10 +3998,26 @@ def preparation_contract(
         or post_prepare_tree.get("installed_special_files") != 0
     ):
         raise PipelineError("preparation post-transform dependency tree schema mismatch")
+    projection_before = _onboarding_preparation_projection(source, alias_context)
     try:
-        installed = prepare_source.installed_dependency_tree(
-            source, prepare_source.DEPENDENCY_CONTRACTS
-        )
+        try:
+            installed = prepare_source.installed_dependency_tree(
+                source,
+                prepare_source.DEPENDENCY_CONTRACTS,
+                exact_file_projection=(
+                    projection_before["tree_projection"]
+                    if projection_before is not None
+                    else None
+                ),
+            )
+        finally:
+            projection_after = _onboarding_preparation_projection(
+                source, alias_context
+            )
+            if not _strict_json_identity(projection_after, projection_before):
+                raise PipelineError(
+                    "onboarding preparation projection changed during dependency scan"
+                )
     except prepare_source.PreparationError as exc:
         raise PipelineError(str(exc)) from exc
     if installed != post_prepare_tree:

@@ -706,6 +706,63 @@ class OnboardingAliasCompatTests(unittest.TestCase):
         self.assertEqual(self.transition["sha256"], repeated["sha256"])
         self.assertEqual(before_inode, transition_path.stat().st_ino)
 
+    def test_preparation_projection_is_none_at_pre_and_exact_at_consumed_post(self):
+        workspace = self.physical_home / "workspace"
+        self.assertIsNone(
+            onboarding_alias_compat.preparation_dependency_tree_projection_contract(
+                self.source, workspace
+            )
+        )
+        self.execute()
+        projection = (
+            onboarding_alias_compat.preparation_dependency_tree_projection_contract(
+                self.source, workspace
+            )
+        )
+        self.assertEqual(
+            onboarding_alias_compat.PREPARATION_PROJECTION_KIND,
+            projection["kind"],
+        )
+        self.assertEqual(
+            {
+                "relative_path": onboarding_alias_compat.SOURCE_RELATIVE,
+                "observed": {
+                    "mode": 0o644,
+                    "bytes": onboarding_alias_compat.POST_BYTES,
+                    "sha256": onboarding_alias_compat.POST_SHA256,
+                },
+                "projected": {
+                    "mode": 0o644,
+                    "bytes": onboarding_alias_compat.PRE_BYTES,
+                    "sha256": onboarding_alias_compat.PRE_SHA256,
+                },
+            },
+            projection["tree_projection"],
+        )
+        original = Path(projection["transition"]["path"])
+        consumed = self.source / onboarding_alias_compat.TRANSITION_CONSUMED_RELATIVE
+        self.assertEqual(original.stat().st_ino, consumed.stat().st_ino)
+
+    def test_preparation_projection_rejects_missing_or_copied_consumed_link(self):
+        workspace = self.physical_home / "workspace"
+        self.target.write_bytes(self.postimage())
+        with self.assertRaisesRegex(
+            onboarding_alias_compat.AliasCompatError, "consumed transition"
+        ):
+            onboarding_alias_compat.preparation_dependency_tree_projection_contract(
+                self.source, workspace
+            )
+
+        consumed = self.source / onboarding_alias_compat.TRANSITION_CONSUMED_RELATIVE
+        consumed.write_bytes(Path(self.transition["path"]).read_bytes())
+        consumed.chmod(0o444)
+        with self.assertRaisesRegex(
+            onboarding_alias_compat.AliasCompatError, "link identity changed"
+        ):
+            onboarding_alias_compat.preparation_dependency_tree_projection_contract(
+                self.source, workspace
+            )
+
     def test_transition_requires_both_explicit_flags(self):
         for requested, confirmed in ((False, False), (True, False), (False, True)):
             with self.subTest(requested=requested, confirmed=confirmed):

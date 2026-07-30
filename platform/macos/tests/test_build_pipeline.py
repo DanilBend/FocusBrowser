@@ -172,6 +172,68 @@ class BuildPipelineTests(unittest.TestCase):
         path.write_text(json.dumps(value) + "\n", encoding="utf-8")
         return path
 
+    def alias_context_fixture(self):
+        return build_pipeline.AliasContext(
+            logical_home=self.root,
+            physical_home=self.root,
+            logical_workspace=self.root,
+            physical_workspace=self.root,
+            logical_source=self.source,
+            physical_source=self.source,
+            logical_developer=self.developer,
+            physical_developer=self.developer,
+            logical_repo=build_pipeline.MACOS_DIR.parent.parent,
+            physical_repo=build_pipeline.MACOS_DIR.parent.parent,
+            volume_uuid="AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+        )
+
+    def onboarding_preparation_projection_fixture(self):
+        return {
+            "schema": 1,
+            "kind": (
+                build_pipeline.onboarding_alias_compat.PREPARATION_PROJECTION_KIND
+            ),
+            "workspace": str(self.root),
+            "tree_projection": {
+                "relative_path": (
+                    build_pipeline.onboarding_alias_compat.SOURCE_RELATIVE
+                ),
+                "observed": {
+                    "mode": 0o644,
+                    "bytes": build_pipeline.onboarding_alias_compat.POST_BYTES,
+                    "sha256": (
+                        build_pipeline.onboarding_alias_compat.POST_SHA256
+                    ),
+                },
+                "projected": {
+                    "mode": 0o644,
+                    "bytes": build_pipeline.onboarding_alias_compat.PRE_BYTES,
+                    "sha256": (
+                        build_pipeline.onboarding_alias_compat.PRE_SHA256
+                    ),
+                },
+            },
+            "transition": {
+                "path": str(self.root / "transition.json"),
+                "bytes": 1234,
+                "sha256": "a" * 64,
+                "consumed_link": {
+                    "path": "out/FocusMacOnboardingAliasTransition.json",
+                    "bytes": 1234,
+                    "sha256": "a" * 64,
+                    "inode": 42,
+                },
+            },
+            "safety": {
+                "projected_files": 1,
+                "source_state": "post",
+                "home_alias_validation_invocations": 0,
+                "network_operations": 0,
+                "gn_invocations": 0,
+                "ninja_invocations": 0,
+            },
+        }
+
     def write_acquisition_marker(self):
         marker = self.checkout / build_pipeline.acquire_chromium.COMPLETE_MARKER
         return self.write_json(
@@ -507,6 +569,69 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline.PipelineError, "lacks recovery provenance"
         ):
             build_pipeline.preparation_contract(self.source)
+
+    def test_preparation_contract_projects_exact_consumed_post_for_downstream(self):
+        context = self.alias_context_fixture()
+        projection = self.onboarding_preparation_projection_fixture()
+        installed = build_pipeline.prepare_source.installed_dependency_tree
+        installed.reset_mock()
+        with mock.patch.object(
+            build_pipeline.onboarding_alias_compat,
+            "preparation_dependency_tree_projection_contract",
+            side_effect=(projection, projection),
+        ) as projection_contract:
+            path, _ = build_pipeline.preparation_contract(
+                self.source, alias_context=context
+            )
+        self.assertEqual(self.source / build_pipeline.PREPARATION_RECEIPT, path)
+        installed.assert_called_once_with(
+            self.source,
+            build_pipeline.prepare_source.DEPENDENCY_CONTRACTS,
+            exact_file_projection=projection["tree_projection"],
+        )
+        self.assertEqual(2, projection_contract.call_count)
+        for call in projection_contract.call_args_list:
+            self.assertEqual((self.source, self.root), call.args)
+
+    def test_preparation_projection_rejects_race_malformed_or_unrelated_drift(self):
+        context = self.alias_context_fixture()
+        projection = self.onboarding_preparation_projection_fixture()
+        changed = json.loads(json.dumps(projection))
+        changed["transition"]["sha256"] = "b" * 64
+        with mock.patch.object(
+            build_pipeline.onboarding_alias_compat,
+            "preparation_dependency_tree_projection_contract",
+            side_effect=(projection, changed),
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "changed during dependency scan"
+        ):
+            build_pipeline.preparation_contract(self.source, alias_context=context)
+
+        malformed = json.loads(json.dumps(projection))
+        malformed["tree_projection"]["observed"]["sha256"] = "0" * 64
+        with mock.patch.object(
+            build_pipeline.onboarding_alias_compat,
+            "preparation_dependency_tree_projection_contract",
+            return_value=malformed,
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "projection contract mismatch"
+        ):
+            build_pipeline.preparation_contract(self.source, alias_context=context)
+
+        unrelated = dict(self.post_dependency_tree)
+        unrelated["sha256"] = "0" * 64
+        with mock.patch.object(
+            build_pipeline.onboarding_alias_compat,
+            "preparation_dependency_tree_projection_contract",
+            side_effect=(projection, projection),
+        ), mock.patch.object(
+            build_pipeline.prepare_source,
+            "installed_dependency_tree",
+            return_value=unrelated,
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "tree changed after preparation"
+        ):
+            build_pipeline.preparation_contract(self.source, alias_context=context)
 
     def test_gn_compat_patch_is_hash_pinned_scoped_and_semantic(self):
         patch = build_pipeline.GN_COMPAT_PATCH

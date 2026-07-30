@@ -1576,11 +1576,141 @@ def _dependency_inventory_report(roots, directories, files):
     }
 
 
-def installed_dependency_tree(source_root, contracts=None):
+def _validate_exact_file_projection(value, roots):
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "relative_path",
+        "observed",
+        "projected",
+    }:
+        raise PreparationError("exact dependency file projection schema mismatch")
+    relative = safe_relative(value.get("relative_path"), "dependency projection")
+    candidate = PurePosixPath(relative)
+    if not any(
+        candidate.parts[: len(PurePosixPath(root).parts)]
+        == PurePosixPath(root).parts
+        and candidate != PurePosixPath(root)
+        for root in roots
+    ):
+        raise PreparationError("dependency projection is outside an ownership root")
+    records = {}
+    for name in ("observed", "projected"):
+        record = value.get(name)
+        if not isinstance(record, dict) or set(record) != {
+            "mode",
+            "bytes",
+            "sha256",
+        }:
+            raise PreparationError(
+                "exact dependency file projection {} schema mismatch".format(name)
+            )
+        if (
+            type(record.get("mode")) is not int
+            or not 0 <= record["mode"] <= 0o7777
+            or type(record.get("bytes")) is not int
+            or record["bytes"] < 0
+            or not isinstance(record.get("sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", record["sha256"]) is None
+        ):
+            raise PreparationError(
+                "exact dependency file projection {} metadata mismatch".format(name)
+            )
+        records[name] = dict(record)
+    if records["observed"] == records["projected"]:
+        raise PreparationError("exact dependency file projection has no delta")
+    return {
+        "relative_path": relative,
+        "observed": records["observed"],
+        "projected": records["projected"],
+    }
+
+
+def _descriptor_bound_regular_file_entry(path):
+    """Hash one projected file through a stable descriptor and path identity."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise PreparationError(
+            "cannot safely open projected dependency file: {}".format(path)
+        ) from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise PreparationError(
+                "projected dependency is not a regular file: {}".format(path)
+            )
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        identity_before = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+            stat.S_IMODE(before.st_mode),
+        )
+        identity_after = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+            stat.S_IMODE(after.st_mode),
+        )
+        if identity_before != identity_after or total != before.st_size:
+            raise PreparationError(
+                "projected dependency changed while reading: {}".format(path)
+            )
+        try:
+            path_after = os.lstat(path)
+        except OSError as exc:
+            raise PreparationError(
+                "projected dependency path disappeared while reading: {}".format(path)
+            ) from exc
+        if (
+            not stat.S_ISREG(path_after.st_mode)
+            or (
+                path_after.st_dev,
+                path_after.st_ino,
+                path_after.st_size,
+                path_after.st_mtime_ns,
+                path_after.st_ctime_ns,
+                stat.S_IMODE(path_after.st_mode),
+            )
+            != identity_after
+        ):
+            raise PreparationError(
+                "projected dependency path identity changed while reading: {}".format(
+                    path
+                )
+            )
+        return {
+            "mode": stat.S_IMODE(before.st_mode),
+            "bytes": total,
+            "sha256": digest.hexdigest(),
+        }
+    finally:
+        os.close(descriptor)
+
+
+def installed_dependency_tree(
+    source_root, contracts=None, *, exact_file_projection=None
+):
     """Hash every directory and regular file under the archive-owned roots."""
     source_root = require_real_directory(source_root, "Chromium source")
     contracts = contracts or DEPENDENCY_CONTRACTS
     roots = dependency_output_roots(contracts)
+    projection = _validate_exact_file_projection(exact_file_projection, roots)
+    projection_matches = 0
     directories = set()
     files = {}
     for relative_root in roots:
@@ -1606,12 +1736,25 @@ def installed_dependency_tree(source_root, contracts=None):
                         "installed dependency contains unsafe file: {}".format(path)
                     )
                 relative = path.relative_to(source_root).as_posix()
-                metadata = path.stat()
-                files[relative] = {
-                    "mode": stat.S_IMODE(metadata.st_mode),
-                    "bytes": metadata.st_size,
-                    "sha256": sha256_file(path),
-                }
+                if projection is not None and relative == projection["relative_path"]:
+                    observed = _descriptor_bound_regular_file_entry(path)
+                    if observed != projection["observed"]:
+                        raise PreparationError(
+                            "projected dependency observed metadata mismatch"
+                        )
+                    files[relative] = dict(projection["projected"])
+                    projection_matches += 1
+                else:
+                    metadata = path.stat()
+                    files[relative] = {
+                        "mode": stat.S_IMODE(metadata.st_mode),
+                        "bytes": metadata.st_size,
+                        "sha256": sha256_file(path),
+                    }
+    if projection is not None and projection_matches != 1:
+        raise PreparationError(
+            "exact dependency file projection did not match exactly one file"
+        )
     return _dependency_inventory_report(roots, directories, files)
 
 

@@ -106,6 +106,38 @@ class PrepareSourceTests(unittest.TestCase):
         marker.write_text(json.dumps(payload) + "\n", encoding="utf-8")
         return marker, payload
 
+    def dependency_projection_fixture(self):
+        source = self.root / "projection/src"
+        owned = source / "owned"
+        owned.mkdir(parents=True)
+        target = owned / "vite.config.ts"
+        other = owned / "other.txt"
+        pre = b"exact preparation preimage\n"
+        post = b"exact audited postimage with one intended delta\n"
+        target.write_bytes(pre)
+        target.chmod(0o644)
+        other.write_bytes(b"unchanged sibling\n")
+        contracts = OrderedDict(
+            (("fixture", {"output_path": "owned"}),)
+        )
+        baseline = prepare_source.installed_dependency_tree(source, contracts)
+        projected = {
+            "relative_path": "owned/vite.config.ts",
+            "observed": {
+                "mode": 0o644,
+                "bytes": len(post),
+                "sha256": hashlib.sha256(post).hexdigest(),
+            },
+            "projected": {
+                "mode": 0o644,
+                "bytes": len(pre),
+                "sha256": hashlib.sha256(pre).hexdigest(),
+            },
+        }
+        target.write_bytes(post)
+        target.chmod(0o644)
+        return source, contracts, target, other, projected, baseline
+
     def test_disk_floor_accepts_exact_30_gib_and_rejects_one_byte_less(self):
         accepted = prepare_source.require_disk_floor(
             [self.root],
@@ -186,6 +218,97 @@ class PrepareSourceTests(unittest.TestCase):
         self.assertFalse(report["build_executed"])
         self.assertTrue(report["developer_dir"].endswith(".app/Contents/Developer"))
         self.assertEqual({"gclient", "gn", "autoninja"}, set(report["tool_sha256"]))
+
+    def test_dependency_tree_exact_projection_preserves_only_preparation_line(self):
+        source, contracts, _, other, projection, baseline = (
+            self.dependency_projection_fixture()
+        )
+        actual_post = prepare_source.installed_dependency_tree(source, contracts)
+        self.assertNotEqual(baseline, actual_post)
+        self.assertEqual(
+            baseline,
+            prepare_source.installed_dependency_tree(
+                source, contracts, exact_file_projection=projection
+            ),
+        )
+
+        other.write_bytes(b"unrelated drift\n")
+        self.assertNotEqual(
+            baseline,
+            prepare_source.installed_dependency_tree(
+                source, contracts, exact_file_projection=projection
+            ),
+        )
+
+    def test_dependency_tree_projection_rejects_schema_path_and_metadata_drift(self):
+        source, contracts, target, _, projection, _ = (
+            self.dependency_projection_fixture()
+        )
+
+        def changed(*parts_and_value):
+            *parts, replacement = parts_and_value
+            value = json.loads(json.dumps(projection))
+            cursor = value
+            for part in parts[:-1]:
+                cursor = cursor[part]
+            cursor[parts[-1]] = replacement
+            return value
+
+        extra = json.loads(json.dumps(projection))
+        extra["unexpected"] = True
+        identical = json.loads(json.dumps(projection))
+        identical["projected"] = dict(identical["observed"])
+        cases = (
+            extra,
+            changed("relative_path", "../escape"),
+            changed("relative_path", "owned/missing.ts"),
+            changed("observed", "mode", True),
+            changed("observed", "bytes", True),
+            changed("observed", "sha256", "0" * 64),
+            changed("projected", "sha256", "not-a-hash"),
+            identical,
+        )
+        for value in cases:
+            with self.subTest(value=value), self.assertRaises(
+                prepare_source.PreparationError
+            ):
+                prepare_source.installed_dependency_tree(
+                    source, contracts, exact_file_projection=value
+                )
+
+        target.unlink()
+        target.symlink_to("other.txt")
+        with self.assertRaisesRegex(prepare_source.PreparationError, "unsafe file"):
+            prepare_source.installed_dependency_tree(
+                source, contracts, exact_file_projection=projection
+            )
+
+    def test_dependency_tree_projection_rejects_post_read_path_swap(self):
+        source, contracts, target, _, projection, _ = (
+            self.dependency_projection_fixture()
+        )
+        replacement = target.with_name("replacement.ts")
+        replacement.write_bytes(target.read_bytes())
+        replacement.chmod(0o644)
+        real_read = prepare_source.os.read
+        swapped = False
+
+        def swap_after_read(descriptor, size):
+            nonlocal swapped
+            data = real_read(descriptor, size)
+            if data and not swapped:
+                swapped = True
+                prepare_source.os.replace(replacement, target)
+            return data
+
+        with mock.patch.object(
+            prepare_source.os, "read", side_effect=swap_after_read
+        ), self.assertRaisesRegex(
+            prepare_source.PreparationError, "changed while reading|path identity changed"
+        ):
+            prepare_source.installed_dependency_tree(
+                source, contracts, exact_file_projection=projection
+            )
 
     def test_tool_bootstrap_marker_rejects_symlink_and_schema_drift(self):
         source = self.root / "acquisition/src"
