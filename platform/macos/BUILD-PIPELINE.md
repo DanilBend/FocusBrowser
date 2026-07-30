@@ -187,7 +187,27 @@ does not rebuild or modify either app slice. The exact pre/post images, build
 arguments, app library inventories, patch, Ninja identity, and receipt chain
 are verified transactionally before the merge may continue.
 
-### 7. Merge, ad-hoc sign, and create the local DMG
+### 7. Validate and refresh ad-hoc runtime signing
+
+```sh
+python3 platform/macos/build_pipeline.py \
+  apply-adhoc-runtime-signing-compat \
+  --source-root "$SRC" --developer-dir "$XCODE" --execute --json
+```
+
+Chromium's hardened-runtime defaults enforce Library Validation even for an
+ad-hoc identity, while an ad-hoc Framework has no matching Team ID. For the
+local identity `-` only, this stage removes the explicit `library` option and
+adds `com.apple.security.cs.disable-library-validation` to exactly the seven
+executables that load Focus Browser Framework. It preserves their existing
+JIT, device, and development entitlements; Crashpad, the Framework, ANGLE
+libraries, and updater retain their original signing policy. The targeted
+Chromium signing tests must pass before the stage refreshes only
+`chrome/installer/mac:copy_signing` at `-j8`. Source, generated scripts, app
+tree hashes, test command, and receipt publication are protected by one
+transactional rollback boundary.
+
+### 8. Merge, ad-hoc sign, and create the local DMG
 
 ```sh
 python3 platform/macos/build_pipeline.py merge-sign-package \
@@ -196,9 +216,10 @@ python3 platform/macos/build_pipeline.py merge-sign-package \
 ```
 
 The DMG path must be absolute, absent, and below a real non-symlink parent.
-The pipeline verifies the completed disabled-SwiftShader signing receipt and
-exact signing sources, combines both apps, signs nested code with Chromium's
-generated scripts, consumes Chromium's deterministic unpackaged `stable/`
+The pipeline verifies the completed disabled-SwiftShader and ad-hoc-runtime
+signing receipts and exact signing sources, combines both apps, and signs nested
+code with Chromium's generated scripts. It consumes Chromium's deterministic
+unpackaged `stable/`
 distribution output, requires `Signature=adhoc`, verifies the complete
 signature and both architectures, then runs the local DMG packager as a
 monitored process. The source and DMG filesystems are watched throughout

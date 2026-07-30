@@ -209,6 +209,58 @@ SWIFTSHADER_DISABLED_SIGNING_UPSTREAM = {
     ),
 }
 
+ADHOC_RUNTIME_SIGNING_RECEIPT = (
+    "out/FocusMacAdHocRuntimeSigningCompatibility.json"
+)
+ADHOC_RUNTIME_SIGNING_PATCH = MACOS_DIR / "patches/adhoc-runtime-signing.patch"
+ADHOC_RUNTIME_SIGNING_PATCH_SHA256 = (
+    "133638295cf4cb04a651017b07366d39c0aa0ae3e1595fbc45e57c390dff4e13"
+)
+ADHOC_RUNTIME_SIGNING_FILES = {
+    "chrome/installer/mac/signing/parts.py": {
+        "pre_sha256": "41c05f155e53f9d109464954e5efa88fc1e8e4882237e5f224a081fdf056f498",
+        "post_sha256": "5822b9f15388158b79cbbb7325ae080c5a7cf99ec41de4ef210a741e836ec177",
+    },
+    "chrome/installer/mac/signing/modification.py": {
+        "pre_sha256": "35873786f936c81423104149c0ce37f4ed68d5c3576e046a1631fe2b03808f9c",
+        "post_sha256": "b1d696a20e9ea1cfa0b8e8e3139c5b6595bdf1fe10c55aeee303af1da4faa790",
+    },
+    "chrome/installer/mac/signing/parts_test.py": {
+        "pre_sha256": "1fada206e0c427bf6d3d31fc4b90d546045486cf0f440b8e18fb50f61ea475d9",
+        "post_sha256": "1a26211ba3cc2743d945ccd76fc20b29a68febba5feddd2468fd6f0b446a9f0a",
+    },
+    "chrome/installer/mac/signing/modification_test.py": {
+        "pre_sha256": "9efa3bcc72b6d4ad9442cf58f63a209a7946aa1e43cb6422d83bf8019129d364",
+        "post_sha256": "fcfd35b3c212db95f3097a0b9968cc5d8eb923de652f888f9af9c1b049f5876a",
+    },
+}
+ADHOC_RUNTIME_SIGNING_GENERATED_FILES = {
+    relative: hashes
+    for relative, hashes in ADHOC_RUNTIME_SIGNING_FILES.items()
+    if Path(relative).name in ("parts.py", "modification.py")
+    and not Path(relative).name.endswith("_test.py")
+}
+ADHOC_RUNTIME_SIGNING_FRAMEWORK_PRODUCTS = (
+    "app",
+    "helper-app",
+    "helper-renderer-app",
+    "helper-gpu-app",
+    "helper-alerts",
+    "app-mode-app",
+    "web-app-shortcut-copier",
+)
+ADHOC_RUNTIME_SIGNING_PROVENANCE = {
+    "apple_entitlement": (
+        "https://developer.apple.com/documentation/bundleresources/"
+        "entitlements/com.apple.security.cs.disable-library-validation"
+    ),
+    "chromium_ad_hoc_precedent": (
+        "chrome/browser/web_applications/os_integration/mac/"
+        "web_app_shortcut_creator.mm"
+    ),
+    "identity": "-",
+}
+
 DAWN_NINJA_RELATIVE = "third_party/dawn/third_party/ninja/ninja"
 NINJA_VERSION = "1.12.1"
 NINJA_CIPD_VERSION = "version:3@1.12.1.chromium.4"
@@ -1937,7 +1989,9 @@ def swiftshader_disabled_signing_plan(source, developer_dir):
     }
 
 
-def swiftshader_disabled_signing_receipt_contract(source, developer_dir):
+def swiftshader_disabled_signing_receipt_contract(
+    source, developer_dir, allow_adhoc_runtime_signing=False
+):
     """Validate the completed source and generated-package signing correction."""
     receipt_path = in_source(
         source,
@@ -2022,11 +2076,18 @@ def swiftshader_disabled_signing_receipt_contract(source, developer_dir):
         "generated x86_64 signing parts",
         must_exist=True,
     )
+    allowed_hashes = {hashes["post_sha256"]}
+    if allow_adhoc_runtime_signing:
+        allowed_hashes.add(
+            ADHOC_RUNTIME_SIGNING_FILES[
+                "chrome/installer/mac/signing/parts.py"
+            ]["post_sha256"]
+        )
     for label, path in (
         ("Chromium signing parts", source_parts),
         ("generated x86_64 signing parts", packaging_parts),
     ):
-        if sha256_file(path) != hashes["post_sha256"]:
+        if sha256_file(path) not in allowed_hashes:
             raise PipelineError("{} post-fix hash mismatch".format(label))
     return receipt_path, receipt
 
@@ -2138,6 +2199,426 @@ def execute_swiftshader_disabled_signing(source, developer_dir, plan):
         "applied": True,
         "receipt": receipt_report,
         "files": SWIFTSHADER_DISABLED_SIGNING_FILES,
+        "refresh_command": expected["refresh"]["command"],
+        "jobs": BUILD_JOBS,
+        "app_build_executed": False,
+        "signing_executed": False,
+        "packaging_executed": False,
+    }
+
+
+def _adhoc_runtime_signing_file_state(path, hashes, label):
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        raise PipelineError("missing regular {}: {}".format(label, path))
+    observed = sha256_file(path)
+    if observed == hashes["pre_sha256"]:
+        return "pre"
+    if observed == hashes["post_sha256"]:
+        return "post"
+    raise PipelineError("{} is neither the audited pre nor post image".format(label))
+
+
+def _adhoc_runtime_signing_set_state(paths, files, label):
+    states = {
+        _adhoc_runtime_signing_file_state(
+            paths[relative], hashes, "{} {}".format(label, relative)
+        )
+        for relative, hashes in files.items()
+    }
+    if len(states) != 1:
+        raise PipelineError("{} has a mixed pre/post state".format(label))
+    return next(iter(states))
+
+
+def adhoc_runtime_signing_refresh_contract(source):
+    """Return the exact j8 target used to refresh generated signing scripts."""
+    return swiftshader_signing_refresh_contract(source)
+
+
+def adhoc_runtime_signing_test_contract(source):
+    """Bind the targeted Chromium signing tests to the pinned Python 3.11."""
+    python = packaging_python_contract(source)
+    working_directory = in_source(
+        source,
+        "chrome/installer/mac",
+        "Chromium macOS signing test root",
+        must_exist=True,
+        directory=True,
+    )
+    return {
+        "command": [
+            python["path"],
+            "-m",
+            "unittest",
+            "signing.parts_test",
+            "signing.modification_test",
+        ],
+        "working_directory": str(working_directory),
+        "python": python,
+        "modules": ["signing.parts_test", "signing.modification_test"],
+    }
+
+
+def _adhoc_runtime_signing_paths(source):
+    source_paths = {
+        relative: in_source(
+            source,
+            relative,
+            "Chromium ad-hoc signing source",
+            must_exist=True,
+        )
+        for relative in ADHOC_RUNTIME_SIGNING_FILES
+    }
+    packaging_paths = {
+        relative: in_source(
+            source,
+            X64_OUT
+            + "/"
+            + PACKAGING_NAME
+            + "/signing/"
+            + Path(relative).name,
+            "generated x86_64 ad-hoc signing source",
+            must_exist=True,
+        )
+        for relative in ADHOC_RUNTIME_SIGNING_GENERATED_FILES
+    }
+    return source_paths, packaging_paths
+
+
+def adhoc_runtime_signing_plan(source, developer_dir):
+    """Plan the identity-'-' Framework-loading compatibility correction."""
+    acquisition_contract(source)
+    tool_receipt_contract(source, developer_dir)
+    preparation_path, _ = preparation_contract(source, allow_reclaimed_arm=True)
+    swiftshader_path, _ = swiftshader_disabled_signing_receipt_contract(
+        source, developer_dir, allow_adhoc_runtime_signing=True
+    )
+    receipt_path = in_source(
+        source,
+        ADHOC_RUNTIME_SIGNING_RECEIPT,
+        "ad-hoc runtime signing receipt",
+    )
+    if receipt_path.exists() or receipt_path.is_symlink():
+        raise PipelineError("ad-hoc runtime signing receipt already exists")
+    patch = ADHOC_RUNTIME_SIGNING_PATCH
+    if patch.is_symlink() or not patch.is_file():
+        raise PipelineError("ad-hoc runtime signing patch is not regular")
+    if sha256_file(patch) != ADHOC_RUNTIME_SIGNING_PATCH_SHA256:
+        raise PipelineError("ad-hoc runtime signing patch hash mismatch")
+    source_paths, packaging_paths = _adhoc_runtime_signing_paths(source)
+    source_state = _adhoc_runtime_signing_set_state(
+        source_paths, ADHOC_RUNTIME_SIGNING_FILES, "Chromium signing sources"
+    )
+    packaging_state = _adhoc_runtime_signing_set_state(
+        packaging_paths,
+        ADHOC_RUNTIME_SIGNING_GENERATED_FILES,
+        "generated signing package",
+    )
+    if source_state == "pre" and packaging_state == "post":
+        raise PipelineError("generated signing package is ahead of its source")
+    try:
+        prepare_source.check_patch_boundary(
+            source, patch, reverse=(source_state == "post")
+        )
+    except prepare_source.PreparationError as exc:
+        raise PipelineError(str(exc)) from exc
+    build = swiftshader_disabled_build_contract(source)
+    return {
+        "stage": "apply-adhoc-runtime-signing-compat",
+        "source_root": str(source),
+        "developer_dir": str(developer_dir),
+        "preparation_receipt": {
+            "path": str(preparation_path),
+            "sha256": sha256_file(preparation_path),
+        },
+        "swiftshader_disabled_signing": {
+            "path": str(swiftshader_path),
+            "sha256": sha256_file(swiftshader_path),
+        },
+        "reclaim_receipt": build["reclaim_receipt"],
+        "x64_build_receipt": build["x64_build_receipt"],
+        "app_tree_sha256": build["app_tree_sha256"],
+        "provenance": ADHOC_RUNTIME_SIGNING_PROVENANCE,
+        "identity_scope": "-",
+        "framework_loading_products": list(
+            ADHOC_RUNTIME_SIGNING_FRAMEWORK_PRODUCTS
+        ),
+        "patch": {
+            "path": str(patch),
+            "sha256": ADHOC_RUNTIME_SIGNING_PATCH_SHA256,
+        },
+        "files": ADHOC_RUNTIME_SIGNING_FILES,
+        "generated_files": ADHOC_RUNTIME_SIGNING_GENERATED_FILES,
+        "source_paths": {
+            relative: str(path) for relative, path in source_paths.items()
+        },
+        "packaging_paths": {
+            relative: str(path) for relative, path in packaging_paths.items()
+        },
+        "source_state": source_state,
+        "packaging_state": packaging_state,
+        "tests": adhoc_runtime_signing_test_contract(source),
+        "refresh": adhoc_runtime_signing_refresh_contract(source),
+        "receipt": str(receipt_path),
+        "offline": True,
+        "network_operations": 0,
+    }
+
+
+def adhoc_runtime_signing_receipt_contract(source, developer_dir):
+    """Validate the ad-hoc-only options, entitlements, tests, and refresh."""
+    receipt_path = in_source(
+        source,
+        ADHOC_RUNTIME_SIGNING_RECEIPT,
+        "ad-hoc runtime signing receipt",
+        must_exist=True,
+    )
+    receipt = load_json(receipt_path, "ad-hoc runtime signing receipt")
+    expected_keys = {
+        "schema",
+        "source_root",
+        "developer_dir",
+        "preparation_receipt",
+        "swiftshader_disabled_signing",
+        "reclaim_receipt",
+        "x64_build_receipt",
+        "app_tree_sha256",
+        "provenance",
+        "identity_scope",
+        "framework_loading_products",
+        "patch",
+        "files",
+        "generated_files",
+        "tests",
+        "refresh",
+        "recovery_state",
+        "offline",
+        "network_operations",
+        "chromium_tests_executed",
+        "chromium_tests_passed",
+        "app_build_executed",
+        "signing_scripts_refreshed",
+        "signing_executed",
+        "packaging_executed",
+    }
+    preparation_path, _ = preparation_contract(source, allow_reclaimed_arm=True)
+    swiftshader_path, _ = swiftshader_disabled_signing_receipt_contract(
+        source, developer_dir, allow_adhoc_runtime_signing=True
+    )
+    build = swiftshader_disabled_build_contract(source)
+    tests = adhoc_runtime_signing_test_contract(source)
+    refresh = adhoc_runtime_signing_refresh_contract(source)
+    recovery_state = receipt.get("recovery_state")
+    allowed_recovery_states = (
+        {"source": "pre", "packaging": "pre"},
+        {"source": "post", "packaging": "pre"},
+        {"source": "post", "packaging": "post"},
+    )
+    if set(receipt) != expected_keys or receipt.get("schema") != 1:
+        raise PipelineError("ad-hoc runtime signing receipt schema mismatch")
+    if (
+        receipt.get("source_root") != str(source)
+        or receipt.get("developer_dir") != str(developer_dir)
+        or receipt.get("preparation_receipt")
+        != {"path": str(preparation_path), "sha256": sha256_file(preparation_path)}
+        or receipt.get("swiftshader_disabled_signing")
+        != {"path": str(swiftshader_path), "sha256": sha256_file(swiftshader_path)}
+        or receipt.get("reclaim_receipt") != build["reclaim_receipt"]
+        or receipt.get("x64_build_receipt") != build["x64_build_receipt"]
+        or receipt.get("app_tree_sha256") != build["app_tree_sha256"]
+        or receipt.get("provenance") != ADHOC_RUNTIME_SIGNING_PROVENANCE
+        or receipt.get("identity_scope") != "-"
+        or receipt.get("framework_loading_products")
+        != list(ADHOC_RUNTIME_SIGNING_FRAMEWORK_PRODUCTS)
+        or receipt.get("patch")
+        != {
+            "path": str(ADHOC_RUNTIME_SIGNING_PATCH),
+            "sha256": ADHOC_RUNTIME_SIGNING_PATCH_SHA256,
+        }
+        or receipt.get("files") != ADHOC_RUNTIME_SIGNING_FILES
+        or receipt.get("generated_files")
+        != ADHOC_RUNTIME_SIGNING_GENERATED_FILES
+        or receipt.get("tests") != tests
+        or receipt.get("refresh") != refresh
+        or recovery_state not in allowed_recovery_states
+        or receipt.get("offline") is not True
+        or receipt.get("network_operations") != 0
+        or receipt.get("chromium_tests_executed") is not True
+        or receipt.get("chromium_tests_passed") is not True
+        or receipt.get("app_build_executed") is not False
+        or receipt.get("signing_scripts_refreshed") is not True
+        or receipt.get("signing_executed") is not False
+        or receipt.get("packaging_executed") is not False
+    ):
+        raise PipelineError("ad-hoc runtime signing provenance mismatch")
+    if sha256_file(ADHOC_RUNTIME_SIGNING_PATCH) != (
+        ADHOC_RUNTIME_SIGNING_PATCH_SHA256
+    ):
+        raise PipelineError("ad-hoc runtime signing patch hash mismatch")
+    source_paths, packaging_paths = _adhoc_runtime_signing_paths(source)
+    if (
+        _adhoc_runtime_signing_set_state(
+            source_paths,
+            ADHOC_RUNTIME_SIGNING_FILES,
+            "Chromium signing sources",
+        )
+        != "post"
+        or _adhoc_runtime_signing_set_state(
+            packaging_paths,
+            ADHOC_RUNTIME_SIGNING_GENERATED_FILES,
+            "generated signing package",
+        )
+        != "post"
+    ):
+        raise PipelineError("ad-hoc runtime signing post-fix state mismatch")
+    return receipt_path, receipt
+
+
+def execute_adhoc_runtime_signing(source, developer_dir, plan):
+    """Test and publish the ad-hoc signing correction transactionally."""
+    expected = adhoc_runtime_signing_plan(source, developer_dir)
+    if plan != expected:
+        raise PipelineError("ad-hoc runtime signing plan changed")
+    require_free(source, SOFT_FLOOR_GIB, "ad-hoc runtime signing fix")
+    source_paths = {
+        relative: Path(path) for relative, path in expected["source_paths"].items()
+    }
+    packaging_paths = {
+        relative: Path(path)
+        for relative, path in expected["packaging_paths"].items()
+    }
+    initial_app_trees = expected["app_tree_sha256"]
+    snapshot_root = Path(
+        tempfile.mkdtemp(prefix="focus-adhoc-runtime-signing-rollback-")
+    ).resolve()
+    source_backups = {}
+    packaging_backups = {}
+    receipt_report = None
+    try:
+        for position, (relative, path) in enumerate(source_paths.items(), 1):
+            backup = snapshot_root / "source-{:02d}".format(position)
+            prepare_source.atomic_copy(path, backup)
+            source_backups[relative] = backup
+        for position, (relative, path) in enumerate(packaging_paths.items(), 1):
+            backup = snapshot_root / "packaging-{:02d}".format(position)
+            prepare_source.atomic_copy(path, backup)
+            packaging_backups[relative] = backup
+        if expected["source_state"] == "pre":
+            prepare_source.apply_patch_plan(
+                source, [ADHOC_RUNTIME_SIGNING_PATCH], total_patches=1
+            )
+        if _adhoc_runtime_signing_set_state(
+            source_paths,
+            ADHOC_RUNTIME_SIGNING_FILES,
+            "Chromium signing sources",
+        ) != "post":
+            raise PipelineError("Chromium ad-hoc signing post-fix hash mismatch")
+        environment = safe_environment(source, developer_dir)
+        run_monitored(
+            expected["tests"]["command"],
+            Path(expected["tests"]["working_directory"]),
+            environment,
+            watched_paths=(source,),
+        )
+        refresh_environment = safe_environment(
+            source,
+            developer_dir,
+            build_ninja=Path(expected["refresh"]["ninja"]["path"]),
+        )
+        run_monitored(expected["refresh"]["command"], source, refresh_environment)
+        if _adhoc_runtime_signing_set_state(
+            packaging_paths,
+            ADHOC_RUNTIME_SIGNING_GENERATED_FILES,
+            "generated signing package",
+        ) != "post":
+            raise PipelineError("generated ad-hoc signing post-fix hash mismatch")
+        current_build = swiftshader_disabled_build_contract(source)
+        if current_build["app_tree_sha256"] != initial_app_trees:
+            raise PipelineError("ad-hoc signing refresh changed an app bundle")
+        receipt_value = {
+            "schema": 1,
+            "source_root": str(source),
+            "developer_dir": str(developer_dir),
+            "preparation_receipt": expected["preparation_receipt"],
+            "swiftshader_disabled_signing": expected[
+                "swiftshader_disabled_signing"
+            ],
+            "reclaim_receipt": expected["reclaim_receipt"],
+            "x64_build_receipt": expected["x64_build_receipt"],
+            "app_tree_sha256": initial_app_trees,
+            "provenance": ADHOC_RUNTIME_SIGNING_PROVENANCE,
+            "identity_scope": "-",
+            "framework_loading_products": list(
+                ADHOC_RUNTIME_SIGNING_FRAMEWORK_PRODUCTS
+            ),
+            "patch": expected["patch"],
+            "files": ADHOC_RUNTIME_SIGNING_FILES,
+            "generated_files": ADHOC_RUNTIME_SIGNING_GENERATED_FILES,
+            "tests": expected["tests"],
+            "refresh": expected["refresh"],
+            "recovery_state": {
+                "source": expected["source_state"],
+                "packaging": expected["packaging_state"],
+            },
+            "offline": True,
+            "network_operations": 0,
+            "chromium_tests_executed": True,
+            "chromium_tests_passed": True,
+            "app_build_executed": False,
+            "signing_scripts_refreshed": True,
+            "signing_executed": False,
+            "packaging_executed": False,
+        }
+        receipt_report = atomic_json(Path(expected["receipt"]), receipt_value)
+        adhoc_runtime_signing_receipt_contract(source, developer_dir)
+    except BaseException as original_error:
+        try:
+            receipt_path = Path(expected["receipt"])
+            if receipt_path.is_symlink() or (
+                receipt_path.exists() and not receipt_path.is_file()
+            ):
+                raise PipelineError("unsafe ad-hoc receipt during rollback")
+            if receipt_path.is_file():
+                receipt_path.unlink()
+            for relative, backup in source_backups.items():
+                prepare_source.atomic_copy(backup, source_paths[relative])
+            for relative, backup in packaging_backups.items():
+                prepare_source.atomic_copy(backup, packaging_paths[relative])
+            if (
+                _adhoc_runtime_signing_set_state(
+                    source_paths,
+                    ADHOC_RUNTIME_SIGNING_FILES,
+                    "rolled-back Chromium signing sources",
+                )
+                != expected["source_state"]
+                or _adhoc_runtime_signing_set_state(
+                    packaging_paths,
+                    ADHOC_RUNTIME_SIGNING_GENERATED_FILES,
+                    "rolled-back generated signing package",
+                )
+                != expected["packaging_state"]
+            ):
+                raise PipelineError("ad-hoc runtime signing rollback state mismatch")
+        except BaseException as rollback_error:
+            raise PipelineError(
+                "ad-hoc runtime signing fix and rollback failed; snapshot "
+                "retained at {}: original={!r}; rollback={!r}".format(
+                    snapshot_root, original_error, rollback_error
+                )
+            ) from original_error
+        shutil.rmtree(snapshot_root)
+        if isinstance(original_error, prepare_source.PreparationError):
+            raise PipelineError(str(original_error)) from original_error
+        raise
+    else:
+        shutil.rmtree(snapshot_root)
+    return {
+        "stage": "apply-adhoc-runtime-signing-compat",
+        "applied": True,
+        "receipt": receipt_report,
+        "files": ADHOC_RUNTIME_SIGNING_FILES,
+        "tests": expected["tests"],
         "refresh_command": expected["refresh"]["command"],
         "jobs": BUILD_JOBS,
         "app_build_executed": False,
@@ -3036,6 +3517,9 @@ def merge_plan(source, developer_dir, dmg_output):
     x64_app = x64_out / APP_NAME
     app_report(x64_app, ("x86_64",))
     swiftshader_receipt_path, _ = swiftshader_disabled_signing_receipt_contract(
+        source, developer_dir, allow_adhoc_runtime_signing=True
+    )
+    adhoc_receipt_path, _ = adhoc_runtime_signing_receipt_contract(
         source, developer_dir
     )
     packaging = x64_out / PACKAGING_NAME
@@ -3118,6 +3602,10 @@ def merge_plan(source, developer_dir, dmg_output):
             "path": str(swiftshader_receipt_path),
             "sha256": sha256_file(swiftshader_receipt_path),
         },
+        "adhoc_runtime_signing": {
+            "path": str(adhoc_receipt_path),
+            "sha256": sha256_file(adhoc_receipt_path),
+        },
         "developer_dir": str(developer_dir),
     }
 
@@ -3135,7 +3623,7 @@ def execute_merge(source, developer_dir, plan):
         ):
             raise PipelineError("merge command does not use pinned packaging Python")
     swiftshader_receipt_path, _ = swiftshader_disabled_signing_receipt_contract(
-        source, developer_dir
+        source, developer_dir, allow_adhoc_runtime_signing=True
     )
     current_swiftshader = {
         "path": str(swiftshader_receipt_path),
@@ -3144,6 +3632,17 @@ def execute_merge(source, developer_dir, plan):
     if plan.get("swiftshader_disabled_signing") != current_swiftshader:
         raise PipelineError(
             "disabled SwiftShader signing provenance changed before merge"
+        )
+    adhoc_receipt_path, _ = adhoc_runtime_signing_receipt_contract(
+        source, developer_dir
+    )
+    current_adhoc = {
+        "path": str(adhoc_receipt_path),
+        "sha256": sha256_file(adhoc_receipt_path),
+    }
+    if plan.get("adhoc_runtime_signing") != current_adhoc:
+        raise PipelineError(
+            "ad-hoc runtime signing provenance changed before merge"
         )
     arm_size = physical_size(plan["arm_app"])
     x64_size = physical_size(plan["x64_app"])
@@ -3160,14 +3659,16 @@ def execute_merge(source, developer_dir, plan):
     copied_sign = unsigned_root / PACKAGING_NAME / "sign_chrome.py"
     if sha256_file(copied_sign) != SIGN_CHROME_SHA256:
         raise PipelineError("copied Chromium signing script hash mismatch")
-    copied_parts = unsigned_root / PACKAGING_NAME / "signing/parts.py"
-    swiftshader_hashes = next(
-        iter(SWIFTSHADER_DISABLED_SIGNING_FILES.values())
-    )
-    if sha256_file(copied_parts) != swiftshader_hashes["post_sha256"]:
-        raise PipelineError(
-            "copied disabled-SwiftShader signing parts hash mismatch"
+    for relative, hashes in ADHOC_RUNTIME_SIGNING_GENERATED_FILES.items():
+        copied_source = (
+            unsigned_root / PACKAGING_NAME / "signing" / Path(relative).name
         )
+        if sha256_file(copied_source) != hashes["post_sha256"]:
+            raise PipelineError(
+                "copied ad-hoc signing source hash mismatch: {}".format(
+                    Path(relative).name
+                )
+            )
     if packaging_python_contract(source) != current_python:
         raise PipelineError("packaging Python changed before signing")
     run_monitored(plan["commands"]["sign"], source, environment)
@@ -3229,6 +3730,7 @@ def execute_merge(source, developer_dir, plan):
         "local_only": True,
         "packaging_python": current_python,
         "swiftshader_disabled_signing": current_swiftshader,
+        "adhoc_runtime_signing": current_adhoc,
     }
     report["signed_app"] = str(signed_app)
     report["signed_app_tree_sha256"] = tree_digest(signed_app)
@@ -3247,6 +3749,7 @@ def parser():
         "apply-xcode27-seatbelt-compat",
         "apply-screen-ai-disabled-compat",
         "apply-swiftshader-disabled-signing-compat",
+        "apply-adhoc-runtime-signing-compat",
         "build-arm64",
         "stage-arm64",
         "build-x64",
@@ -3304,6 +3807,13 @@ def main(argv=None):
             plan = swiftshader_disabled_signing_plan(source, developer_dir)
             result = (
                 execute_swiftshader_disabled_signing(source, developer_dir, plan)
+                if args.execute
+                else plan
+            )
+        elif args.command == "apply-adhoc-runtime-signing-compat":
+            plan = adhoc_runtime_signing_plan(source, developer_dir)
+            result = (
+                execute_adhoc_runtime_signing(source, developer_dir, plan)
                 if args.execute
                 else plan
             )

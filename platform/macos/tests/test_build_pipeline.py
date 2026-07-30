@@ -481,6 +481,53 @@ class BuildPipelineTests(unittest.TestCase):
         )
         self.assertEqual(5, len(report["command"]))
 
+    def test_adhoc_runtime_signing_patch_is_hash_pinned_and_scoped(self):
+        patch = build_pipeline.ADHOC_RUNTIME_SIGNING_PATCH
+        self.assertEqual(
+            build_pipeline.ADHOC_RUNTIME_SIGNING_PATCH_SHA256,
+            build_pipeline.sha256_file(patch),
+        )
+        text = patch.read_text(encoding="utf-8")
+        self.assertEqual(
+            {
+                "chrome/installer/mac/signing/parts.py",
+                "chrome/installer/mac/signing/modification.py",
+                "chrome/installer/mac/signing/parts_test.py",
+                "chrome/installer/mac/signing/modification_test.py",
+            },
+            {
+                line.removeprefix("--- a/")
+                for line in text.splitlines()
+                if line.startswith("--- a/")
+            },
+        )
+        self.assertIn("config.identity == '-'", text)
+        self.assertIn("com.apple.security.cs.disable-library-validation", text)
+        self.assertIn("ADHOC_FRAMEWORK_ENTITLEMENTS", text)
+        self.assertNotIn("chrome_crashpad_handler'.format", text)
+        self.assertNotIn("UpdaterPrivilegedHelper", text)
+
+    def test_adhoc_runtime_signing_tests_precede_copy_signing_at_j8(self):
+        python = {"path": str(self.root / "pinned-python3.11")}
+        (self.source / "chrome/installer/mac").mkdir(parents=True, exist_ok=True)
+        with mock.patch.object(
+            build_pipeline, "packaging_python_contract", return_value=python
+        ):
+            tests = build_pipeline.adhoc_runtime_signing_test_contract(
+                self.source
+            )
+        refresh = build_pipeline.adhoc_runtime_signing_refresh_contract(
+            self.source
+        )
+        self.assertEqual(
+            ["signing.parts_test", "signing.modification_test"],
+            tests["modules"],
+        )
+        self.assertEqual("-j8", refresh["command"][1])
+        self.assertEqual(
+            "chrome/installer/mac:copy_signing", refresh["command"][-1]
+        )
+
     def test_xcode27_execution_restores_pre_fix_file_on_apply_failure(self):
         patch = self.root / "fixture-xcode27.patch"
         patch.write_text("fixture\n", encoding="utf-8")
@@ -1634,6 +1681,81 @@ class BuildPipelineTests(unittest.TestCase):
         }
         return plan, files, patch, source_parts, packaging_parts, pre, post
 
+    def prepare_adhoc_runtime_execute_fixture(self):
+        source_root = self.source / "chrome/installer/mac/signing"
+        packaging_root = (
+            self.source
+            / build_pipeline.X64_OUT
+            / build_pipeline.PACKAGING_NAME
+            / "signing"
+        )
+        source_root.mkdir(parents=True, exist_ok=True)
+        packaging_root.mkdir(parents=True, exist_ok=True)
+        pre = b"pre ad-hoc signing\n"
+        post = b"post ad-hoc signing\n"
+        source_relative = "chrome/installer/mac/signing/parts.py"
+        test_relative = "chrome/installer/mac/signing/parts_test.py"
+        source_parts = self.source / source_relative
+        source_test = self.source / test_relative
+        packaging_parts = packaging_root / "parts.py"
+        for path in (source_parts, source_test, packaging_parts):
+            path.write_bytes(pre)
+        files = {
+            source_relative: {
+                "pre_sha256": hashlib.sha256(pre).hexdigest(),
+                "post_sha256": hashlib.sha256(post).hexdigest(),
+            },
+            test_relative: {
+                "pre_sha256": hashlib.sha256(pre).hexdigest(),
+                "post_sha256": hashlib.sha256(post).hexdigest(),
+            },
+        }
+        generated = {source_relative: files[source_relative]}
+        patch = self.root / "adhoc-runtime-signing.patch"
+        patch.write_text("fixture patch\n", encoding="utf-8")
+        receipt = self.source / build_pipeline.ADHOC_RUNTIME_SIGNING_RECEIPT
+        app_trees = {"arm64": "a" * 64, "x64": "b" * 64}
+        plan = {
+            "source_paths": {
+                source_relative: str(source_parts),
+                test_relative: str(source_test),
+            },
+            "packaging_paths": {source_relative: str(packaging_parts)},
+            "source_state": "pre",
+            "packaging_state": "pre",
+            "app_tree_sha256": app_trees,
+            "tests": {
+                "command": ["python3.11", "-m", "unittest", "signing.parts_test"],
+                "working_directory": str(source_root.parent),
+                "python": {"path": "python3.11"},
+                "modules": ["signing.parts_test"],
+            },
+            "refresh": {
+                "command": ["autoninja", "-j8", "-C", "out", "copy_signing"],
+                "ninja": {"path": str(self.ninja)},
+            },
+            "receipt": str(receipt),
+            "preparation_receipt": {"path": "prep", "sha256": "c" * 64},
+            "swiftshader_disabled_signing": {
+                "path": "swiftshader",
+                "sha256": "d" * 64,
+            },
+            "reclaim_receipt": {"path": "reclaim", "sha256": "e" * 64},
+            "x64_build_receipt": {"path": "x64", "sha256": "f" * 64},
+            "patch": {"path": str(patch), "sha256": "1" * 64},
+        }
+        return {
+            "plan": plan,
+            "files": files,
+            "generated": generated,
+            "patch": patch,
+            "source_parts": source_parts,
+            "source_test": source_test,
+            "packaging_parts": packaging_parts,
+            "pre": pre,
+            "post": post,
+        }
+
     def test_swiftshader_execute_publishes_receipt_after_exact_refresh(self):
         (
             plan,
@@ -1733,11 +1855,124 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertEqual(pre, packaging_parts.read_bytes())
         self.assertFalse(Path(plan["receipt"]).exists())
 
+    def test_adhoc_runtime_execute_tests_then_refreshes_and_receipts(self):
+        fixture = self.prepare_adhoc_runtime_execute_fixture()
+        calls = []
+
+        def apply_source(*_args, **_kwargs):
+            fixture["source_parts"].write_bytes(fixture["post"])
+            fixture["source_test"].write_bytes(fixture["post"])
+
+        def monitored(command, *_args, **_kwargs):
+            calls.append(command)
+            if command == fixture["plan"]["refresh"]["command"]:
+                fixture["packaging_parts"].write_bytes(fixture["post"])
+
+        with mock.patch.object(
+            build_pipeline,
+            "adhoc_runtime_signing_plan",
+            return_value=fixture["plan"],
+        ), mock.patch.object(
+            build_pipeline, "ADHOC_RUNTIME_SIGNING_FILES", fixture["files"]
+        ), mock.patch.object(
+            build_pipeline,
+            "ADHOC_RUNTIME_SIGNING_GENERATED_FILES",
+            fixture["generated"],
+        ), mock.patch.object(
+            build_pipeline, "ADHOC_RUNTIME_SIGNING_PATCH", fixture["patch"]
+        ), mock.patch.object(
+            build_pipeline.prepare_source,
+            "apply_patch_plan",
+            side_effect=apply_source,
+        ), mock.patch.object(
+            build_pipeline, "run_monitored", side_effect=monitored
+        ), mock.patch.object(
+            build_pipeline, "safe_environment", return_value={}
+        ), mock.patch.object(
+            build_pipeline, "require_free", return_value=50 * build_pipeline.GIB
+        ), mock.patch.object(
+            build_pipeline,
+            "swiftshader_disabled_build_contract",
+            return_value={"app_tree_sha256": fixture["plan"]["app_tree_sha256"]},
+        ), mock.patch.object(
+            build_pipeline, "adhoc_runtime_signing_receipt_contract"
+        ) as receipt_contract:
+            report = build_pipeline.execute_adhoc_runtime_signing(
+                self.source, self.developer, fixture["plan"]
+            )
+
+        self.assertEqual(
+            [
+                fixture["plan"]["tests"]["command"],
+                fixture["plan"]["refresh"]["command"],
+            ],
+            calls,
+        )
+        receipt = Path(fixture["plan"]["receipt"])
+        value = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertTrue(value["chromium_tests_passed"])
+        self.assertTrue(value["signing_scripts_refreshed"])
+        self.assertFalse(value["app_build_executed"])
+        self.assertTrue(report["applied"])
+        receipt_contract.assert_called_once_with(self.source, self.developer)
+
+    def test_adhoc_runtime_execute_rolls_back_source_and_package_on_failure(self):
+        fixture = self.prepare_adhoc_runtime_execute_fixture()
+        calls = 0
+
+        def apply_source(*_args, **_kwargs):
+            fixture["source_parts"].write_bytes(fixture["post"])
+            fixture["source_test"].write_bytes(fixture["post"])
+
+        def fail_refresh(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise build_pipeline.PipelineError("forced ad-hoc refresh failure")
+
+        with mock.patch.object(
+            build_pipeline,
+            "adhoc_runtime_signing_plan",
+            return_value=fixture["plan"],
+        ), mock.patch.object(
+            build_pipeline, "ADHOC_RUNTIME_SIGNING_FILES", fixture["files"]
+        ), mock.patch.object(
+            build_pipeline,
+            "ADHOC_RUNTIME_SIGNING_GENERATED_FILES",
+            fixture["generated"],
+        ), mock.patch.object(
+            build_pipeline, "ADHOC_RUNTIME_SIGNING_PATCH", fixture["patch"]
+        ), mock.patch.object(
+            build_pipeline.prepare_source,
+            "apply_patch_plan",
+            side_effect=apply_source,
+        ), mock.patch.object(
+            build_pipeline, "run_monitored", side_effect=fail_refresh
+        ), mock.patch.object(
+            build_pipeline, "safe_environment", return_value={}
+        ), mock.patch.object(
+            build_pipeline, "require_free", return_value=50 * build_pipeline.GIB
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "forced ad-hoc refresh failure"
+        ):
+            build_pipeline.execute_adhoc_runtime_signing(
+                self.source, self.developer, fixture["plan"]
+            )
+
+        self.assertEqual(fixture["pre"], fixture["source_parts"].read_bytes())
+        self.assertEqual(fixture["pre"], fixture["source_test"].read_bytes())
+        self.assertEqual(fixture["pre"], fixture["packaging_parts"].read_bytes())
+        self.assertFalse(Path(fixture["plan"]["receipt"]).exists())
+
     def test_merge_plan_uses_chromium_x64_first_and_ad_hoc_signing(self):
         _, x64_out, universalizer = self.prepare_merge_fixture()
         output = self.root / "FocusBrowser.dmg"
         swiftshader_receipt = self.write_json(
             self.source / build_pipeline.SWIFTSHADER_DISABLED_SIGNING_RECEIPT,
+            {"fixture": True},
+        )
+        adhoc_receipt = self.write_json(
+            self.source / build_pipeline.ADHOC_RUNTIME_SIGNING_RECEIPT,
             {"fixture": True},
         )
         packaging_python = {
@@ -1770,6 +2005,10 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline,
             "swiftshader_disabled_signing_receipt_contract",
             return_value=(swiftshader_receipt, {"fixture": True}),
+        ), mock.patch.object(
+            build_pipeline,
+            "adhoc_runtime_signing_receipt_contract",
+            return_value=(adhoc_receipt, {"fixture": True}),
         ):
             plan = build_pipeline.merge_plan(
                 self.source, self.developer, output
@@ -1778,6 +2017,10 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertEqual(
             build_pipeline.sha256_file(swiftshader_receipt),
             plan["swiftshader_disabled_signing"]["sha256"],
+        )
+        self.assertEqual(
+            build_pipeline.sha256_file(adhoc_receipt),
+            plan["adhoc_runtime_signing"]["sha256"],
         )
         for name in ("universalize", "sign", "package"):
             self.assertEqual(packaging_python["path"], plan["commands"][name][0])
@@ -1810,6 +2053,10 @@ class BuildPipelineTests(unittest.TestCase):
             self.source / build_pipeline.SWIFTSHADER_DISABLED_SIGNING_RECEIPT,
             {"fixture": True},
         )
+        adhoc_receipt = self.write_json(
+            self.source / build_pipeline.ADHOC_RUNTIME_SIGNING_RECEIPT,
+            {"fixture": True},
+        )
         real_hash = build_pipeline.sha256_file
 
         def pinned_hash(path):
@@ -1836,6 +2083,10 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline,
             "swiftshader_disabled_signing_receipt_contract",
             return_value=(swiftshader_receipt, {"fixture": True}),
+        ), mock.patch.object(
+            build_pipeline,
+            "adhoc_runtime_signing_receipt_contract",
+            return_value=(adhoc_receipt, {"fixture": True}),
         ), self.assertRaisesRegex(
             build_pipeline.PipelineError, "absolute"
         ):
