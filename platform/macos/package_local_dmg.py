@@ -182,6 +182,7 @@ def durable_publish_candidate(
 
     root_fd = parent_fd = candidate_fd = output_fd = None
     committed = False
+    link_syscall_rejected = False
     try:
         root_fd = os.open(str(candidate.parent), _directory_flags())
         parent_fd = os.open(str(output.parent), _directory_flags())
@@ -228,8 +229,13 @@ def durable_publish_candidate(
                 follow_symlinks=False,
             )
         except FileExistsError as exc:
+            # A real link(2) EEXIST proves this call did not create the entry.
+            # It can even be a racing hardlink to the candidate itself, so
+            # inode equality alone is not authority to remove it.
+            link_syscall_rejected = True
             raise PackageError("refusing to overwrite existing DMG output") from exc
         except OSError as exc:
+            link_syscall_rejected = True
             raise PackageError(
                 "failed to atomically place DMG output: {}".format(exc)
             ) from exc
@@ -298,7 +304,7 @@ def durable_publish_candidate(
         if committed or isinstance(original_error, CommittedPublishError):
             raise
         rollback_error = None
-        if parent_fd is not None:
+        if parent_fd is not None and not link_syscall_rejected:
             try:
                 _rollback_exact_output(parent_fd, output.name, expected_identity)
             except BaseException as exc:

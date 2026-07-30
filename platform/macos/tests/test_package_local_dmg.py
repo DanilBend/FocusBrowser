@@ -604,6 +604,21 @@ class LocalDmgPackagerTests(unittest.TestCase):
             self.publish(fixture)
         self.assertEqual(b"rival output", fixture["output"].read_bytes())
 
+    def test_racing_same_inode_hardlink_is_treated_as_rival_on_eexist(self):
+        fixture = self.publish_fixture()
+        real_link = os.link
+
+        def rival_same_inode(*_args, **_kwargs):
+            real_link(str(fixture["candidate"]), str(fixture["output"]))
+            raise FileExistsError(str(fixture["output"]))
+
+        with mock.patch("os.link", side_effect=rival_same_inode), self.assertRaisesRegex(
+            package_local_dmg.PackageError, "overwrite"
+        ):
+            self.publish(fixture)
+        self.assertEqual(b"accepted DMG payload", fixture["output"].read_bytes())
+        self.assertEqual(2, os.lstat(str(fixture["output"])).st_nlink)
+
     def test_post_commit_candidate_cleanup_failure_preserves_final_inode(self):
         fixture = self.publish_fixture()
         real_unlink = os.unlink
