@@ -17,6 +17,7 @@ import plistlib
 import re
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -166,6 +167,54 @@ SCREEN_AI_DISABLED_CONFIG_FILES = {
     )
 }
 
+XCODE27_LINKEDIT_STRIP_RECEIPT = (
+    "out/FocusMacXcode27LinkeditStripCompatibility.json"
+)
+XCODE27_LINKEDIT_STRIP_PATCH = (
+    MACOS_DIR / "patches/xcode27-linkedit-strip.patch"
+)
+XCODE27_LINKEDIT_STRIP_PATCH_SHA256 = (
+    "52ed98954f21815a95440e64c0ea6e3abf9ef89461698990caeb8cbe4076ead7"
+)
+XCODE27_LINKEDIT_STRIP_FILES = {
+    "build/toolchain/apple/toolchain.gni": {
+        "pre_sha256": "7f4408b57541d1a87abfe20a0ac8b4a5381c112d223b440bdb80752bab0e78aa",
+        "post_sha256": "4d917e683ee6af93b3b2720308bff55530ffbdd1ee445d841b7deee653a4b29e",
+    }
+}
+XCODE27_LINKEDIT_STRIP_UPSTREAM = {
+    "issue": 203678,
+    "issue_url": "https://github.com/llvm/llvm-project/issues/203678",
+    "pull_request": 203680,
+    "pull_request_url": "https://github.com/llvm/llvm-project/pull/203680",
+    "fix_commit": "18c1cbce6874a7341f357014befb66d4c11a04a9",
+    "fix_commit_url": (
+        "https://github.com/llvm/llvm-project/commit/"
+        "18c1cbce6874a7341f357014befb66d4c11a04a9"
+    ),
+    "pinned_llvm_commit": "20b6ec66967ac2a8f932863c1abf251e5b17a843",
+    "pinned_llvm_package_revision": "llvmorg-23-init-10931-g20b6ec66-11",
+}
+XCODE27_LINKEDIT_STRIP_RELATIVE = (
+    "Toolchains/XcodeDefault.xctoolchain/usr/bin/strip"
+)
+XCODE27_LINKEDIT_STRIP_SHA256 = (
+    "4c52b02258f7e881010f34b68d47fb2d18b69c02fa6ef4f66cbd6f58d6e6f00e"
+)
+BUNDLED_LLVM_STRIP_RELATIVE = (
+    "third_party/llvm-build/Release+Asserts/bin/llvm-strip"
+)
+BUNDLED_LLVM_STRIP_SYMLINK_TARGET = "llvm-objcopy"
+BUNDLED_LLVM_STRIP_SHA256 = (
+    "ce152d23693da05c4f91d0ab9f6916c52cc19aaa9ff43092ff10424fe20b9679"
+)
+BUNDLED_LLVM_REVISION_RELATIVE = (
+    "third_party/llvm-build/Release+Asserts/cr_build_revision"
+)
+BUNDLED_LLVM_REVISION_SHA256 = (
+    "38992a784aa4df47f4d55cf1175316642e2ba39aed39ac01caa6a552fea818ea"
+)
+
 SWIFTSHADER_DISABLED_SIGNING_RECEIPT = (
     "out/FocusMacSwiftShaderDisabledSigningCompatibility.json"
 )
@@ -259,6 +308,36 @@ ADHOC_RUNTIME_SIGNING_PROVENANCE = {
         "web_app_shortcut_creator.mm"
     ),
     "identity": "-",
+}
+
+LINKEDIT_RECOVERY_ROOT = "out/FocusMacXcode27LinkeditRecovery"
+LINKEDIT_RECOVERY_PARTIAL = "out/.FocusMacXcode27LinkeditRecovery.part"
+LINKEDIT_RECOVERY_MANIFEST = LINKEDIT_RECOVERY_ROOT + "/manifest.json"
+LINKEDIT_RECOVERY_LEGACY_ARTIFACTS = {
+    STAGED_ARM_APP: {
+        "kind": "tree",
+        "sha256": "76d04d6d126c692dedfd2a50e83356d3fb4ce6e17eb151fe1698fcb372221461",
+    },
+    STAGE_RECEIPT: {
+        "kind": "file",
+        "sha256": "7b377abffb9a70a5405ca5bcae5918b2bbeafa2f79830d23a4707f8243f11137",
+    },
+    RECLAIM_RECEIPT: {
+        "kind": "file",
+        "sha256": "0c32a715f40f0657d3992130beb147751da4b68775e95d77fae94fbc6a74aaa5",
+    },
+    X64_OUT + "/" + APP_NAME: {
+        "kind": "tree",
+        "sha256": "0f490737f4c5806441ea538a5cfc73ffc55adac650ef2cb8e949f3b8bd3c411c",
+    },
+    X64_OUT + "/" + SLICE_RECEIPT_NAME: {
+        "kind": "file",
+        "sha256": "222a290e354fccb07bf1d64bac92664f53419c3d8d93923b67e3436ede2dab57",
+    },
+    SWIFTSHADER_DISABLED_SIGNING_RECEIPT: {
+        "kind": "file",
+        "sha256": "afddb96e4a2b6d6771a626ba05ba6a2bed166673c5df57f598e7b8841ac9ced3",
+    },
 }
 
 DAWN_NINJA_RELATIVE = "third_party/dawn/third_party/ninja/ninja"
@@ -1771,6 +1850,338 @@ def execute_screen_ai_disabled(source, developer_dir, plan):
     }
 
 
+def xcode27_linkedit_strip_tool_contract(source, developer_dir):
+    """Pin both the rejected LLVM strip and selected Xcode 27 strip."""
+    developer_dir = Path(developer_dir).resolve(strict=True)
+    identity = xcode27_toolchain_identity(developer_contract(developer_dir))
+    if identity != XCODE27_COMPAT_TOOLCHAIN:
+        raise PipelineError("Xcode 27 LINKEDIT strip toolchain mismatch")
+    selected = developer_dir / XCODE27_LINKEDIT_STRIP_RELATIVE
+    try:
+        focus_macos.require_executable_file(
+            selected, developer_dir, "Xcode 27 strip"
+        )
+    except focus_macos.ContractError as exc:
+        raise PipelineError(str(exc)) from exc
+    if sha256_file(selected) != XCODE27_LINKEDIT_STRIP_SHA256:
+        raise PipelineError("Xcode 27 strip hash mismatch")
+
+    llvm_bin = in_source(
+        source,
+        str(Path(BUNDLED_LLVM_STRIP_RELATIVE).parent),
+        "bundled LLVM binary directory",
+        must_exist=True,
+        directory=True,
+    )
+    bundled_strip = llvm_bin / Path(BUNDLED_LLVM_STRIP_RELATIVE).name
+    if (
+        not bundled_strip.is_symlink()
+        or os.readlink(str(bundled_strip)) != BUNDLED_LLVM_STRIP_SYMLINK_TARGET
+    ):
+        raise PipelineError("bundled llvm-strip symlink contract mismatch")
+    bundled_objcopy = llvm_bin / BUNDLED_LLVM_STRIP_SYMLINK_TARGET
+    if (
+        bundled_objcopy.is_symlink()
+        or not bundled_objcopy.is_file()
+        or not os.access(str(bundled_objcopy), os.X_OK)
+    ):
+        raise PipelineError("bundled llvm-objcopy is not a regular executable")
+    if sha256_file(bundled_objcopy) != BUNDLED_LLVM_STRIP_SHA256:
+        raise PipelineError("bundled llvm-strip content hash mismatch")
+    revision = in_source(
+        source,
+        BUNDLED_LLVM_REVISION_RELATIVE,
+        "bundled LLVM revision",
+        must_exist=True,
+    )
+    if (
+        sha256_file(revision) != BUNDLED_LLVM_REVISION_SHA256
+        or revision.read_text(encoding="utf-8")
+        != XCODE27_LINKEDIT_STRIP_UPSTREAM["pinned_llvm_package_revision"] + "\n"
+    ):
+        raise PipelineError("bundled LLVM revision mismatch")
+    return {
+        "selected": {
+            "path": str(selected),
+            "relative_to_developer_dir": XCODE27_LINKEDIT_STRIP_RELATIVE,
+            "sha256": XCODE27_LINKEDIT_STRIP_SHA256,
+        },
+        "replaced": {
+            "path": str(bundled_strip),
+            "relative_to_source": BUNDLED_LLVM_STRIP_RELATIVE,
+            "symlink_target": BUNDLED_LLVM_STRIP_SYMLINK_TARGET,
+            "resolved_path": str(bundled_objcopy),
+            "sha256": BUNDLED_LLVM_STRIP_SHA256,
+            "revision_path": str(revision),
+            "revision_sha256": BUNDLED_LLVM_REVISION_SHA256,
+            "revision": XCODE27_LINKEDIT_STRIP_UPSTREAM[
+                "pinned_llvm_package_revision"
+            ],
+        },
+    }
+
+
+def xcode27_linkedit_strip_provenance_link(
+    source, developer_dir=None, allow_reclaimed_arm=False
+):
+    """Bind the strip workaround to the last source compatibility receipt."""
+    receipt_path, _ = screen_ai_disabled_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+    )
+    return {"path": str(receipt_path), "sha256": sha256_file(receipt_path)}
+
+
+def xcode27_linkedit_strip_receipt_contract(
+    source, developer_dir, required=True, allow_reclaimed_arm=False
+):
+    """Validate the exact Xcode-strip selection and its provenance."""
+    receipt_path = in_source(
+        source,
+        XCODE27_LINKEDIT_STRIP_RECEIPT,
+        "Xcode 27 LINKEDIT strip receipt",
+    )
+    if not receipt_path.exists():
+        if required:
+            raise PipelineError("Xcode 27 LINKEDIT strip receipt is required")
+        return None
+    receipt = load_json(receipt_path, "Xcode 27 LINKEDIT strip receipt")
+    expected_keys = {
+        "schema",
+        "source_root",
+        "screen_ai_disabled_compatibility_receipt",
+        "toolchain",
+        "upstream",
+        "patch",
+        "files",
+        "tools",
+        "scope",
+        "offline",
+        "network_operations",
+        "build_executed",
+        "signing_executed",
+        "packaging_executed",
+    }
+    upstream_link = xcode27_linkedit_strip_provenance_link(
+        source, developer_dir, allow_reclaimed_arm=allow_reclaimed_arm
+    )
+    tools = xcode27_linkedit_strip_tool_contract(source, developer_dir)
+    expected_scope = {
+        "target_os": "mac",
+        "minimum_xcode_version_int": 2700,
+        "architectures": ["arm64", "x86_64"],
+        "use_lld_unchanged": True,
+        "postprocess_existing_binaries": False,
+    }
+    if set(receipt) != expected_keys or receipt.get("schema") != 1:
+        raise PipelineError("Xcode 27 LINKEDIT strip receipt schema mismatch")
+    if (
+        receipt.get("source_root") != str(source)
+        or receipt.get("screen_ai_disabled_compatibility_receipt")
+        != upstream_link
+        or receipt.get("toolchain") != XCODE27_COMPAT_TOOLCHAIN
+        or receipt.get("upstream") != XCODE27_LINKEDIT_STRIP_UPSTREAM
+        or receipt.get("patch")
+        != {
+            "path": str(XCODE27_LINKEDIT_STRIP_PATCH),
+            "sha256": XCODE27_LINKEDIT_STRIP_PATCH_SHA256,
+        }
+        or receipt.get("files") != XCODE27_LINKEDIT_STRIP_FILES
+        or receipt.get("tools") != tools
+        or receipt.get("scope") != expected_scope
+        or receipt.get("offline") is not True
+        or receipt.get("network_operations") != 0
+        or receipt.get("build_executed") is not False
+        or receipt.get("signing_executed") is not False
+        or receipt.get("packaging_executed") is not False
+    ):
+        raise PipelineError("Xcode 27 LINKEDIT strip provenance mismatch")
+    if sha256_file(XCODE27_LINKEDIT_STRIP_PATCH) != (
+        XCODE27_LINKEDIT_STRIP_PATCH_SHA256
+    ):
+        raise PipelineError("Xcode 27 LINKEDIT strip patch hash mismatch")
+    for relative, hashes in XCODE27_LINKEDIT_STRIP_FILES.items():
+        current = in_source(
+            source, relative, "Xcode 27 LINKEDIT strip source", must_exist=True
+        )
+        if sha256_file(current) != hashes["post_sha256"]:
+            raise PipelineError(
+                "Xcode 27 LINKEDIT strip source hash mismatch: {}".format(
+                    relative
+                )
+            )
+    return receipt_path, receipt
+
+
+def xcode27_linkedit_strip_plan(source, developer_dir):
+    """Plan the one-file post-link strip correction without mutation."""
+    upstream_link = xcode27_linkedit_strip_provenance_link(
+        source, developer_dir, allow_reclaimed_arm=True
+    )
+    identity = xcode27_toolchain_identity(developer_contract(developer_dir))
+    if identity != XCODE27_COMPAT_TOOLCHAIN:
+        raise PipelineError("Xcode 27 LINKEDIT strip toolchain mismatch")
+    tools = xcode27_linkedit_strip_tool_contract(source, developer_dir)
+    receipt_path = in_source(
+        source,
+        XCODE27_LINKEDIT_STRIP_RECEIPT,
+        "Xcode 27 LINKEDIT strip receipt",
+    )
+    if receipt_path.exists() or receipt_path.is_symlink():
+        raise PipelineError("Xcode 27 LINKEDIT strip receipt already exists")
+    patch = XCODE27_LINKEDIT_STRIP_PATCH
+    if patch.is_symlink() or not patch.is_file():
+        raise PipelineError("Xcode 27 LINKEDIT strip patch is not regular")
+    if sha256_file(patch) != XCODE27_LINKEDIT_STRIP_PATCH_SHA256:
+        raise PipelineError("Xcode 27 LINKEDIT strip patch hash mismatch")
+    files = {}
+    for relative, hashes in XCODE27_LINKEDIT_STRIP_FILES.items():
+        path = in_source(
+            source, relative, "Xcode 27 LINKEDIT strip source", must_exist=True
+        )
+        if sha256_file(path) != hashes["pre_sha256"]:
+            raise PipelineError(
+                "Xcode 27 LINKEDIT strip pre-fix hash mismatch: {}".format(
+                    relative
+                )
+            )
+        files[relative] = dict(hashes)
+    try:
+        boundary = prepare_source.check_patch_boundary(source, patch)
+    except prepare_source.PreparationError as exc:
+        raise PipelineError(str(exc)) from exc
+    return {
+        "stage": "apply-xcode27-linkedit-strip-compat",
+        "source_root": str(source),
+        "screen_ai_disabled_compatibility_receipt": upstream_link,
+        "toolchain": identity,
+        "upstream": XCODE27_LINKEDIT_STRIP_UPSTREAM,
+        "patch": boundary,
+        "files": files,
+        "tools": tools,
+        "receipt": str(receipt_path),
+        "offline": True,
+        "network_operations": 0,
+    }
+
+
+def execute_xcode27_linkedit_strip(source, developer_dir, plan):
+    """Select Xcode strip transactionally; never rewrite a built binary."""
+    expected = xcode27_linkedit_strip_plan(source, developer_dir)
+    if plan != expected:
+        raise PipelineError("Xcode 27 LINKEDIT strip plan changed")
+    require_free(source, SOFT_FLOOR_GIB, "Xcode 27 LINKEDIT strip fix")
+    snapshot_root = Path(
+        tempfile.mkdtemp(prefix="focus-xcode27-linkedit-strip-rollback-")
+    ).resolve()
+    backups = {}
+    try:
+        for position, relative in enumerate(XCODE27_LINKEDIT_STRIP_FILES, 1):
+            current = in_source(
+                source, relative, "Xcode 27 LINKEDIT strip snapshot", must_exist=True
+            )
+            backup = snapshot_root / "{:02d}.backup".format(position)
+            prepare_source.atomic_copy(current, backup)
+            backups[relative] = backup
+        prepare_source.apply_patch_plan(
+            source, [XCODE27_LINKEDIT_STRIP_PATCH], total_patches=1
+        )
+        for relative, hashes in XCODE27_LINKEDIT_STRIP_FILES.items():
+            current = in_source(
+                source, relative, "Xcode 27 LINKEDIT strip result", must_exist=True
+            )
+            if sha256_file(current) != hashes["post_sha256"]:
+                raise PipelineError(
+                    "Xcode 27 LINKEDIT strip post-fix hash mismatch: {}".format(
+                        relative
+                    )
+                )
+        receipt_value = {
+            "schema": 1,
+            "source_root": str(source),
+            "screen_ai_disabled_compatibility_receipt": expected[
+                "screen_ai_disabled_compatibility_receipt"
+            ],
+            "toolchain": XCODE27_COMPAT_TOOLCHAIN,
+            "upstream": XCODE27_LINKEDIT_STRIP_UPSTREAM,
+            "patch": {
+                "path": str(XCODE27_LINKEDIT_STRIP_PATCH),
+                "sha256": XCODE27_LINKEDIT_STRIP_PATCH_SHA256,
+            },
+            "files": XCODE27_LINKEDIT_STRIP_FILES,
+            "tools": expected["tools"],
+            "scope": {
+                "target_os": "mac",
+                "minimum_xcode_version_int": 2700,
+                "architectures": ["arm64", "x86_64"],
+                "use_lld_unchanged": True,
+                "postprocess_existing_binaries": False,
+            },
+            "offline": True,
+            "network_operations": 0,
+            "build_executed": False,
+            "signing_executed": False,
+            "packaging_executed": False,
+        }
+        receipt_report = atomic_json(expected["receipt"], receipt_value)
+        xcode27_linkedit_strip_receipt_contract(
+            source, developer_dir, required=True, allow_reclaimed_arm=True
+        )
+    except BaseException as original_error:
+        try:
+            receipt_path = Path(expected["receipt"])
+            if receipt_path.is_symlink() or (
+                receipt_path.exists() and not receipt_path.is_file()
+            ):
+                raise PipelineError(
+                    "unsafe Xcode 27 LINKEDIT strip receipt during rollback"
+                )
+            if receipt_path.is_file():
+                receipt_path.unlink()
+            for relative, backup in backups.items():
+                target = in_source(
+                    source,
+                    relative,
+                    "Xcode 27 LINKEDIT strip rollback",
+                    must_exist=True,
+                )
+                prepare_source.atomic_copy(backup, target)
+                if sha256_file(target) != XCODE27_LINKEDIT_STRIP_FILES[relative][
+                    "pre_sha256"
+                ]:
+                    raise PipelineError(
+                        "Xcode 27 LINKEDIT strip rollback hash mismatch: {}".format(
+                            relative
+                        )
+                    )
+        except BaseException as rollback_error:
+            raise PipelineError(
+                "Xcode 27 LINKEDIT strip fix and rollback failed; snapshot "
+                "retained at {}: original={!r}; rollback={!r}".format(
+                    snapshot_root, original_error, rollback_error
+                )
+            ) from original_error
+        shutil.rmtree(snapshot_root)
+        if isinstance(original_error, prepare_source.PreparationError):
+            raise PipelineError(str(original_error)) from original_error
+        raise
+    else:
+        shutil.rmtree(snapshot_root)
+    return {
+        "stage": "apply-xcode27-linkedit-strip-compat",
+        "applied": True,
+        "receipt": receipt_report,
+        "files": XCODE27_LINKEDIT_STRIP_FILES,
+        "tools": expected["tools"],
+        "upstream": XCODE27_LINKEDIT_STRIP_UPSTREAM,
+        "offline": True,
+        "network_operations": 0,
+        "build_executed": False,
+    }
+
+
 def _disabled_swiftshader_text_contract(path, label, expected_sha256):
     """Require one exact disabled flag and reject any enabled spelling."""
     path = Path(path)
@@ -1917,7 +2328,24 @@ def _swiftshader_signing_file_state(path, label):
         return "pre"
     if observed == hashes["post_sha256"]:
         return "post"
+    if observed == ADHOC_RUNTIME_SIGNING_FILES[
+        "chrome/installer/mac/signing/parts.py"
+    ]["post_sha256"]:
+        return "post-adhoc"
     raise PipelineError("{} is neither the audited pre nor post image".format(label))
+
+
+def _swiftshader_signing_state_contract(source_state, packaging_state):
+    """Reject stale/ahead combinations, including the recovery mtime hazard."""
+    if source_state == "pre" and packaging_state != "pre":
+        raise PipelineError("generated signing package is ahead of its source")
+    if source_state == "post" and packaging_state == "post-adhoc":
+        raise PipelineError("generated signing package is ahead of its source")
+    if source_state == "post-adhoc" and packaging_state != "post-adhoc":
+        raise PipelineError(
+            "post-ad-hoc recovery requires an already-matching generated package"
+        )
+    return {"source": source_state, "packaging": packaging_state}
 
 
 def swiftshader_disabled_signing_plan(source, developer_dir):
@@ -1953,14 +2381,14 @@ def swiftshader_disabled_signing_plan(source, developer_dir):
     packaging_state = _swiftshader_signing_file_state(
         packaging_parts, "generated x86_64 signing parts"
     )
-    if source_state == "pre" and packaging_state == "post":
-        raise PipelineError("generated signing package is ahead of its source")
-    try:
-        prepare_source.check_patch_boundary(
-            source, patch, reverse=(source_state == "post")
-        )
-    except prepare_source.PreparationError as exc:
-        raise PipelineError(str(exc)) from exc
+    _swiftshader_signing_state_contract(source_state, packaging_state)
+    if source_state != "post-adhoc":
+        try:
+            prepare_source.check_patch_boundary(
+                source, patch, reverse=(source_state == "post")
+            )
+        except prepare_source.PreparationError as exc:
+            raise PipelineError(str(exc)) from exc
     build = swiftshader_disabled_build_contract(source)
     refresh = swiftshader_signing_refresh_contract(source)
     return {
@@ -2031,6 +2459,7 @@ def swiftshader_disabled_signing_receipt_contract(
         {"source": "pre", "packaging": "pre"},
         {"source": "post", "packaging": "pre"},
         {"source": "post", "packaging": "post"},
+        {"source": "post-adhoc", "packaging": "post-adhoc"},
     )
     if set(receipt) != expected_keys or receipt.get("schema") != 1:
         raise PipelineError("disabled SwiftShader signing receipt schema mismatch")
@@ -2077,7 +2506,10 @@ def swiftshader_disabled_signing_receipt_contract(
         must_exist=True,
     )
     allowed_hashes = {hashes["post_sha256"]}
-    if allow_adhoc_runtime_signing:
+    if allow_adhoc_runtime_signing or recovery_state == {
+        "source": "post-adhoc",
+        "packaging": "post-adhoc",
+    }:
         allowed_hashes.add(
             ADHOC_RUNTIME_SIGNING_FILES[
                 "chrome/installer/mac/signing/parts.py"
@@ -2116,8 +2548,12 @@ def execute_swiftshader_disabled_signing(source, developer_dir, plan):
                 [SWIFTSHADER_DISABLED_SIGNING_PATCH],
                 total_patches=1,
             )
-        hashes = next(iter(SWIFTSHADER_DISABLED_SIGNING_FILES.values()))
-        if sha256_file(source_parts) != hashes["post_sha256"]:
+        expected_final_state = (
+            "post-adhoc" if expected["source_state"] == "post-adhoc" else "post"
+        )
+        if _swiftshader_signing_file_state(
+            source_parts, "Chromium signing parts"
+        ) != expected_final_state:
             raise PipelineError("Chromium signing parts post-fix hash mismatch")
         if expected["packaging_state"] == "pre":
             environment = safe_environment(
@@ -2126,7 +2562,9 @@ def execute_swiftshader_disabled_signing(source, developer_dir, plan):
                 build_ninja=Path(expected["refresh"]["ninja"]["path"]),
             )
             run_monitored(expected["refresh"]["command"], source, environment)
-        if sha256_file(packaging_parts) != hashes["post_sha256"]:
+        if _swiftshader_signing_file_state(
+            packaging_parts, "generated signing parts"
+        ) != expected_final_state:
             raise PipelineError("generated signing parts post-fix hash mismatch")
         current_build = swiftshader_disabled_build_contract(source)
         if current_build["app_tree_sha256"] != initial_app_trees:
@@ -3024,6 +3462,27 @@ def slice_receipt_contract(source, out, architecture):
         raise PipelineError(
             "{} disabled ScreenAI receipt mismatch".format(architecture)
         )
+    linkedit_receipt, linkedit_value = xcode27_linkedit_strip_receipt_contract(
+        source,
+        required=True,
+        developer_dir=Path(
+            tool_receipt_contract(source)[1]["developer_dir"]
+        ),
+        allow_reclaimed_arm=(architecture == "x64"),
+    )
+    if receipt.get(
+        "xcode27_linkedit_strip_compatibility_receipt_sha256"
+    ) != sha256_file(linkedit_receipt):
+        raise PipelineError(
+            "{} Xcode 27 LINKEDIT strip receipt mismatch".format(architecture)
+        )
+    generated = generated_linkedit_strip_contract(
+        Path(out), linkedit_value["tools"]
+    )
+    if receipt.get("generated_linkedit_strip") != generated:
+        raise PipelineError(
+            "{} generated LINKEDIT strip provenance mismatch".format(architecture)
+        )
     if receipt.get("ninja") != ninja_contract(source):
         raise PipelineError("{} Ninja provenance mismatch".format(architecture))
     return receipt_path, receipt
@@ -3073,6 +3532,602 @@ def reclaim_contract(source):
     return receipt_path, receipt
 
 
+def generated_linkedit_strip_contract(out, tools):
+    """Require every generated Apple linker rule to select the pinned strip."""
+    out = Path(out)
+    if out.is_symlink() or not out.is_dir():
+        raise PipelineError("missing generated GN output for LINKEDIT audit")
+    selected = tools.get("selected", {})
+    expected = selected.get("path")
+    if (
+        not isinstance(expected, str)
+        or selected.get("sha256") != XCODE27_LINKEDIT_STRIP_SHA256
+    ):
+        raise PipelineError("invalid selected strip provenance")
+    reports = []
+    token_count = 0
+    pattern = re.compile(r"-Wcrl,strippath,([^\s\"']+)")
+    for path in sorted(out.rglob("toolchain.ninja")):
+        if path.is_symlink() or not path.is_file():
+            raise PipelineError("unsafe generated toolchain file: {}".format(path))
+        text = path.read_text(encoding="utf-8")
+        tokens = pattern.findall(text)
+        if not tokens:
+            continue
+        unexpected = sorted(set(tokens) - {expected})
+        if unexpected:
+            raise PipelineError(
+                "generated linker selected an unpinned strip: {}".format(
+                    ", ".join(unexpected)
+                )
+            )
+        if "llvm-strip" in " ".join(tokens):
+            raise PipelineError("generated linker still selects llvm-strip")
+        token_count += len(tokens)
+        reports.append(
+            {
+                "path": str(path),
+                "relative_to_out": path.relative_to(out).as_posix(),
+                "sha256": sha256_file(path),
+                "strip_token_count": len(tokens),
+            }
+        )
+    if not reports or token_count <= 0:
+        raise PipelineError("generated linker contains no strip selection")
+    return {
+        "out": str(out),
+        "selected_strip": selected,
+        "toolchain_files": reports,
+        "strip_token_count": token_count,
+        "all_linker_rules_use_selected_strip": True,
+        "llvm_strip_selected": False,
+    }
+
+
+_MACHO_64_MAGICS = {
+    b"\xcf\xfa\xed\xfe": "<",
+    b"\xfe\xed\xfa\xcf": ">",
+}
+_MACHO_32_MAGICS = {
+    b"\xce\xfa\xed\xfe",
+    b"\xfe\xed\xfa\xce",
+}
+_FAT_MAGICS = {
+    b"\xca\xfe\xba\xbe": (">", False),
+    b"\xbe\xba\xfe\xca": ("<", False),
+    b"\xca\xfe\xba\xbf": (">", True),
+    b"\xbf\xba\xfe\xca": ("<", True),
+}
+_MACHO_CPU_NAMES = {
+    0x01000007: "x86_64",
+    0x0100000C: "arm64",
+}
+_LC_SEGMENT_64 = 0x19
+_LC_SYMTAB = 0x02
+_LC_DYSYMTAB = 0x0B
+_LC_TWOLEVEL_HINTS = 0x16
+_LC_DYLD_INFO = 0x22
+_LC_DYLD_INFO_ONLY = 0x80000022
+_LC_CODE_SIGNATURE = 0x1D
+_LINKEDIT_DATA_COMMANDS = {
+    _LC_CODE_SIGNATURE,
+    0x1E,  # LC_SEGMENT_SPLIT_INFO
+    0x26,  # LC_FUNCTION_STARTS
+    0x29,  # LC_DATA_IN_CODE
+    0x2B,  # LC_DYLIB_CODE_SIGN_DRS
+    0x2E,  # LC_LINKER_OPTIMIZATION_HINT
+    0x80000033,  # LC_DYLD_EXPORTS_TRIE
+    0x80000034,  # LC_DYLD_CHAINED_FIXUPS
+    0x36,  # LC_ATOM_INFO
+    0x37,  # LC_FUNCTION_VARIANTS
+    0x38,  # LC_FUNCTION_VARIANT_FIXUPS
+    0x3A,  # LC_LAZY_LOAD_DYLIB_INFO
+}
+
+
+def _read_macho_bytes(stream, offset, size, file_size, label):
+    if offset < 0 or size < 0 or offset + size > file_size:
+        raise PipelineError("{} escapes Mach-O file bounds".format(label))
+    stream.seek(offset)
+    value = stream.read(size)
+    if len(value) != size:
+        raise PipelineError("short read for {}".format(label))
+    return value
+
+
+def _macho_slice_report(stream, path, base, size, expected_cpu=None):
+    file_size = os.fstat(stream.fileno()).st_size
+    header = _read_macho_bytes(stream, base, 32, file_size, "Mach-O header")
+    endian = _MACHO_64_MAGICS.get(header[:4])
+    if endian is None:
+        if header[:4] in _MACHO_32_MAGICS:
+            raise PipelineError("32-bit Mach-O slice is forbidden: {}".format(path))
+        raise PipelineError("fat entry is not a 64-bit Mach-O slice: {}".format(path))
+    values = struct.unpack(endian + "8I", header)
+    cpu_type = values[1]
+    ncmds = values[4]
+    sizeofcmds = values[5]
+    if expected_cpu is not None and cpu_type != expected_cpu:
+        raise PipelineError("fat architecture/header CPU mismatch: {}".format(path))
+    if ncmds <= 0 or ncmds > 65535 or sizeofcmds < 8 or 32 + sizeofcmds > size:
+        raise PipelineError("invalid Mach-O load-command bounds: {}".format(path))
+    commands = _read_macho_bytes(
+        stream, base + 32, sizeofcmds, file_size, "Mach-O load commands"
+    )
+    entries = []
+    linkedit = None
+
+    def add_entry(label, offset, alignment=8):
+        if offset == 0:
+            return
+        entries.append(
+            {
+                "name": label,
+                "offset": offset,
+                "required_alignment": alignment,
+                "aligned": offset % alignment == 0,
+            }
+        )
+
+    cursor = 0
+    for _ in range(ncmds):
+        if cursor + 8 > len(commands):
+            raise PipelineError("truncated Mach-O load command: {}".format(path))
+        command, command_size = struct.unpack_from(endian + "II", commands, cursor)
+        if (
+            command_size < 8
+            or command_size % 4
+            or cursor + command_size > len(commands)
+        ):
+            raise PipelineError("invalid Mach-O load command size: {}".format(path))
+        body = commands[cursor : cursor + command_size]
+        if command == _LC_SEGMENT_64 and command_size >= 72:
+            segment = struct.unpack_from(endian + "II16sQQQQiiII", body)
+            name = segment[2].split(b"\0", 1)[0]
+            if name == b"__LINKEDIT":
+                if linkedit is not None:
+                    raise PipelineError("duplicate __LINKEDIT segment: {}".format(path))
+                linkedit = {"fileoff": segment[5], "filesize": segment[6]}
+        elif command == _LC_SYMTAB and command_size >= 24:
+            symtab = struct.unpack_from(endian + "6I", body)
+            add_entry("symtab.symoff", symtab[2])
+            add_entry("symtab.stroff", symtab[4])
+        elif command == _LC_DYSYMTAB and command_size >= 80:
+            dysymtab = struct.unpack_from(endian + "20I", body)
+            for name, position in (
+                ("dysymtab.tocoff", 8),
+                ("dysymtab.modtaboff", 10),
+                ("dysymtab.extrefsymoff", 12),
+                ("dysymtab.indirectsymoff", 14),
+                ("dysymtab.extreloff", 16),
+                ("dysymtab.locreloff", 18),
+            ):
+                add_entry(name, dysymtab[position])
+        elif command in (_LC_DYLD_INFO, _LC_DYLD_INFO_ONLY) and command_size >= 48:
+            dyld = struct.unpack_from(endian + "12I", body)
+            for name, position in (
+                ("dyld.rebase_off", 2),
+                ("dyld.bind_off", 4),
+                ("dyld.weak_bind_off", 6),
+                ("dyld.lazy_bind_off", 8),
+                ("dyld.export_off", 10),
+            ):
+                add_entry(name, dyld[position])
+        elif command == _LC_TWOLEVEL_HINTS and command_size >= 16:
+            hints = struct.unpack_from(endian + "4I", body)
+            add_entry("twolevel_hints.offset", hints[2])
+        elif command in _LINKEDIT_DATA_COMMANDS and command_size >= 16:
+            data = struct.unpack_from(endian + "4I", body)
+            alignment = 16 if command == _LC_CODE_SIGNATURE else 8
+            add_entry("linkedit_data.0x{:08x}".format(command), data[2], alignment)
+        cursor += command_size
+    if cursor != sizeofcmds:
+        raise PipelineError("Mach-O load-command size mismatch: {}".format(path))
+    if entries and linkedit is None:
+        raise PipelineError("Mach-O has LINKEDIT tables but no segment: {}".format(path))
+    if linkedit is not None:
+        start = linkedit["fileoff"]
+        end = start + linkedit["filesize"]
+        if start % 8 or start > size or end > size or end < start:
+            raise PipelineError("invalid __LINKEDIT segment bounds: {}".format(path))
+        for entry in entries:
+            if not start <= entry["offset"] < end:
+                raise PipelineError(
+                    "{} is outside __LINKEDIT: {}".format(entry["name"], path)
+                )
+    violations = [entry for entry in entries if not entry["aligned"]]
+    return {
+        "architecture": _MACHO_CPU_NAMES.get(
+            cpu_type, "cpu-0x{:08x}".format(cpu_type)
+        ),
+        "cpu_type": cpu_type,
+        "slice_offset": base,
+        "slice_size": size,
+        "linkedit": linkedit,
+        "entries": entries,
+        "violations": violations,
+        "aligned": not violations,
+    }
+
+
+def _macho_file_report(path):
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        raise PipelineError("Mach-O audit path must be a regular file: {}".format(path))
+    file_size = path.stat().st_size
+    if file_size < 4:
+        return None
+    with path.open("rb") as stream:
+        magic = _read_macho_bytes(stream, 0, 4, file_size, "file magic")
+        if magic in _MACHO_32_MAGICS:
+            raise PipelineError("32-bit Mach-O file is forbidden: {}".format(path))
+        if magic in _MACHO_64_MAGICS:
+            slices = [_macho_slice_report(stream, path, 0, file_size)]
+            container = "thin"
+        elif magic in _FAT_MAGICS:
+            endian, uses_64 = _FAT_MAGICS[magic]
+            count = struct.unpack(
+                endian + "I",
+                _read_macho_bytes(stream, 4, 4, file_size, "fat architecture count"),
+            )[0]
+            if count <= 0 or count > 64:
+                raise PipelineError("invalid fat Mach-O architecture count: {}".format(path))
+            entry_size = 32 if uses_64 else 20
+            table = _read_macho_bytes(
+                stream,
+                8,
+                count * entry_size,
+                file_size,
+                "fat architecture table",
+            )
+            slices = []
+            ranges = []
+            for index in range(count):
+                offset = index * entry_size
+                if uses_64:
+                    cpu_type, _, slice_offset, slice_size, alignment, _ = (
+                        struct.unpack_from(endian + "IIQQII", table, offset)
+                    )
+                else:
+                    cpu_type, _, slice_offset, slice_size, alignment = (
+                        struct.unpack_from(endian + "IIIII", table, offset)
+                    )
+                if (
+                    slice_size <= 0
+                    or slice_offset < 8 + count * entry_size
+                    or slice_offset + slice_size > file_size
+                    or alignment > 63
+                    or slice_offset % (1 << alignment)
+                ):
+                    raise PipelineError("invalid fat Mach-O slice bounds: {}".format(path))
+                ranges.append((slice_offset, slice_offset + slice_size))
+                slices.append(
+                    _macho_slice_report(
+                        stream, path, slice_offset, slice_size, expected_cpu=cpu_type
+                    )
+                )
+            ordered = sorted(ranges)
+            if any(left[1] > right[0] for left, right in zip(ordered, ordered[1:])):
+                raise PipelineError("overlapping fat Mach-O slices: {}".format(path))
+            container = "fat64" if uses_64 else "fat32-header"
+        else:
+            return None
+    return {
+        "path": str(path),
+        "bytes": file_size,
+        "container": container,
+        "slices": slices,
+        "aligned": all(item["aligned"] for item in slices),
+    }
+
+
+def macho_linkedit_alignment_report(root, require_aligned=True):
+    """Audit every 64-bit Mach-O slice under a real directory tree."""
+    root = Path(root)
+    if root.is_symlink() or not root.is_dir():
+        raise PipelineError("Mach-O audit root must be a real directory")
+    reports = []
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        directory = Path(directory)
+        dirnames[:] = sorted(
+            name for name in dirnames if not (directory / name).is_symlink()
+        )
+        for name in sorted(filenames):
+            path = directory / name
+            if path.is_symlink():
+                continue
+            if not path.is_file():
+                raise PipelineError("special file in Mach-O audit tree: {}".format(path))
+            report = _macho_file_report(path)
+            if report is not None:
+                report["relative_path"] = path.relative_to(root).as_posix()
+                reports.append(report)
+    if not reports:
+        raise PipelineError("Mach-O audit found no binaries: {}".format(root))
+    violations = []
+    slice_count = 0
+    for report in reports:
+        slice_count += len(report["slices"])
+        for slice_report in report["slices"]:
+            for violation in slice_report["violations"]:
+                violations.append(
+                    {
+                        "relative_path": report["relative_path"],
+                        "architecture": slice_report["architecture"],
+                        **violation,
+                    }
+                )
+    if require_aligned and violations:
+        first = violations[0]
+        raise PipelineError(
+            "misaligned LINKEDIT entry {} at {} in {} ({})".format(
+                first["name"],
+                first["offset"],
+                first["relative_path"],
+                first["architecture"],
+            )
+        )
+    return {
+        "schema": 1,
+        "root": str(root),
+        "macho_files": len(reports),
+        "slices": slice_count,
+        "files": reports,
+        "violations": violations,
+        "all_64_bit_linkedit_offsets_aligned": not violations,
+        "pointer_alignment": 8,
+        "code_signature_alignment": 16,
+    }
+
+
+def _linkedit_recovery_artifact(source, relative, contract):
+    path = in_source(source, relative, "legacy LINKEDIT recovery artifact")
+    kind = contract["kind"]
+    if kind == "file":
+        if path.is_symlink() or not path.is_file():
+            raise PipelineError("missing legacy recovery file: {}".format(path))
+        observed = sha256_file(path)
+        size = path.stat().st_size
+    elif kind == "tree":
+        if path.is_symlink() or not path.is_dir():
+            raise PipelineError("missing legacy recovery tree: {}".format(path))
+        observed = tree_digest(path)
+        size = physical_size(path)
+    else:
+        raise PipelineError("unknown LINKEDIT recovery artifact kind")
+    if observed != contract["sha256"]:
+        raise PipelineError("legacy recovery artifact hash mismatch: {}".format(relative))
+    return {
+        "relative_path": relative,
+        "source": str(path),
+        "archive_relative_path": "artifacts/" + relative,
+        "kind": kind,
+        "sha256": observed,
+        "bytes": size,
+    }
+
+
+def linkedit_recovery_plan(source, developer_dir):
+    """Plan the one supported recovery from already-stripped invalid slices."""
+    acquisition_contract(source)
+    tool_receipt_contract(source, developer_dir)
+    preparation_contract(source, allow_reclaimed_arm=True)
+    linkedit_receipt, _ = xcode27_linkedit_strip_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=True,
+    )
+    final_root = in_source(source, LINKEDIT_RECOVERY_ROOT, "LINKEDIT recovery root")
+    partial_root = in_source(
+        source, LINKEDIT_RECOVERY_PARTIAL, "LINKEDIT recovery partial root"
+    )
+    if (
+        final_root.exists()
+        or final_root.is_symlink()
+        or partial_root.exists()
+        or partial_root.is_symlink()
+    ):
+        raise PipelineError("LINKEDIT recovery destination already exists")
+    arm_out = in_source(source, ARM_OUT, "reclaimed arm64 output")
+    if os.path.lexists(str(arm_out)):
+        raise PipelineError("arm64 output must still be reclaimed before recovery")
+    for relative in (UNSIGNED_ROOT, SIGNED_ROOT):
+        path = in_source(source, relative, "universal output recovery guard")
+        if os.path.lexists(str(path)):
+            raise PipelineError("refusing recovery after universal output exists")
+    adhoc_receipt = in_source(
+        source, ADHOC_RUNTIME_SIGNING_RECEIPT, "ad-hoc receipt recovery guard"
+    )
+    if os.path.lexists(str(adhoc_receipt)):
+        raise PipelineError("canonical ad-hoc receipt must be absent for recovery")
+
+    artifacts = [
+        _linkedit_recovery_artifact(source, relative, contract)
+        for relative, contract in LINKEDIT_RECOVERY_LEGACY_ARTIFACTS.items()
+    ]
+    arm_app = in_source(source, STAGED_ARM_APP, "legacy arm64 app")
+    x64_app = in_source(
+        source, X64_OUT + "/" + APP_NAME, "legacy x86_64 app"
+    )
+    legacy_alignment = {
+        "arm64": macho_linkedit_alignment_report(
+            arm_app, require_aligned=False
+        ),
+        "x86_64": macho_linkedit_alignment_report(
+            x64_app, require_aligned=False
+        ),
+    }
+    for architecture, report in legacy_alignment.items():
+        if not report["violations"]:
+            raise PipelineError(
+                "legacy {} app has no LINKEDIT defect to recover".format(
+                    architecture
+                )
+            )
+
+    source_paths, packaging_paths = _adhoc_runtime_signing_paths(source)
+    signing_state = {
+        "source": _adhoc_runtime_signing_set_state(
+            source_paths,
+            ADHOC_RUNTIME_SIGNING_FILES,
+            "LINKEDIT recovery signing source",
+        ),
+        "packaging": _adhoc_runtime_signing_set_state(
+            packaging_paths,
+            ADHOC_RUNTIME_SIGNING_GENERATED_FILES,
+            "LINKEDIT recovery generated signing package",
+        ),
+        "adhoc_receipt_absent": True,
+    }
+    if signing_state["source"] != "post" or signing_state["packaging"] != "post":
+        raise PipelineError(
+            "LINKEDIT recovery requires matching post ad-hoc signing sources"
+        )
+
+    profiles = focus_macos.validate_gn_profiles()["profiles"]
+    arm_args_text = profiles["arm64"]["args_gn"]
+    arm_args_hash = hashlib.sha256(arm_args_text.encode("utf-8")).hexdigest()
+    if arm_args_hash != SWIFTSHADER_DISABLED_ARGS_SHA256["arm64"]:
+        raise PipelineError("recovered arm64 args.gn hash mismatch")
+    x64_out = in_source(
+        source, X64_OUT, "preserved x86_64 object output", must_exist=True, directory=True
+    )
+    x64_args = x64_out / "args.gn"
+    if sha256_file(x64_args) != SWIFTSHADER_DISABLED_ARGS_SHA256["x64"]:
+        raise PipelineError("preserved x86_64 args.gn hash mismatch")
+    if not (x64_out / "obj").is_dir() or (x64_out / "obj").is_symlink():
+        raise PipelineError("x86_64 object graph is unavailable for relink")
+    return {
+        "stage": "prepare-xcode27-linkedit-recovery",
+        "source_root": str(source),
+        "linkedit_strip_receipt": {
+            "path": str(linkedit_receipt),
+            "sha256": sha256_file(linkedit_receipt),
+        },
+        "recovery_root": str(final_root),
+        "partial_root": str(partial_root),
+        "manifest": str(in_source(source, LINKEDIT_RECOVERY_MANIFEST, "recovery manifest")),
+        "artifacts": artifacts,
+        "legacy_alignment": legacy_alignment,
+        "signing_state": signing_state,
+        "restore_arm_args": {
+            "path": str(arm_out / "args.gn"),
+            "sha256": arm_args_hash,
+            "bytes": len(arm_args_text.encode("utf-8")),
+        },
+        "preserve_x64_objects": {
+            "out": str(x64_out),
+            "args_gn_sha256": sha256_file(x64_args),
+            "incremental_relink": True,
+        },
+        "required_followup_stages": [
+            "build-arm64",
+            "stage-arm64",
+            "build-x64",
+            "apply-swiftshader-disabled-signing-compat",
+            "apply-adhoc-runtime-signing-compat",
+            "merge-sign-package",
+        ],
+        "postprocess_existing_binaries": False,
+        "offline": True,
+        "network_operations": 0,
+    }
+
+
+def execute_linkedit_recovery(source, developer_dir, plan, allow_recovery_move):
+    """Archive exact invalid evidence and prepare clean/relinkable outputs."""
+    if not allow_recovery_move:
+        raise PipelineError(
+            "LINKEDIT recovery execution requires --allow-recovery-move"
+        )
+    expected = linkedit_recovery_plan(source, developer_dir)
+    if plan != expected:
+        raise PipelineError("LINKEDIT recovery plan changed before execution")
+    require_free(source, SOFT_FLOOR_GIB, "LINKEDIT recovery")
+    partial_root = Path(expected["partial_root"])
+    final_root = Path(expected["recovery_root"])
+    arm_args = Path(expected["restore_arm_args"]["path"])
+    arm_out = arm_args.parent
+    moved = []
+    try:
+        partial_root.mkdir(parents=False, exist_ok=False)
+        for artifact in expected["artifacts"]:
+            source_path = Path(artifact["source"])
+            destination = partial_root / artifact["archive_relative_path"]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(str(source_path), str(destination))
+            moved.append((source_path, destination))
+        staged_arm_parent = in_source(
+            source,
+            str(Path(STAGED_ARM_APP).parent),
+            "emptied staged arm64 directory",
+            must_exist=True,
+            directory=True,
+        )
+        staged_arm_parent.rmdir()
+        arm_out.mkdir(parents=False, exist_ok=False)
+        arm_args_text = focus_macos.validate_gn_profiles()["profiles"]["arm64"][
+            "args_gn"
+        ]
+        prepare_source.atomic_publish_text(arm_args, arm_args_text)
+        if sha256_file(arm_args) != expected["restore_arm_args"]["sha256"]:
+            raise PipelineError("restored arm64 args.gn hash mismatch")
+        manifest_value = {
+            "schema": 1,
+            "source_root": str(source),
+            "linkedit_strip_receipt": expected["linkedit_strip_receipt"],
+            "artifacts": expected["artifacts"],
+            "legacy_alignment": expected["legacy_alignment"],
+            "signing_state": expected["signing_state"],
+            "restore_arm_args": expected["restore_arm_args"],
+            "preserve_x64_objects": expected["preserve_x64_objects"],
+            "required_followup_stages": expected["required_followup_stages"],
+            "postprocess_existing_binaries": False,
+            "offline": True,
+            "network_operations": 0,
+            "rebuild_executed": False,
+            "signing_executed": False,
+            "packaging_executed": False,
+        }
+        atomic_json(partial_root / "manifest.json", manifest_value)
+        os.replace(str(partial_root), str(final_root))
+    except BaseException as original_error:
+        try:
+            if arm_args.is_file() and not arm_args.is_symlink():
+                if sha256_file(arm_args) != expected["restore_arm_args"]["sha256"]:
+                    raise PipelineError("unsafe recovered arm64 args during rollback")
+                arm_args.unlink()
+            if arm_out.is_dir() and not arm_out.is_symlink():
+                arm_out.rmdir()
+            for source_path, destination in reversed(moved):
+                if os.path.lexists(str(source_path)):
+                    raise PipelineError("recovery rollback destination reappeared")
+                source_path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(str(destination), str(source_path))
+            if partial_root.is_dir() and not partial_root.is_symlink():
+                shutil.rmtree(str(partial_root))
+        except BaseException as rollback_error:
+            raise PipelineError(
+                "LINKEDIT recovery and rollback failed; partial retained at {}: "
+                "original={!r}; rollback={!r}".format(
+                    partial_root, original_error, rollback_error
+                )
+            ) from original_error
+        raise
+    manifest = final_root / "manifest.json"
+    return {
+        "stage": "prepare-xcode27-linkedit-recovery",
+        "prepared": True,
+        "recovery_root": str(final_root),
+        "manifest": {"path": str(manifest), "sha256": sha256_file(manifest)},
+        "restored_arm_args": expected["restore_arm_args"],
+        "x64_objects_preserved": expected["preserve_x64_objects"],
+        "required_followup_stages": expected["required_followup_stages"],
+        "postprocess_existing_binaries": False,
+    }
+
+
 def app_report(app, expected_architectures):
     """Validate bundle identity and the exact architecture set."""
     app = Path(app)
@@ -3108,11 +4163,13 @@ def app_report(app, expected_architectures):
                 sorted(expected), sorted(observed)
             )
         )
+    linkedit = macho_linkedit_alignment_report(app, require_aligned=True)
     return {
         "app": str(app),
         "bundle_id": focus_macos.BUNDLE_ID,
         "executable": str(executable),
         "architectures": sorted(observed),
+        "linkedit_alignment": linkedit,
     }
 
 
@@ -3234,6 +4291,12 @@ def build_plan(source, developer_dir, architecture):
         required=True,
         allow_reclaimed_arm=allow_reclaimed_arm,
     )
+    linkedit_path, linkedit_receipt = xcode27_linkedit_strip_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+    )
     tools = tool_paths(source)
     ninja = ninja_contract(source)
     if architecture == "arm64":
@@ -3283,6 +4346,11 @@ def build_plan(source, developer_dir, architecture):
             "path": str(screen_ai_path),
             "sha256": sha256_file(screen_ai_path),
         },
+        "xcode27_linkedit_strip_compatibility": {
+            "path": str(linkedit_path),
+            "sha256": sha256_file(linkedit_path),
+        },
+        "linkedit_strip_tools": linkedit_receipt["tools"],
     }
 
 
@@ -3341,11 +4409,31 @@ def execute_build(source, developer_dir, plan):
         raise PipelineError(
             "build plan disabled ScreenAI provenance changed before execution"
         )
+    linkedit_path, linkedit_receipt = xcode27_linkedit_strip_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+    )
+    current_linkedit = {
+        "path": str(linkedit_path),
+        "sha256": sha256_file(linkedit_path),
+    }
+    if (
+        plan.get("xcode27_linkedit_strip_compatibility") != current_linkedit
+        or plan.get("linkedit_strip_tools") != linkedit_receipt["tools"]
+    ):
+        raise PipelineError(
+            "build plan Xcode 27 LINKEDIT strip provenance changed"
+        )
     environment = safe_environment(
         source, developer_dir, build_ninja=Path(current_ninja["path"])
     )
-    for command in plan["commands"]:
-        run_monitored(command, source, environment)
+    run_monitored(plan["commands"][0], source, environment)
+    generated_linkedit = generated_linkedit_strip_contract(
+        Path(plan["out"]), linkedit_receipt["tools"]
+    )
+    run_monitored(plan["commands"][1], source, environment)
     expected = ("arm64",) if plan["architecture"] == "arm64" else ("x86_64",)
     report = app_report(Path(plan["out"]) / APP_NAME, expected)
     packaging = Path(plan["out"]) / PACKAGING_NAME
@@ -3373,6 +4461,10 @@ def execute_build(source, developer_dir, plan):
         "screen_ai_disabled_compatibility_receipt_sha256": current_screen_ai[
             "sha256"
         ],
+        "xcode27_linkedit_strip_compatibility_receipt_sha256": current_linkedit[
+            "sha256"
+        ],
+        "generated_linkedit_strip": generated_linkedit,
         "tool_receipt_sha256": sha256_file(source.parent / TOOL_RECEIPT),
         "ninja": current_ninja,
         "sign_chrome_sha256": SIGN_CHROME_SHA256,
@@ -3506,6 +4598,12 @@ def merge_plan(source, developer_dir, dmg_output):
     tool_receipt_contract(source, developer_dir)
     _, reclaim_receipt = reclaim_contract(source)
     preparation_contract(source, allow_reclaimed_arm=True)
+    linkedit_receipt_path, _ = xcode27_linkedit_strip_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=True,
+    )
     arm_app = in_source(
         source, STAGED_ARM_APP, "staged arm64 app", must_exist=True, directory=True
     )
@@ -3606,6 +4704,10 @@ def merge_plan(source, developer_dir, dmg_output):
             "path": str(adhoc_receipt_path),
             "sha256": sha256_file(adhoc_receipt_path),
         },
+        "xcode27_linkedit_strip_compatibility": {
+            "path": str(linkedit_receipt_path),
+            "sha256": sha256_file(linkedit_receipt_path),
+        },
         "developer_dir": str(developer_dir),
     }
 
@@ -3622,6 +4724,20 @@ def execute_merge(source, developer_dir, plan):
             or command[0] != current_python["path"]
         ):
             raise PipelineError("merge command does not use pinned packaging Python")
+    linkedit_receipt_path, _ = xcode27_linkedit_strip_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=True,
+    )
+    current_linkedit = {
+        "path": str(linkedit_receipt_path),
+        "sha256": sha256_file(linkedit_receipt_path),
+    }
+    if plan.get("xcode27_linkedit_strip_compatibility") != current_linkedit:
+        raise PipelineError(
+            "Xcode 27 LINKEDIT strip provenance changed before merge"
+        )
     swiftshader_receipt_path, _ = swiftshader_disabled_signing_receipt_contract(
         source, developer_dir, allow_adhoc_runtime_signing=True
     )
@@ -3731,6 +4847,7 @@ def execute_merge(source, developer_dir, plan):
         "packaging_python": current_python,
         "swiftshader_disabled_signing": current_swiftshader,
         "adhoc_runtime_signing": current_adhoc,
+        "xcode27_linkedit_strip_compatibility": current_linkedit,
     }
     report["signed_app"] = str(signed_app)
     report["signed_app_tree_sha256"] = tree_digest(signed_app)
@@ -3748,6 +4865,8 @@ def parser():
         "apply-xcode27-compat",
         "apply-xcode27-seatbelt-compat",
         "apply-screen-ai-disabled-compat",
+        "apply-xcode27-linkedit-strip-compat",
+        "prepare-xcode27-linkedit-recovery",
         "apply-swiftshader-disabled-signing-compat",
         "apply-adhoc-runtime-signing-compat",
         "build-arm64",
@@ -3763,6 +4882,8 @@ def parser():
             child.add_argument("--developer-dir", required=True)
         if name == "stage-arm64":
             child.add_argument("--allow-reclaim-arm64-out", action="store_true")
+        if name == "prepare-xcode27-linkedit-recovery":
+            child.add_argument("--allow-recovery-move", action="store_true")
         if name == "merge-sign-package":
             child.add_argument("--dmg-output", required=True)
     return root
@@ -3800,6 +4921,22 @@ def main(argv=None):
             plan = screen_ai_disabled_plan(source, developer_dir)
             result = (
                 execute_screen_ai_disabled(source, developer_dir, plan)
+                if args.execute
+                else plan
+            )
+        elif args.command == "apply-xcode27-linkedit-strip-compat":
+            plan = xcode27_linkedit_strip_plan(source, developer_dir)
+            result = (
+                execute_xcode27_linkedit_strip(source, developer_dir, plan)
+                if args.execute
+                else plan
+            )
+        elif args.command == "prepare-xcode27-linkedit-recovery":
+            plan = linkedit_recovery_plan(source, developer_dir)
+            result = (
+                execute_linkedit_recovery(
+                    source, developer_dir, plan, args.allow_recovery_move
+                )
                 if args.execute
                 else plan
             )

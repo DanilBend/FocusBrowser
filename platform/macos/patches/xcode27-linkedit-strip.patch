@@ -1,0 +1,16 @@
+diff --git a/build/toolchain/apple/toolchain.gni b/build/toolchain/apple/toolchain.gni
+--- a/build/toolchain/apple/toolchain.gni
++++ b/build/toolchain/apple/toolchain.gni
+@@ -234,6 +234,12 @@ template("apple_toolchain") {
+ 
+     # Specify an explicit path for the strip binary.
+     _strippath = "${prefix}llvm-strip"
++    if (toolchain_args.current_os == "mac" && xcode_version_int >= 2700) {
++      # The bundled llvm-strip predates LLVM 18c1cbce and may emit __LINKEDIT
++      # offsets rejected by dyld on macOS 27.
++      # TODO: Return to llvm-strip once Chromium's LLVM includes 18c1cbce.
++      _strippath = invoker.bin_path + "strip"
++    }
+     _installnametoolpath = "${prefix}llvm-install-name-tool"
+     linker_driver_args += " -Wcrl,strippath,${_strippath} -Wcrl,installnametoolpath,${_installnametoolpath}"
+     _enable_dsyms = enable_dsyms

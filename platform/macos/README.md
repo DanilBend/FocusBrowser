@@ -41,6 +41,12 @@ a missing, tampered, or stale-tool marker before its first source-tree mutation.
 - The pinned Chromium 150 minimum is macOS 12.0. Both GN profiles explicitly
   pin `mac_deployment_target` and `mac_min_system_version` to `12.0`; macOS 11
   and older, 32-bit Intel, and PowerPC are not supported.
+- Xcode 27 uses the hash-pinned Apple `strip` for macOS linker-driver output.
+  Chromium's pinned `llvm-strip` predates LLVM fix
+  `18c1cbce6874a7341f357014befb66d4c11a04a9` and can emit LINKEDIT offsets
+  rejected by macOS 27 dyld. LLD remains enabled. Every 64-bit slice of every
+  Mach-O in thin, universalized, and signed app trees must pass the 8-byte
+  LINKEDIT/16-byte code-signature alignment gate.
 - Product name and artwork remain Focus Browser. Added lines in the common
   branding patch must set both product names, crash product name, and bundle ID
   `com.focusbrowser.browser`; removed Chromium lines cannot satisfy the check.
@@ -194,10 +200,14 @@ The implemented order is:
    Focus 1.0.5.0 metadata, ICNS, deterministic onboarding `strings.ts`, and
    both `args.gn` files. The exact ten-entry cache marker, pre-patch archive
    union, and final transformed dependency tree are bound into the receipt.
-4. `build_pipeline.py`: arm64 build, verified thin-app staging, exact arm64
-   output reclamation, x86_64 build, universalization, nested ad-hoc signing,
-   and monitored local DMG packaging. Local Ninja is the hash/architecture-
-   pinned Dawn CIPD binary already present in the checkout.
+4. `build_pipeline.py`: hash-pinned Xcode compatibility stages (including the
+   macOS-27 LINKEDIT strip selection), arm64 build, verified thin-app staging,
+   exact arm64 output reclamation, x86_64 build, universalization, nested
+   ad-hoc signing, and monitored local DMG packaging. Local Ninja is the
+   hash/architecture-pinned Dawn CIPD binary already present in the checkout.
+   The documented one-time recovery archives only exact known-invalid thin
+   evidence, rebuilds arm64, incrementally relinks preserved x86_64 objects,
+   and regenerates signing receipts; it never postprocesses invalid binaries.
 
 All mutating stages require their explicit execution/confirmation flag and
 refuse to overwrite receipts or outputs. Read `CHROMIUM-ACQUISITION.md` and

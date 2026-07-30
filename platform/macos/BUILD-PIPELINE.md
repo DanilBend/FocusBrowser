@@ -121,6 +121,9 @@ python3 platform/macos/build_pipeline.py apply-xcode27-seatbelt-compat \
 
 python3 platform/macos/build_pipeline.py apply-screen-ai-disabled-compat \
   --source-root "$SRC" --developer-dir "$XCODE" --execute --json
+
+python3 platform/macos/build_pipeline.py apply-xcode27-linkedit-strip-compat \
+  --source-root "$SRC" --developer-dir "$XCODE" --execute --json
 ```
 
 The first command gates Chromium GN dependencies that are absent when the
@@ -136,9 +139,16 @@ caller in `c5de29a7cd701daec46a7bf042dd0551e5e8c5c3`, then removed the guards in
 `4ee66d6d1eb2b630a9e30f52f08e3233e23c5864` after declaring ScreenAI always
 enabled on desktop. Focus deliberately keeps the service disabled and its GN
 implementation dependency absent, so the guards are required; the pipeline
-does not enable or download ScreenAI. All four commands are offline,
-hash-pinned, transactional, and publish immutable receipts only after the
-exact post-images are verified.
+does not enable or download ScreenAI. The fifth command addresses LLVM issue
+[#203678](https://github.com/llvm/llvm-project/issues/203678), fixed upstream
+by [PR #203680](https://github.com/llvm/llvm-project/pull/203680) and commit
+`18c1cbce6874a7341f357014befb66d4c11a04a9`. Chromium's pinned pre-fix
+`llvm-strip` can move 64-bit `__LINKEDIT` tables to four-byte offsets that
+macOS 27 dyld rejects. The one-file GN patch keeps LLD enabled and selects the
+hash-pinned Xcode `strip` only for macOS toolchains with
+`xcode_version_int >= 2700`; it never postprocesses an existing binary. Every
+command is offline, hash-pinned, transactional, and publishes an immutable
+receipt only after its exact post-image is verified.
 
 ### 4. Build and preserve arm64
 
@@ -152,7 +162,11 @@ python3 platform/macos/build_pipeline.py stage-arm64 \
 
 The staging command copies to a private `.part` tree under the checkout,
 compares deterministic tree hashes, records a stage receipt, revalidates both
-trees, and removes only the exact measured `out/FocusMacArm64`. A separate
+trees, and requires every non-zero 64-bit Mach-O LINKEDIT offset to be
+eight-byte aligned (code signatures require 16 bytes). The gate walks the
+whole app, including Framework, ANGLE libraries, Crashpad, app-mode loader,
+and helpers; checking only the main executable is insufficient. It then
+removes only the exact measured `out/FocusMacArm64`. A separate
 `arm64-reclaim-complete.json` is written only after that path is absent. No
 other source or output directory is reclaimed.
 
@@ -168,6 +182,12 @@ output. It also revalidates the staged app, receipts, tool hashes, preparation
 hashes, and absence of `out/FocusMacArm64`. Receipt validation explicitly
 accepts the recorded reclaimed arm64 `args.gn` hash while keeping every other
 preparation and compatibility input immutable.
+
+After `gn gen`, each architecture also scans every generated
+`toolchain.ninja`: all Apple linker-driver `strippath` tokens must resolve to
+the pinned Xcode binary and no token may still select `llvm-strip`. This check
+runs before Ninja may compile or relink. The completed thin-app receipt embeds
+that generated-toolchain report and the full LINKEDIT audit.
 
 ### 6. Refresh signing metadata for disabled SwiftShader
 
@@ -186,6 +206,12 @@ entry, then refreshes only `chrome/installer/mac:copy_signing` at `-j8`; it
 does not rebuild or modify either app slice. The exact pre/post images, build
 arguments, app library inventories, patch, Ninja identity, and receipt chain
 are verified transactionally before the merge may continue.
+
+When recovering the already-patched combined ad-hoc source image, both source
+and generated `parts.py` must already have the exact combined post hash. The
+SwiftShader receipt can then be safely regenerated against the new slice/tree
+receipts without relying on mtimes or reverting the later ad-hoc correction;
+mixed `post-adhoc`/`pre` states fail closed.
 
 ### 7. Validate and refresh ad-hoc runtime signing
 
@@ -223,7 +249,40 @@ unpackaged `stable/`
 distribution output, requires `Signature=adhoc`, verifies the complete
 signature and both architectures, then runs the local DMG packager as a
 monitored process. The source and DMG filesystems are watched throughout
-packaging.
+packaging. The LINKEDIT gate is repeated after universalization and after
+signing, once per slice of every Mach-O file.
+
+## One-time Xcode 27 LINKEDIT recovery
+
+This section is only for the recorded current run whose old arm64 and x86_64
+apps were built with the pre-fix `llvm-strip`. Do not use Apple `strip` to
+rewrite those invalid apps: tests show that postprocessing an already-invalid
+large Framework does not reliably repair its offsets.
+
+Before this recovery, any old universal roots and DMG must be separately
+quarantined with hashes so `out/FocusMacUnsignedUniversal` and
+`out/FocusMacSignedUniversal` are absent. The recovery command refuses to
+move them or overwrite any quarantine. First inspect its dry run, then provide
+both explicit mutation flags:
+
+```sh
+python3 platform/macos/build_pipeline.py prepare-xcode27-linkedit-recovery \
+  --source-root "$SRC" --developer-dir "$XCODE" --json
+
+python3 platform/macos/build_pipeline.py prepare-xcode27-linkedit-recovery \
+  --source-root "$SRC" --developer-dir "$XCODE" \
+  --execute --allow-recovery-move --json
+```
+
+The command accepts only the exact recorded legacy app/tree and receipt
+hashes. It audits those apps with `require_aligned=false`, atomically archives
+the invalid staged arm64 app, x86_64 app, build/stage/reclaim receipts, and
+stale SwiftShader receipt under `out/FocusMacXcode27LinkeditRecovery`, restores
+the exact arm64 `args.gn`, and leaves x86_64 objects in place. It does not
+modify any Mach-O bytes. Then run steps 4 through 8 in order: arm64 is rebuilt
+from source and restaged/reclaimed; x86_64 is incrementally relinked after GN
+regeneration; the SwiftShader and ad-hoc receipts are regenerated against the
+new slices; only then may universal merge/sign/package begin. Preserve `-j8`.
 
 ## Disk safety and interrupted runs
 
@@ -238,6 +297,8 @@ Receipts and final destinations are never overwritten. An interrupted stage
 is left for inspection, except a staging `.part` tree created by the current
 invocation, which is removed before returning failure. Recovery is explicit;
 the pipeline never guesses that an incomplete output is reusable.
+The one-time LINKEDIT recovery uses a same-filesystem `.part` archive and
+rolls every exact move back if publication fails.
 
 ## Distribution boundary
 

@@ -5,6 +5,7 @@ import hashlib
 import json
 import plistlib
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -70,6 +71,16 @@ class BuildPipelineTests(unittest.TestCase):
             "cipd_package": "infra/3pp/tools/ninja/mac-arm64",
             "cipd_version": build_pipeline.NINJA_CIPD_VERSION,
             "cipd_instance": build_pipeline.NINJA_CIPD_INSTANCE_BY_HOST["arm64"],
+        }
+        self.linkedit_tools = {
+            "selected": {
+                "path": str(self.root / "Xcode-strip"),
+                "relative_to_developer_dir": (
+                    build_pipeline.XCODE27_LINKEDIT_STRIP_RELATIVE
+                ),
+                "sha256": build_pipeline.XCODE27_LINKEDIT_STRIP_SHA256,
+            },
+            "replaced": {"fixture": True},
         }
         self.real_ninja_contract = build_pipeline.ninja_contract
         self.ninja_patch = mock.patch.object(
@@ -312,13 +323,91 @@ class BuildPipelineTests(unittest.TestCase):
         app = parent / build_pipeline.APP_NAME
         executable = app / "Contents/MacOS/Focus Browser"
         executable.parent.mkdir(parents=True)
-        executable.write_bytes((architecture + " executable").encode("utf-8"))
+        executable.write_bytes(self.macho64_bytes(architecture=architecture))
         info = {
             "CFBundleIdentifier": build_pipeline.focus_macos.BUNDLE_ID,
             "CFBundleExecutable": "Focus Browser",
         }
         (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
         return app
+
+    def macho64_bytes(
+        self, architecture="arm64", stroff=0x108, signature_offset=0x200, endian="<"
+    ):
+        cpu_type = {"arm64": 0x0100000C, "x86_64": 0x01000007}[architecture]
+        segment = struct.pack(
+            endian + "II16sQQQQiiII",
+            build_pipeline._LC_SEGMENT_64,
+            72,
+            b"__LINKEDIT\0\0\0\0\0\0",
+            0,
+            0x200,
+            0x100,
+            0x200,
+            7,
+            1,
+            0,
+            0,
+        )
+        symtab = struct.pack(
+            endian + "6I",
+            build_pipeline._LC_SYMTAB,
+            24,
+            0x100,
+            1,
+            stroff,
+            16,
+        )
+        signature = struct.pack(
+            endian + "4I",
+            build_pipeline._LC_CODE_SIGNATURE,
+            16,
+            signature_offset,
+            16,
+        )
+        commands = segment + symtab + signature
+        header = struct.pack(
+            endian + "8I",
+            0xFEEDFACF,
+            cpu_type,
+            0,
+            2,
+            3,
+            len(commands),
+            0,
+            0,
+        )
+        return (header + commands).ljust(0x300, b"\0")
+
+    def fat_macho_bytes(self, slices, endian=">", uses_64=False):
+        magic = {
+            (">", False): b"\xca\xfe\xba\xbe",
+            ("<", False): b"\xbe\xba\xfe\xca",
+            (">", True): b"\xca\xfe\xba\xbf",
+            ("<", True): b"\xbf\xba\xfe\xca",
+        }[(endian, uses_64)]
+        entry_size = 32 if uses_64 else 20
+        offset = 0x1000
+        entries = []
+        payload = bytearray(offset)
+        for architecture, body in slices:
+            cpu_type = {"arm64": 0x0100000C, "x86_64": 0x01000007}[
+                architecture
+            ]
+            if uses_64:
+                entries.append(
+                    struct.pack(endian + "IIQQII", cpu_type, 0, offset, len(body), 12, 0)
+                )
+            else:
+                entries.append(
+                    struct.pack(endian + "IIIII", cpu_type, 0, offset, len(body), 12)
+                )
+            payload.extend(body)
+            offset = (len(payload) + 0xFFF) & ~0xFFF
+            payload.extend(b"\0" * (offset - len(payload)))
+        header = magic + struct.pack(endian + "I", len(entries)) + b"".join(entries)
+        payload[: len(header)] = header
+        return bytes(payload)
 
     def lipo_result(self, architectures):
         return subprocess.CompletedProcess(
@@ -338,6 +427,19 @@ class BuildPipelineTests(unittest.TestCase):
         screen_ai = self.source / build_pipeline.SCREEN_AI_DISABLED_RECEIPT
         if not screen_ai.exists():
             self.write_json(screen_ai, {"fixture": True})
+        linkedit = self.source / build_pipeline.XCODE27_LINKEDIT_STRIP_RECEIPT
+        if not linkedit.exists():
+            self.write_json(linkedit, {"fixture": True})
+        generated_toolchain = out / "toolchain.ninja"
+        generated_toolchain.write_text(
+            "command = linker -Wcrl,strippath,{}\n".format(
+                self.linkedit_tools["selected"]["path"]
+            ),
+            encoding="utf-8",
+        )
+        generated_linkedit = build_pipeline.generated_linkedit_strip_contract(
+            out, self.linkedit_tools
+        )
         return self.write_json(
             out / build_pipeline.SLICE_RECEIPT_NAME,
             {
@@ -357,6 +459,10 @@ class BuildPipelineTests(unittest.TestCase):
                 "screen_ai_disabled_compatibility_receipt_sha256": (
                     build_pipeline.sha256_file(screen_ai)
                 ),
+                "xcode27_linkedit_strip_compatibility_receipt_sha256": (
+                    build_pipeline.sha256_file(linkedit)
+                ),
+                "generated_linkedit_strip": generated_linkedit,
                 "ninja": self.ninja_report,
                 "build_complete": True,
             },
@@ -427,6 +533,133 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline.XCODE27_COMPAT_UPSTREAM["commit"],
         )
 
+    def test_xcode27_linkedit_strip_patch_is_hash_pinned_and_scoped(self):
+        patch = build_pipeline.XCODE27_LINKEDIT_STRIP_PATCH
+        self.assertEqual(
+            build_pipeline.XCODE27_LINKEDIT_STRIP_PATCH_SHA256,
+            build_pipeline.sha256_file(patch),
+        )
+        text = patch.read_text(encoding="utf-8")
+        self.assertEqual(
+            {"build/toolchain/apple/toolchain.gni"},
+            {
+                line.removeprefix("--- a/")
+                for line in text.splitlines()
+                if line.startswith("--- a/")
+            },
+        )
+        self.assertEqual(
+            1,
+            text.count(
+                'toolchain_args.current_os == "mac" && xcode_version_int >= 2700'
+            ),
+        )
+        self.assertEqual(1, text.count('invoker.bin_path + "strip"'))
+        self.assertNotIn("use_lld=false", text)
+        self.assertNotIn("use_lld = false", text)
+        self.assertEqual(
+            "18c1cbce6874a7341f357014befb66d4c11a04a9",
+            build_pipeline.XCODE27_LINKEDIT_STRIP_UPSTREAM["fix_commit"],
+        )
+
+    def test_generated_linkedit_contract_requires_only_selected_xcode_strip(self):
+        out = self.root / "generated"
+        nested = out / "clang_arm64"
+        nested.mkdir(parents=True)
+        for path in (out / "toolchain.ninja", nested / "toolchain.ninja"):
+            path.write_text(
+                "command = link -Wcrl,strippath,{}\n".format(
+                    self.linkedit_tools["selected"]["path"]
+                ),
+                encoding="utf-8",
+            )
+        report = build_pipeline.generated_linkedit_strip_contract(
+            out, self.linkedit_tools
+        )
+        self.assertEqual(2, report["strip_token_count"])
+        self.assertTrue(report["all_linker_rules_use_selected_strip"])
+        self.assertFalse(report["llvm_strip_selected"])
+        (nested / "toolchain.ninja").write_text(
+            "command = link -Wcrl,strippath,../../bin/llvm-strip\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "unpinned strip"
+        ):
+            build_pipeline.generated_linkedit_strip_contract(
+                out, self.linkedit_tools
+            )
+
+    def test_macho_linkedit_gate_accepts_aligned_and_rejects_string_pool(self):
+        root = self.root / "machos"
+        root.mkdir()
+        aligned = root / "aligned.dylib"
+        aligned.write_bytes(self.macho64_bytes(stroff=0x108))
+        report = build_pipeline.macho_linkedit_alignment_report(root)
+        self.assertEqual(1, report["macho_files"])
+        self.assertEqual(1, report["slices"])
+        self.assertTrue(report["all_64_bit_linkedit_offsets_aligned"])
+        aligned.write_bytes(self.macho64_bytes(stroff=0x104))
+        audit = build_pipeline.macho_linkedit_alignment_report(
+            root, require_aligned=False
+        )
+        self.assertEqual("symtab.stroff", audit["violations"][0]["name"])
+        self.assertEqual(0x104, audit["violations"][0]["offset"])
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "misaligned LINKEDIT"
+        ):
+            build_pipeline.macho_linkedit_alignment_report(root)
+
+    def test_macho_linkedit_gate_requires_16_byte_code_signature_alignment(self):
+        root = self.root / "signed-machos"
+        root.mkdir()
+        binary = root / "signed"
+        binary.write_bytes(self.macho64_bytes(signature_offset=0x208))
+        audit = build_pipeline.macho_linkedit_alignment_report(
+            root, require_aligned=False
+        )
+        violation = audit["violations"][0]
+        self.assertEqual("linkedit_data.0x0000001d", violation["name"])
+        self.assertEqual(16, violation["required_alignment"])
+
+    def test_macho_parser_supports_fat_cigam_and_fat_cigam64(self):
+        for uses_64 in (False, True):
+            with self.subTest(uses_64=uses_64):
+                path = self.root / ("cigam64" if uses_64 else "cigam")
+                path.write_bytes(
+                    self.fat_macho_bytes(
+                        [
+                            ("arm64", self.macho64_bytes("arm64")),
+                            ("x86_64", self.macho64_bytes("x86_64")),
+                        ],
+                        endian="<",
+                        uses_64=uses_64,
+                    )
+                )
+                report = build_pipeline._macho_file_report(path)
+                self.assertEqual(2, len(report["slices"]))
+                self.assertEqual(
+                    {"arm64", "x86_64"},
+                    {item["architecture"] for item in report["slices"]},
+                )
+                self.assertTrue(report["aligned"])
+
+    def test_macho_gate_scans_every_binary_in_bundle_tree(self):
+        root = self.root / "bundle"
+        (root / "Frameworks").mkdir(parents=True)
+        (root / "main").write_bytes(self.macho64_bytes("arm64"))
+        (root / "Frameworks/libEGL.dylib").write_bytes(
+            self.macho64_bytes("arm64", stroff=0x104)
+        )
+        audit = build_pipeline.macho_linkedit_alignment_report(
+            root, require_aligned=False
+        )
+        self.assertEqual(2, audit["macho_files"])
+        self.assertEqual(
+            "Frameworks/libEGL.dylib",
+            audit["violations"][0]["relative_path"],
+        )
+
     def test_swiftshader_signing_patch_is_hash_pinned_scoped_and_semantic(self):
         patch = build_pipeline.SWIFTSHADER_DISABLED_SIGNING_PATCH
         self.assertEqual(
@@ -480,6 +713,93 @@ class BuildPipelineTests(unittest.TestCase):
             "chrome/installer/mac:copy_signing", report["command"][-1]
         )
         self.assertEqual(5, len(report["command"]))
+
+    def test_swiftshader_rebind_accepts_exact_combined_adhoc_post_state(self):
+        source_parts = self.source / "chrome/installer/mac/signing/parts.py"
+        packaging_parts = (
+            self.source
+            / build_pipeline.X64_OUT
+            / build_pipeline.PACKAGING_NAME
+            / "signing/parts.py"
+        )
+        source_parts.parent.mkdir(parents=True, exist_ok=True)
+        packaging_parts.parent.mkdir(parents=True, exist_ok=True)
+        source_parts.write_bytes(b"combined post\n")
+        packaging_parts.write_bytes(b"combined post\n")
+        combined_hash = build_pipeline.sha256_file(source_parts)
+        adhoc_files = dict(build_pipeline.ADHOC_RUNTIME_SIGNING_FILES)
+        adhoc_files["chrome/installer/mac/signing/parts.py"] = {
+            **adhoc_files["chrome/installer/mac/signing/parts.py"],
+            "post_sha256": combined_hash,
+        }
+        patch = self.root / "swift.patch"
+        patch.write_text("fixture\n", encoding="utf-8")
+        receipt = self.source / build_pipeline.SWIFTSHADER_DISABLED_SIGNING_RECEIPT
+        build = {
+            "profiles": {},
+            "build_args": {},
+            "libraries": {},
+            "app_tree_sha256": {"arm64": "a" * 64, "x64": "b" * 64},
+            "reclaim_receipt": {"path": "reclaim", "sha256": "c" * 64},
+            "x64_build_receipt": {"path": "x64", "sha256": "d" * 64},
+        }
+        with mock.patch.object(
+            build_pipeline, "acquisition_contract"
+        ), mock.patch.object(
+            build_pipeline, "tool_receipt_contract"
+        ), mock.patch.object(
+            build_pipeline,
+            "preparation_contract",
+            return_value=(self.source / build_pipeline.PREPARATION_RECEIPT, {}),
+        ), mock.patch.object(
+            build_pipeline,
+            "SWIFTSHADER_DISABLED_SIGNING_PATCH",
+            patch,
+        ), mock.patch.object(
+            build_pipeline,
+            "SWIFTSHADER_DISABLED_SIGNING_PATCH_SHA256",
+            build_pipeline.sha256_file(patch),
+        ), mock.patch.object(
+            build_pipeline, "ADHOC_RUNTIME_SIGNING_FILES", adhoc_files
+        ), mock.patch.object(
+            build_pipeline,
+            "swiftshader_disabled_build_contract",
+            return_value=build,
+        ), mock.patch.object(
+            build_pipeline,
+            "swiftshader_signing_refresh_contract",
+            return_value={"command": ["copy_signing"], "ninja": self.ninja_report},
+        ), mock.patch.object(
+            build_pipeline.prepare_source, "check_patch_boundary"
+        ) as boundary:
+            plan = build_pipeline.swiftshader_disabled_signing_plan(
+                self.source, self.developer
+            )
+        self.assertEqual("post-adhoc", plan["source_state"])
+        self.assertEqual("post-adhoc", plan["packaging_state"])
+        boundary.assert_not_called()
+        self.assertEqual(str(receipt), plan["receipt"])
+
+    def test_swiftshader_rebind_rejects_mtime_sensitive_mixed_package(self):
+        path = self.root / "parts.py"
+        path.write_text("fixture\n", encoding="utf-8")
+        with mock.patch.object(
+            build_pipeline,
+            "sha256_file",
+            return_value=build_pipeline.ADHOC_RUNTIME_SIGNING_FILES[
+                "chrome/installer/mac/signing/parts.py"
+            ]["post_sha256"],
+        ):
+            self.assertEqual(
+                "post-adhoc",
+                build_pipeline._swiftshader_signing_file_state(path, "fixture"),
+            )
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "already-matching"
+        ):
+            build_pipeline._swiftshader_signing_state_contract(
+                "post-adhoc", "pre"
+            )
 
     def test_adhoc_runtime_signing_patch_is_hash_pinned_and_scoped(self):
         patch = build_pipeline.ADHOC_RUNTIME_SIGNING_PATCH
@@ -573,6 +893,57 @@ class BuildPipelineTests(unittest.TestCase):
 
         self.assertFalse(receipt.exists())
         self.assertEqual(files[relative]["pre_sha256"], build_pipeline.sha256_file(target))
+
+    def test_linkedit_strip_execution_restores_source_on_apply_failure(self):
+        patch = self.root / "fixture-linkedit-strip.patch"
+        patch.write_text("fixture\n", encoding="utf-8")
+        relative = "build/toolchain/apple/toolchain.gni"
+        target = self.source / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        pre = b"pre strip selection\n"
+        post = b"post strip selection\n"
+        target.write_bytes(pre)
+        files = {
+            relative: {
+                "pre_sha256": hashlib.sha256(pre).hexdigest(),
+                "post_sha256": hashlib.sha256(post).hexdigest(),
+            }
+        }
+        receipt = self.source / build_pipeline.XCODE27_LINKEDIT_STRIP_RECEIPT
+        plan = {
+            "stage": "apply-xcode27-linkedit-strip-compat",
+            "source_root": str(self.source),
+            "receipt": str(receipt),
+        }
+
+        def fail_after_mutation(*_args, **_kwargs):
+            target.write_bytes(post)
+            raise build_pipeline.prepare_source.PreparationError(
+                "forced LINKEDIT strip failure"
+            )
+
+        with mock.patch.object(
+            build_pipeline, "XCODE27_LINKEDIT_STRIP_PATCH", patch
+        ), mock.patch.object(
+            build_pipeline, "XCODE27_LINKEDIT_STRIP_FILES", files
+        ), mock.patch.object(
+            build_pipeline,
+            "xcode27_linkedit_strip_plan",
+            return_value=plan,
+        ), mock.patch.object(
+            build_pipeline, "require_free"
+        ), mock.patch.object(
+            build_pipeline.prepare_source,
+            "apply_patch_plan",
+            side_effect=fail_after_mutation,
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "forced LINKEDIT strip failure"
+        ):
+            build_pipeline.execute_xcode27_linkedit_strip(
+                self.source, self.developer, plan
+            )
+        self.assertFalse(receipt.exists())
+        self.assertEqual(pre, target.read_bytes())
 
     def test_xcode27_seatbelt_patch_is_upstream_pinned_scoped_and_deletion_only(self):
         patch = build_pipeline.XCODE27_SEATBELT_PATCH
@@ -1384,6 +1755,10 @@ class BuildPipelineTests(unittest.TestCase):
             self.source / build_pipeline.SCREEN_AI_DISABLED_RECEIPT,
             {"fixture": True},
         )
+        linkedit = self.write_json(
+            self.source / build_pipeline.XCODE27_LINKEDIT_STRIP_RECEIPT,
+            {"fixture": True},
+        )
         with mock.patch.object(
             build_pipeline,
             "xcode27_compat_receipt_contract",
@@ -1396,6 +1771,10 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline,
             "screen_ai_disabled_receipt_contract",
             return_value=(screen_ai, {"fixture": True}),
+        ), mock.patch.object(
+            build_pipeline,
+            "xcode27_linkedit_strip_receipt_contract",
+            return_value=(linkedit, {"tools": self.linkedit_tools}),
         ):
             plan = build_pipeline.build_plan(
                 self.source, self.developer, "arm64"
@@ -1422,6 +1801,10 @@ class BuildPipelineTests(unittest.TestCase):
             self.source / build_pipeline.SCREEN_AI_DISABLED_RECEIPT,
             {"fixture": True},
         )
+        linkedit = self.write_json(
+            self.source / build_pipeline.XCODE27_LINKEDIT_STRIP_RECEIPT,
+            {"fixture": True},
+        )
         with mock.patch.object(
             build_pipeline, "acquisition_contract"
         ), mock.patch.object(
@@ -1442,14 +1825,23 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline,
             "screen_ai_disabled_receipt_contract",
             return_value=(screen_ai, {"fixture": True}),
-        ) as screen_contract:
+        ) as screen_contract, mock.patch.object(
+            build_pipeline,
+            "xcode27_linkedit_strip_receipt_contract",
+            return_value=(linkedit, {"tools": self.linkedit_tools}),
+        ) as linkedit_contract:
             plan = build_pipeline.build_plan(self.source, self.developer, "x64")
 
         self.assertEqual("build-x64", plan["stage"])
         preparation.assert_called_once_with(
             self.source, allow_reclaimed_arm=True
         )
-        for contract in (module_contract, seatbelt_contract, screen_contract):
+        for contract in (
+            module_contract,
+            seatbelt_contract,
+            screen_contract,
+            linkedit_contract,
+        ):
             self.assertTrue(contract.call_args.kwargs["allow_reclaimed_arm"])
 
     def test_execute_build_writes_a_provenance_receipt(self):
@@ -1474,6 +1866,14 @@ class BuildPipelineTests(unittest.TestCase):
             self.source / build_pipeline.SCREEN_AI_DISABLED_RECEIPT,
             {"fixture": True},
         )
+        linkedit = self.write_json(
+            self.source / build_pipeline.XCODE27_LINKEDIT_STRIP_RECEIPT,
+            {"fixture": True},
+        )
+        generated_linkedit = {
+            "selected_strip": self.linkedit_tools["selected"],
+            "all_linker_rules_use_selected_strip": True,
+        }
         plan = {
             "architecture": "arm64",
             "out": str(out),
@@ -1492,6 +1892,11 @@ class BuildPipelineTests(unittest.TestCase):
                 "path": str(screen_ai),
                 "sha256": build_pipeline.sha256_file(screen_ai),
             },
+            "xcode27_linkedit_strip_compatibility": {
+                "path": str(linkedit),
+                "sha256": build_pipeline.sha256_file(linkedit),
+            },
+            "linkedit_strip_tools": self.linkedit_tools,
         }
         app_report = {
             "app": str(out / build_pipeline.APP_NAME),
@@ -1515,6 +1920,14 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline,
             "screen_ai_disabled_receipt_contract",
             return_value=(screen_ai, {"fixture": True}),
+        ), mock.patch.object(
+            build_pipeline,
+            "xcode27_linkedit_strip_receipt_contract",
+            return_value=(linkedit, {"tools": self.linkedit_tools}),
+        ), mock.patch.object(
+            build_pipeline,
+            "generated_linkedit_strip_contract",
+            return_value=generated_linkedit,
         ):
             report = build_pipeline.execute_build(
                 self.source, self.developer, plan
@@ -1537,6 +1950,13 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline.sha256_file(screen_ai),
             receipt["screen_ai_disabled_compatibility_receipt_sha256"],
         )
+        self.assertEqual(
+            build_pipeline.sha256_file(linkedit),
+            receipt[
+                "xcode27_linkedit_strip_compatibility_receipt_sha256"
+            ],
+        )
+        self.assertEqual(generated_linkedit, receipt["generated_linkedit_strip"])
 
     def test_stage_reclaims_only_exact_arm_output_after_verified_copy(self):
         arm_out = self.source / build_pipeline.ARM_OUT
@@ -1966,6 +2386,9 @@ class BuildPipelineTests(unittest.TestCase):
 
     def test_merge_plan_uses_chromium_x64_first_and_ad_hoc_signing(self):
         _, x64_out, universalizer = self.prepare_merge_fixture()
+        linkedit_receipt = (
+            self.source / build_pipeline.XCODE27_LINKEDIT_STRIP_RECEIPT
+        )
         output = self.root / "FocusBrowser.dmg"
         swiftshader_receipt = self.write_json(
             self.source / build_pipeline.SWIFTSHADER_DISABLED_SIGNING_RECEIPT,
@@ -2009,6 +2432,13 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline,
             "adhoc_runtime_signing_receipt_contract",
             return_value=(adhoc_receipt, {"fixture": True}),
+        ), mock.patch.object(
+            build_pipeline,
+            "xcode27_linkedit_strip_receipt_contract",
+            return_value=(
+                linkedit_receipt,
+                {"tools": self.linkedit_tools},
+            ),
         ):
             plan = build_pipeline.merge_plan(
                 self.source, self.developer, output
@@ -2021,6 +2451,10 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertEqual(
             build_pipeline.sha256_file(adhoc_receipt),
             plan["adhoc_runtime_signing"]["sha256"],
+        )
+        self.assertEqual(
+            build_pipeline.sha256_file(linkedit_receipt),
+            plan["xcode27_linkedit_strip_compatibility"]["sha256"],
         )
         for name in ("universalize", "sign", "package"):
             self.assertEqual(packaging_python["path"], plan["commands"][name][0])
@@ -2049,6 +2483,9 @@ class BuildPipelineTests(unittest.TestCase):
 
     def test_merge_rejects_relative_dmg_output(self):
         _, _, universalizer = self.prepare_merge_fixture()
+        linkedit_receipt = (
+            self.source / build_pipeline.XCODE27_LINKEDIT_STRIP_RECEIPT
+        )
         swiftshader_receipt = self.write_json(
             self.source / build_pipeline.SWIFTSHADER_DISABLED_SIGNING_RECEIPT,
             {"fixture": True},
@@ -2087,6 +2524,13 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline,
             "adhoc_runtime_signing_receipt_contract",
             return_value=(adhoc_receipt, {"fixture": True}),
+        ), mock.patch.object(
+            build_pipeline,
+            "xcode27_linkedit_strip_receipt_contract",
+            return_value=(
+                linkedit_receipt,
+                {"tools": self.linkedit_tools},
+            ),
         ), self.assertRaisesRegex(
             build_pipeline.PipelineError, "absolute"
         ):
@@ -2116,6 +2560,138 @@ class BuildPipelineTests(unittest.TestCase):
     def test_recursive_reclamation_requires_explicit_flag(self):
         with self.assertRaisesRegex(build_pipeline.PipelineError, "allow-reclaim"):
             build_pipeline.execute_stage_arm(self.source, {}, False)
+
+    def test_linkedit_recovery_archives_invalid_evidence_and_preserves_x64_objects(self):
+        arm_out = self.source / build_pipeline.ARM_OUT
+        shutil.rmtree(arm_out)
+        staged_app = self.make_app(
+            (self.source / build_pipeline.STAGED_ARM_APP).parent, "arm64"
+        )
+        (staged_app / "Contents/MacOS/Focus Browser").write_bytes(
+            self.macho64_bytes("arm64", stroff=0x104)
+        )
+        x64_out = self.source / build_pipeline.X64_OUT
+        x64_app = self.make_app(x64_out, "x86_64")
+        (x64_app / "Contents/MacOS/Focus Browser").write_bytes(
+            self.macho64_bytes("x86_64", stroff=0x104)
+        )
+        profiles = build_pipeline.focus_macos.validate_gn_profiles()["profiles"]
+        (x64_out / "args.gn").write_text(
+            profiles["x64"]["args_gn"], encoding="utf-8"
+        )
+        obj_sentinel = x64_out / "obj/keep.o"
+        obj_sentinel.parent.mkdir(parents=True)
+        obj_sentinel.write_bytes(b"preserve object\n")
+        for relative, body in (
+            (build_pipeline.STAGE_RECEIPT, b"stage\n"),
+            (build_pipeline.RECLAIM_RECEIPT, b"reclaim\n"),
+            (
+                build_pipeline.X64_OUT
+                + "/"
+                + build_pipeline.SLICE_RECEIPT_NAME,
+                b"x64 receipt\n",
+            ),
+            (
+                build_pipeline.SWIFTSHADER_DISABLED_SIGNING_RECEIPT,
+                b"swift receipt\n",
+            ),
+        ):
+            path = self.source / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        artifact_paths = (
+            build_pipeline.STAGED_ARM_APP,
+            build_pipeline.STAGE_RECEIPT,
+            build_pipeline.RECLAIM_RECEIPT,
+            build_pipeline.X64_OUT + "/" + build_pipeline.APP_NAME,
+            build_pipeline.X64_OUT
+            + "/"
+            + build_pipeline.SLICE_RECEIPT_NAME,
+            build_pipeline.SWIFTSHADER_DISABLED_SIGNING_RECEIPT,
+        )
+        contracts = {}
+        for relative in artifact_paths:
+            path = self.source / relative
+            if path.is_dir():
+                contracts[relative] = {
+                    "kind": "tree",
+                    "sha256": build_pipeline.tree_digest(path),
+                }
+            else:
+                contracts[relative] = {
+                    "kind": "file",
+                    "sha256": build_pipeline.sha256_file(path),
+                }
+        linkedit_receipt = self.write_json(
+            self.source / build_pipeline.XCODE27_LINKEDIT_STRIP_RECEIPT,
+            {"fixture": True},
+        )
+        with mock.patch.object(
+            build_pipeline,
+            "LINKEDIT_RECOVERY_LEGACY_ARTIFACTS",
+            contracts,
+        ), mock.patch.object(
+            build_pipeline, "acquisition_contract"
+        ), mock.patch.object(
+            build_pipeline, "tool_receipt_contract"
+        ), mock.patch.object(
+            build_pipeline, "preparation_contract"
+        ), mock.patch.object(
+            build_pipeline,
+            "xcode27_linkedit_strip_receipt_contract",
+            return_value=(linkedit_receipt, {"fixture": True}),
+        ), mock.patch.object(
+            build_pipeline,
+            "_adhoc_runtime_signing_paths",
+            return_value=({}, {}),
+        ), mock.patch.object(
+            build_pipeline,
+            "_adhoc_runtime_signing_set_state",
+            return_value="post",
+        ), mock.patch.object(
+            build_pipeline, "require_free", return_value=60 * build_pipeline.GIB
+        ):
+            plan = build_pipeline.linkedit_recovery_plan(
+                self.source, self.developer
+            )
+            with self.assertRaisesRegex(
+                build_pipeline.PipelineError, "allow-recovery-move"
+            ):
+                build_pipeline.execute_linkedit_recovery(
+                    self.source, self.developer, plan, False
+                )
+            report = build_pipeline.execute_linkedit_recovery(
+                self.source, self.developer, plan, True
+            )
+        self.assertFalse(plan["postprocess_existing_binaries"])
+        self.assertGreater(
+            len(plan["legacy_alignment"]["arm64"]["violations"]), 0
+        )
+        self.assertGreater(
+            len(plan["legacy_alignment"]["x86_64"]["violations"]), 0
+        )
+        self.assertTrue((arm_out / "args.gn").is_file())
+        self.assertEqual(
+            build_pipeline.SWIFTSHADER_DISABLED_ARGS_SHA256["arm64"],
+            build_pipeline.sha256_file(arm_out / "args.gn"),
+        )
+        self.assertEqual(b"preserve object\n", obj_sentinel.read_bytes())
+        recovery_root = Path(report["recovery_root"])
+        self.assertTrue((recovery_root / "manifest.json").is_file())
+        for relative in artifact_paths:
+            self.assertFalse((self.source / relative).exists())
+            self.assertTrue((recovery_root / "artifacts" / relative).exists())
+        self.assertEqual(
+            [
+                "build-arm64",
+                "stage-arm64",
+                "build-x64",
+                "apply-swiftshader-disabled-signing-compat",
+                "apply-adhoc-runtime-signing-compat",
+                "merge-sign-package",
+            ],
+            report["required_followup_stages"],
+        )
 
     def test_forbidden_privileged_build_program_is_rejected(self):
         with self.assertRaisesRegex(build_pipeline.PipelineError, "forbidden"):
@@ -2167,6 +2743,23 @@ class BuildPipelineTests(unittest.TestCase):
         )
         self.assertFalse(args.execute)
         self.assertEqual("build-arm64", args.command)
+
+    def test_linkedit_recovery_cli_has_separate_move_confirmation(self):
+        base = [
+            "prepare-xcode27-linkedit-recovery",
+            "--source-root",
+            str(self.source),
+            "--developer-dir",
+            str(self.developer),
+        ]
+        dry = build_pipeline.parser().parse_args(base)
+        self.assertFalse(dry.execute)
+        self.assertFalse(dry.allow_recovery_move)
+        execute = build_pipeline.parser().parse_args(
+            base + ["--execute", "--allow-recovery-move"]
+        )
+        self.assertTrue(execute.execute)
+        self.assertTrue(execute.allow_recovery_move)
 
 
 if __name__ == "__main__":
