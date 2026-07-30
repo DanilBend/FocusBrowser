@@ -102,6 +102,33 @@ class LocalDmgPackagerTests(unittest.TestCase):
 
         return run
 
+    def publish_fixture(self, payload=b"accepted DMG payload"):
+        private_root = self.root / "private-candidate"
+        private_root.mkdir(mode=0o700)
+        private_root.chmod(0o700)
+        candidate = private_root / "candidate.dmg"
+        candidate.write_bytes(payload)
+        candidate.chmod(0o600)
+        observed = os.lstat(str(candidate))
+        output = self.root / "published.dmg"
+        return {
+            "root": private_root,
+            "candidate": candidate,
+            "output": output,
+            "identity": (observed.st_dev, observed.st_ino),
+            "size": len(payload),
+            "digest": hashlib.sha256(payload).hexdigest(),
+        }
+
+    def publish(self, fixture):
+        return package_local_dmg.durable_publish_candidate(
+            fixture["candidate"],
+            fixture["output"],
+            fixture["identity"],
+            fixture["size"],
+            fixture["digest"],
+        )
+
     def test_validate_app_accepts_each_supported_architecture_shape(self):
         cases = (
             ("arm64", ["arm64"]),
@@ -425,9 +452,9 @@ class LocalDmgPackagerTests(unittest.TestCase):
     def test_atomic_output_race_never_overwrites_or_removes_rival(self):
         output = self.root / "race.dmg"
 
-        def rival_link(_source, destination):
-            Path(destination).write_bytes(b"rival")
-            raise FileExistsError(destination)
+        def rival_link(*_args, **_kwargs):
+            output.write_bytes(b"rival")
+            raise FileExistsError(str(output))
 
         with mock.patch.object(package_local_dmg, "require_system_tools"), mock.patch.object(
             package_local_dmg, "checked_run", side_effect=self.command_runner()
@@ -437,6 +464,167 @@ class LocalDmgPackagerTests(unittest.TestCase):
             with self.assertRaisesRegex(package_local_dmg.PackageError, "overwrite"):
                 package_local_dmg.package_local_dmg(self.app, output)
         self.assertEqual(b"rival", output.read_bytes())
+
+    def test_durable_publish_fsyncs_file_then_final_entry_then_candidate_root(self):
+        fixture = self.publish_fixture()
+        candidate_identity = fixture["identity"]
+        parent_identity = tuple(
+            getattr(os.lstat(str(self.root)), name) for name in ("st_dev", "st_ino")
+        )
+        root_identity = tuple(
+            getattr(os.lstat(str(fixture["root"])), name)
+            for name in ("st_dev", "st_ino")
+        )
+        calls = []
+        real_fsync = os.fsync
+
+        def recording_fsync(descriptor):
+            observed = os.fstat(descriptor)
+            calls.append((observed.st_dev, observed.st_ino))
+            return real_fsync(descriptor)
+
+        with mock.patch("os.fsync", side_effect=recording_fsync):
+            published = self.publish(fixture)
+
+        self.assertEqual(
+            [candidate_identity, parent_identity, root_identity], calls
+        )
+        self.assertFalse(fixture["candidate"].exists())
+        self.assertEqual(1, published.st_nlink)
+        self.assertEqual(1, os.lstat(str(fixture["output"])).st_nlink)
+        self.assertEqual(b"accepted DMG payload", fixture["output"].read_bytes())
+
+    def test_keyboard_interrupt_after_real_link_rolls_back_actual_inode(self):
+        fixture = self.publish_fixture()
+        real_link = os.link
+
+        def link_then_interrupt(*args, **kwargs):
+            real_link(*args, **kwargs)
+            raise KeyboardInterrupt("synthetic interrupt after link")
+
+        with mock.patch("os.link", side_effect=link_then_interrupt), self.assertRaises(
+            KeyboardInterrupt
+        ):
+            self.publish(fixture)
+
+        self.assertFalse(os.path.lexists(str(fixture["output"])))
+        self.assertTrue(fixture["candidate"].is_file())
+        self.assertEqual(1, os.lstat(str(fixture["candidate"])).st_nlink)
+
+    def test_output_parent_fsync_failure_rolls_back_and_fsyncs_removal(self):
+        fixture = self.publish_fixture()
+        real_fsync = os.fsync
+        calls = 0
+
+        def fail_commit_fsync(descriptor):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("synthetic output parent fsync failure")
+            return real_fsync(descriptor)
+
+        with mock.patch("os.fsync", side_effect=fail_commit_fsync), self.assertRaisesRegex(
+            OSError, "output parent fsync"
+        ):
+            self.publish(fixture)
+
+        self.assertEqual(3, calls)
+        self.assertFalse(os.path.lexists(str(fixture["output"])))
+        self.assertEqual(1, os.lstat(str(fixture["candidate"])).st_nlink)
+
+    def test_candidate_with_existing_hardlink_is_rejected(self):
+        fixture = self.publish_fixture()
+        os.link(str(fixture["candidate"]), str(self.root / "extra-link.dmg"))
+        with self.assertRaisesRegex(package_local_dmg.PackageError, "one link"):
+            self.publish(fixture)
+        self.assertFalse(os.path.lexists(str(fixture["output"])))
+        self.assertEqual(2, os.lstat(str(fixture["candidate"])).st_nlink)
+
+    def test_candidate_with_unsafe_mode_is_rejected(self):
+        fixture = self.publish_fixture()
+        fixture["candidate"].chmod(0o666)
+        with self.assertRaisesRegex(
+            package_local_dmg.PackageError, "group/world write"
+        ):
+            self.publish(fixture)
+        self.assertFalse(os.path.lexists(str(fixture["output"])))
+
+    def test_private_root_path_replacement_is_detected_before_link(self):
+        fixture = self.publish_fixture()
+        moved_root = self.root / "moved-private-candidate"
+        real_fsync = os.fsync
+        replaced = False
+
+        def replace_after_candidate_fsync(descriptor):
+            nonlocal replaced
+            result = real_fsync(descriptor)
+            if not replaced:
+                fixture["root"].rename(moved_root)
+                fixture["root"].mkdir(mode=0o700)
+                fixture["root"].chmod(0o700)
+                replaced = True
+            return result
+
+        with mock.patch("os.fsync", side_effect=replace_after_candidate_fsync), self.assertRaisesRegex(
+            package_local_dmg.PackageError, "directory was replaced"
+        ):
+            self.publish(fixture)
+        self.assertFalse(os.path.lexists(str(fixture["output"])))
+        self.assertEqual(b"accepted DMG payload", (moved_root / "candidate.dmg").read_bytes())
+
+    def test_output_parent_path_replacement_is_detected_before_link(self):
+        fixture = self.publish_fixture()
+        output_parent = self.root / "destination"
+        output_parent.mkdir()
+        fixture["output"] = output_parent / "published.dmg"
+        moved_parent = self.root / "moved-destination"
+        real_fsync = os.fsync
+        replaced = False
+
+        def replace_after_candidate_fsync(descriptor):
+            nonlocal replaced
+            result = real_fsync(descriptor)
+            if not replaced:
+                output_parent.rename(moved_parent)
+                output_parent.mkdir()
+                replaced = True
+            return result
+
+        with mock.patch("os.fsync", side_effect=replace_after_candidate_fsync), self.assertRaisesRegex(
+            package_local_dmg.PackageError, "directory was replaced"
+        ):
+            self.publish(fixture)
+        self.assertFalse(os.path.lexists(str(fixture["output"])))
+        self.assertEqual([], list(moved_parent.iterdir()))
+
+    def test_rival_output_inode_is_never_removed(self):
+        fixture = self.publish_fixture()
+        fixture["output"].write_bytes(b"rival output")
+        with self.assertRaisesRegex(package_local_dmg.PackageError, "overwrite"):
+            self.publish(fixture)
+        self.assertEqual(b"rival output", fixture["output"].read_bytes())
+
+    def test_post_commit_candidate_cleanup_failure_preserves_final_inode(self):
+        fixture = self.publish_fixture()
+        real_unlink = os.unlink
+
+        def reject_candidate_cleanup(path, *args, **kwargs):
+            if path == fixture["candidate"].name and kwargs.get("dir_fd") is not None:
+                raise OSError("synthetic candidate cleanup failure")
+            return real_unlink(path, *args, **kwargs)
+
+        with mock.patch("os.unlink", side_effect=reject_candidate_cleanup), self.assertRaisesRegex(
+            package_local_dmg.CommittedPublishError, "durably committed"
+        ) as raised:
+            self.publish(fixture)
+
+        self.assertEqual(fixture["identity"], raised.exception.final_identity)
+        self.assertEqual(b"accepted DMG payload", fixture["output"].read_bytes())
+        self.assertEqual(fixture["identity"], (
+            os.lstat(str(fixture["output"])).st_dev,
+            os.lstat(str(fixture["output"])).st_ino,
+        ))
+        self.assertEqual(2, os.lstat(str(fixture["output"])).st_nlink)
 
     def test_cli_json_and_error_paths(self):
         report = {
@@ -486,7 +674,10 @@ class LocalDmgPackagerTests(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, source)
         self.assertIn('[CODESIGN, "--verify", "--deep", "--strict", str(app)]', source)
-        self.assertIn("os.link(str(candidate), str(output))", source)
+        self.assertIn("src_dir_fd=root_fd", source)
+        self.assertIn("os.fsync(parent_fd)", source)
+        self.assertIn("os.fsync(root_fd)", source)
+        self.assertIn("O_NOFOLLOW", source)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import plistlib
+import stat
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,289 @@ ACCEPTED_ARCHITECTURE_SETS = frozenset(
 
 class PackageError(RuntimeError):
     """Raised when an app or image fails the local packaging contract."""
+
+
+class CommittedPublishError(PackageError):
+    """Publication committed durably, but candidate cleanup did not finish."""
+
+    def __init__(self, message, final_identity):
+        super().__init__(message)
+        self.final_identity = tuple(final_identity)
+
+
+def _directory_flags():
+    """Return the mandatory flags used to pin a directory without symlinks."""
+    required = ("O_DIRECTORY", "O_NOFOLLOW")
+    missing = [name for name in required if not hasattr(os, name)]
+    if missing:
+        raise PackageError(
+            "safe DMG publication requires {}".format(", ".join(missing))
+        )
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _entry_stat(name, directory_fd):
+    """lstat one leaf relative to an already pinned directory descriptor."""
+    try:
+        return os.stat(
+            name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return None
+
+
+def _same_inode(left, right):
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _require_pinned_directory(path, directory_fd, private=False):
+    """Fail if a pinned directory or its absolute pathname was replaced."""
+    pinned = os.fstat(directory_fd)
+    try:
+        named = os.lstat(str(path))
+    except OSError as exc:
+        raise PackageError("pinned DMG directory pathname changed: {}".format(path)) from exc
+    if (
+        not stat.S_ISDIR(pinned.st_mode)
+        or not stat.S_ISDIR(named.st_mode)
+        or stat.S_ISLNK(named.st_mode)
+        or not _same_inode(pinned, named)
+    ):
+        raise PackageError("pinned DMG directory was replaced: {}".format(path))
+    if private and (
+        stat.S_IMODE(pinned.st_mode) != 0o700
+        or pinned.st_uid != os.geteuid()
+    ):
+        raise PackageError("DMG candidate root must be owner-only mode 0700")
+    return pinned
+
+
+def _require_safe_candidate(observed, expected_identity, expected_size):
+    """Require one owner-controlled, immutable-for-publication candidate inode."""
+    unsafe_mode = (
+        stat.S_IWGRP
+        | stat.S_IWOTH
+        | stat.S_IXUSR
+        | stat.S_IXGRP
+        | stat.S_IXOTH
+        | stat.S_ISUID
+        | stat.S_ISGID
+        | stat.S_ISVTX
+    )
+    if (
+        not stat.S_ISREG(observed.st_mode)
+        or (observed.st_dev, observed.st_ino) != tuple(expected_identity)
+        or observed.st_size != expected_size
+        or observed.st_nlink != 1
+        or observed.st_uid != os.geteuid()
+        or not (observed.st_mode & stat.S_IRUSR)
+        or observed.st_mode & unsafe_mode
+    ):
+        raise PackageError(
+            "DMG candidate must be an owner-controlled, non-executable regular "
+            "file with one link and no group/world write permission"
+        )
+
+
+def _sha256_fd(file_fd):
+    """Hash the exact descriptor-pinned inode without reopening its pathname."""
+    digest = hashlib.sha256()
+    offset = 0
+    while True:
+        block = os.pread(file_fd, 1024 * 1024, offset)
+        if not block:
+            break
+        digest.update(block)
+        offset += len(block)
+    return digest.hexdigest()
+
+
+def _rollback_exact_output(parent_fd, output_name, identity):
+    """Rollback only our exact output inode and durably record its removal."""
+    observed = _entry_stat(output_name, parent_fd)
+    if observed is None:
+        return False
+    if not stat.S_ISREG(observed.st_mode) or (
+        observed.st_dev,
+        observed.st_ino,
+    ) != tuple(identity):
+        return False
+    os.unlink(output_name, dir_fd=parent_fd)
+    if _entry_stat(output_name, parent_fd) is not None:
+        raise PackageError("failed to remove rejected DMG output inode")
+    os.fsync(parent_fd)
+    return True
+
+
+def durable_publish_candidate(
+    candidate,
+    output,
+    expected_identity,
+    expected_size,
+    expected_sha256,
+):
+    """Durably publish one accepted inode without overwrite or pathname races.
+
+    The commit boundary is the successful fsync of the descriptor-pinned output
+    parent followed by pathname identity revalidation.  Before that boundary,
+    any exact link created by this call is rolled back by inode and the parent is
+    fsynced.  After it, cleanup failures retain the accepted final inode and are
+    reported as :class:`CommittedPublishError`.
+
+    This is intentionally a bounded transaction, not a persistent recovery
+    journal.  A process or machine crash after the final directory fsync but
+    before candidate cleanup can leave the private candidate as a second link;
+    the accepted output remains durable and is never silently overwritten.
+    """
+    candidate = Path(candidate)
+    output = Path(output)
+    if (
+        candidate.name in ("", ".", "..")
+        or output.name in ("", ".", "..")
+        or candidate.parent == output.parent
+    ):
+        raise PackageError("DMG publication requires distinct directory leaf paths")
+
+    root_fd = parent_fd = candidate_fd = output_fd = None
+    committed = False
+    try:
+        root_fd = os.open(str(candidate.parent), _directory_flags())
+        parent_fd = os.open(str(output.parent), _directory_flags())
+        _require_pinned_directory(candidate.parent, root_fd, private=True)
+        _require_pinned_directory(output.parent, parent_fd)
+        candidate_fd = os.open(
+            candidate.name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=root_fd,
+        )
+        pinned_candidate = os.fstat(candidate_fd)
+        named_candidate = _entry_stat(candidate.name, root_fd)
+        if named_candidate is None or not _same_inode(
+            pinned_candidate, named_candidate
+        ):
+            raise PackageError("DMG candidate pathname changed before publication")
+        _require_safe_candidate(
+            pinned_candidate,
+            expected_identity,
+            expected_size,
+        )
+        if _sha256_fd(candidate_fd) != expected_sha256:
+            raise PackageError("DMG candidate hash changed before publication")
+        if _entry_stat(output.name, parent_fd) is not None:
+            raise PackageError("refusing to overwrite existing DMG output")
+
+        # Flush content before creating any public directory entry.
+        os.fsync(candidate_fd)
+        _require_pinned_directory(candidate.parent, root_fd, private=True)
+        _require_pinned_directory(output.parent, parent_fd)
+        named_candidate = _entry_stat(candidate.name, root_fd)
+        if named_candidate is None or not _same_inode(
+            pinned_candidate, named_candidate
+        ):
+            raise PackageError("DMG candidate pathname changed before link")
+        _require_safe_candidate(os.fstat(candidate_fd), expected_identity, expected_size)
+
+        try:
+            os.link(
+                candidate.name,
+                output.name,
+                src_dir_fd=root_fd,
+                dst_dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError as exc:
+            raise PackageError("refusing to overwrite existing DMG output") from exc
+        except OSError as exc:
+            raise PackageError(
+                "failed to atomically place DMG output: {}".format(exc)
+            ) from exc
+
+        output_fd = os.open(
+            output.name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+        published = os.fstat(output_fd)
+        candidate_after_link = os.fstat(candidate_fd)
+        if (
+            not stat.S_ISREG(published.st_mode)
+            or (published.st_dev, published.st_ino) != tuple(expected_identity)
+            or published.st_size != expected_size
+            or published.st_nlink != 2
+            or not _same_inode(published, candidate_after_link)
+            or candidate_after_link.st_nlink != 2
+            or _sha256_fd(output_fd) != expected_sha256
+        ):
+            raise PackageError("published DMG does not match accepted candidate")
+
+        # The final name is durable before the private backing name is removed.
+        _require_pinned_directory(candidate.parent, root_fd, private=True)
+        _require_pinned_directory(output.parent, parent_fd)
+        os.fsync(parent_fd)
+        _require_pinned_directory(candidate.parent, root_fd, private=True)
+        _require_pinned_directory(output.parent, parent_fd)
+        published_name = _entry_stat(output.name, parent_fd)
+        if published_name is None or not _same_inode(published, published_name):
+            raise PackageError("DMG output pathname changed before commit")
+        committed = True
+
+        try:
+            candidate_name = _entry_stat(candidate.name, root_fd)
+            if candidate_name is None or not _same_inode(
+                candidate_name, pinned_candidate
+            ):
+                raise PackageError("DMG candidate pathname changed during cleanup")
+            os.unlink(candidate.name, dir_fd=root_fd)
+            if _entry_stat(candidate.name, root_fd) is not None:
+                raise PackageError("failed to unlink private DMG candidate")
+            os.fsync(root_fd)
+            _require_pinned_directory(candidate.parent, root_fd, private=True)
+            _require_pinned_directory(output.parent, parent_fd)
+            final_stat = os.fstat(output_fd)
+            final_name = _entry_stat(output.name, parent_fd)
+            if (
+                final_name is None
+                or not _same_inode(final_stat, final_name)
+                or (final_stat.st_dev, final_stat.st_ino)
+                != tuple(expected_identity)
+                or final_stat.st_nlink != 1
+                or final_stat.st_size != expected_size
+                or _sha256_fd(output_fd) != expected_sha256
+            ):
+                raise PackageError("final DMG inode changed after candidate cleanup")
+            return final_stat
+        except BaseException as exc:
+            raise CommittedPublishError(
+                "DMG output is durably committed, but private candidate cleanup "
+                "did not complete: {!r}".format(exc),
+                expected_identity,
+            ) from exc
+    except BaseException as original_error:
+        if committed or isinstance(original_error, CommittedPublishError):
+            raise
+        rollback_error = None
+        if parent_fd is not None:
+            try:
+                _rollback_exact_output(parent_fd, output.name, expected_identity)
+            except BaseException as exc:
+                rollback_error = exc
+        if rollback_error is not None:
+            raise PackageError(
+                "DMG publication failed and exact-inode rollback also failed: "
+                "original={!r}; rollback={!r}".format(
+                    original_error, rollback_error
+                )
+            ) from original_error
+        raise
+    finally:
+        for descriptor in (output_fd, candidate_fd, parent_fd, root_fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
 
 
 def checked_run(command):
@@ -267,14 +551,16 @@ def package_local_dmg(app_value, output_value, require_universal=False):
                 ",".join(source_report["architectures"])
             )
         )
-    placed = False
-    placed_identity = None
     report = None
+    temporary_manager = tempfile.TemporaryDirectory(
+        dir=str(output.parent), prefix=".focusbrowser-dmg-"
+    )
+    temporary_cleanup_warning = None
+    publication_committed = False
     try:
-        with tempfile.TemporaryDirectory(
-            dir=str(output.parent), prefix=".focusbrowser-dmg-"
-        ) as temporary:
-            temporary_root = Path(temporary)
+        temporary_root = Path(temporary_manager.name)
+        os.chmod(str(temporary_root), 0o700)
+        try:
             staging = temporary_root / "staging"
             staging.mkdir()
             staged_app = staging / APP_BUNDLE_NAME
@@ -311,16 +597,16 @@ def package_local_dmg(app_value, output_value, require_universal=False):
             digest = sha256_file(candidate)
             if os.path.lexists(str(output)):
                 raise PackageError("refusing to overwrite output created during packaging: {}".format(output))
-            candidate_stat = candidate.stat()
-            placed_identity = (candidate_stat.st_dev, candidate_stat.st_ino)
-            try:
-                os.link(str(candidate), str(output))
-            except FileExistsError as exc:
-                raise PackageError("refusing to overwrite existing output: {}".format(output)) from exc
-            except OSError as exc:
-                raise PackageError("failed to atomically place output: {}".format(exc)) from exc
-            placed = True
-            candidate.unlink()
+            candidate_stat = os.lstat(str(candidate))
+            candidate_identity = (candidate_stat.st_dev, candidate_stat.st_ino)
+            durable_publish_candidate(
+                candidate,
+                output,
+                candidate_identity,
+                size,
+                digest,
+            )
+            publication_committed = True
             report = {
                 "app": str(app),
                 "output": str(output),
@@ -336,15 +622,23 @@ def package_local_dmg(app_value, output_value, require_universal=False):
                 "notarization_performed": False,
                 "local_only": True,
             }
-    except Exception:
-        if placed and os.path.lexists(str(output)):
+        finally:
             try:
-                output_stat = os.lstat(str(output))
-                if (output_stat.st_dev, output_stat.st_ino) == placed_identity:
-                    output.unlink()
-            except OSError:
-                pass
+                temporary_manager.cleanup()
+            except BaseException as exc:
+                if not publication_committed or isinstance(
+                    exc, (KeyboardInterrupt, SystemExit)
+                ):
+                    raise
+                temporary_cleanup_warning = repr(exc)
+    except BaseException:
+        # durable_publish_candidate owns all pre-commit exact-inode rollback.
+        # Once committed, no later cleanup or reporting failure may remove the
+        # accepted final inode.
         raise
+    report["temporary_cleanup_complete"] = temporary_cleanup_warning is None
+    if temporary_cleanup_warning is not None:
+        report["temporary_cleanup_warning"] = temporary_cleanup_warning
     return report
 
 
