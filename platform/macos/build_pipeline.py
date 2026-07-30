@@ -17,6 +17,7 @@ import plistlib
 import re
 import shutil
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -33,6 +34,7 @@ import acquire_chromium  # pylint: disable=wrong-import-position
 import focus_macos  # pylint: disable=wrong-import-position
 import package_local_dmg  # pylint: disable=wrong-import-position
 import prepare_source  # pylint: disable=wrong-import-position
+import runtime_smoke  # pylint: disable=wrong-import-position
 
 
 GIB = 1024 ** 3
@@ -2798,6 +2800,12 @@ def adhoc_runtime_signing_plan(source, developer_dir):
         "packaging_state": packaging_state,
         "tests": adhoc_runtime_signing_test_contract(source),
         "refresh": adhoc_runtime_signing_refresh_contract(source),
+        "refresh_strategy": {
+            "mtime_independent": True,
+            "forced_missing_outputs": [
+                str(path) for path in packaging_paths.values()
+            ],
+        },
         "receipt": str(receipt_path),
         "offline": True,
         "network_operations": 0,
@@ -2830,6 +2838,7 @@ def adhoc_runtime_signing_receipt_contract(source, developer_dir):
         "generated_files",
         "tests",
         "refresh",
+        "refresh_strategy",
         "recovery_state",
         "offline",
         "network_operations",
@@ -2847,6 +2856,13 @@ def adhoc_runtime_signing_receipt_contract(source, developer_dir):
     build = swiftshader_disabled_build_contract(source)
     tests = adhoc_runtime_signing_test_contract(source)
     refresh = adhoc_runtime_signing_refresh_contract(source)
+    _, packaging_paths = _adhoc_runtime_signing_paths(source)
+    refresh_strategy = {
+        "mtime_independent": True,
+        "forced_missing_outputs": [
+            str(path) for path in packaging_paths.values()
+        ],
+    }
     recovery_state = receipt.get("recovery_state")
     allowed_recovery_states = (
         {"source": "pre", "packaging": "pre"},
@@ -2879,6 +2895,7 @@ def adhoc_runtime_signing_receipt_contract(source, developer_dir):
         != ADHOC_RUNTIME_SIGNING_GENERATED_FILES
         or receipt.get("tests") != tests
         or receipt.get("refresh") != refresh
+        or receipt.get("refresh_strategy") != refresh_strategy
         or recovery_state not in allowed_recovery_states
         or receipt.get("offline") is not True
         or receipt.get("network_operations") != 0
@@ -2964,6 +2981,28 @@ def execute_adhoc_runtime_signing(source, developer_dir, plan):
             developer_dir,
             build_ninja=Path(expected["refresh"]["ninja"]["path"]),
         )
+        if _adhoc_runtime_signing_set_state(
+            packaging_paths,
+            ADHOC_RUNTIME_SIGNING_GENERATED_FILES,
+            "generated signing package before forced refresh",
+        ) != expected["packaging_state"]:
+            raise PipelineError(
+                "generated signing package changed before forced refresh"
+            )
+        for relative, path in packaging_paths.items():
+            if path.is_symlink() or not path.is_file():
+                raise PipelineError(
+                    "generated signing output is unsafe before refresh: {}".format(
+                        relative
+                    )
+                )
+            path.unlink()
+            if os.path.lexists(str(path)):
+                raise PipelineError(
+                    "generated signing output survived forced refresh removal: {}".format(
+                        relative
+                    )
+                )
         run_monitored(expected["refresh"]["command"], source, refresh_environment)
         if _adhoc_runtime_signing_set_state(
             packaging_paths,
@@ -2995,6 +3034,7 @@ def execute_adhoc_runtime_signing(source, developer_dir, plan):
             "generated_files": ADHOC_RUNTIME_SIGNING_GENERATED_FILES,
             "tests": expected["tests"],
             "refresh": expected["refresh"],
+            "refresh_strategy": expected["refresh_strategy"],
             "recovery_state": {
                 "source": expected["source_state"],
                 "packaging": expected["packaging_state"],
@@ -3019,10 +3059,10 @@ def execute_adhoc_runtime_signing(source, developer_dir, plan):
                 raise PipelineError("unsafe ad-hoc receipt during rollback")
             if receipt_path.is_file():
                 receipt_path.unlink()
-            for relative, backup in source_backups.items():
-                prepare_source.atomic_copy(backup, source_paths[relative])
             for relative, backup in packaging_backups.items():
                 prepare_source.atomic_copy(backup, packaging_paths[relative])
+            for relative, backup in source_backups.items():
+                prepare_source.atomic_copy(backup, source_paths[relative])
             if (
                 _adhoc_runtime_signing_set_state(
                     source_paths,
@@ -4035,6 +4075,57 @@ def linkedit_recovery_plan(source, developer_dir):
     }
 
 
+def _verify_linkedit_recovery_moved_artifact(root, artifact):
+    """Re-hash and re-size one moved artifact without following its root."""
+    root = Path(root)
+    if root.is_symlink() or not root.is_dir():
+        raise PipelineError("LINKEDIT recovery verification root is unsafe")
+    relative = artifact.get("archive_relative_path")
+    relative_path = Path(relative) if isinstance(relative, str) else None
+    if (
+        not isinstance(relative, str)
+        or not relative.startswith("artifacts/")
+        or "\\" in relative
+        or relative_path.is_absolute()
+        or ".." in relative_path.parts
+    ):
+        raise PipelineError("invalid LINKEDIT recovery archive path")
+    destination = root / relative
+    kind = artifact.get("kind")
+    if kind == "file":
+        if destination.is_symlink() or not destination.is_file():
+            raise PipelineError(
+                "moved LINKEDIT recovery file is unsafe: {}".format(relative)
+            )
+        observed_hash = sha256_file(destination)
+        observed_bytes = destination.stat().st_size
+    elif kind == "tree":
+        if destination.is_symlink() or not destination.is_dir():
+            raise PipelineError(
+                "moved LINKEDIT recovery tree is unsafe: {}".format(relative)
+            )
+        observed_hash = tree_digest(destination)
+        observed_bytes = physical_size(destination)
+    else:
+        raise PipelineError("unknown moved LINKEDIT recovery artifact kind")
+    if (
+        observed_hash != artifact.get("sha256")
+        or observed_bytes != artifact.get("bytes")
+    ):
+        raise PipelineError(
+            "moved LINKEDIT recovery artifact changed before publication: {}".format(
+                relative
+            )
+        )
+    return {
+        "archive_relative_path": relative,
+        "kind": kind,
+        "sha256": observed_hash,
+        "bytes": observed_bytes,
+        "verified": True,
+    }
+
+
 def execute_linkedit_recovery(source, developer_dir, plan, allow_recovery_move):
     """Archive exact invalid evidence and prepare clean/relinkable outputs."""
     if not allow_recovery_move:
@@ -4050,6 +4141,8 @@ def execute_linkedit_recovery(source, developer_dir, plan, allow_recovery_move):
     arm_args = Path(expected["restore_arm_args"]["path"])
     arm_out = arm_args.parent
     moved = []
+    manifest_sha256 = None
+    moved_verification = None
     try:
         partial_root.mkdir(parents=False, exist_ok=False)
         for artifact in expected["artifacts"]:
@@ -4089,11 +4182,41 @@ def execute_linkedit_recovery(source, developer_dir, plan, allow_recovery_move):
             "rebuild_executed": False,
             "signing_executed": False,
             "packaging_executed": False,
+            "moved_artifacts_verified_before_publication": True,
         }
-        atomic_json(partial_root / "manifest.json", manifest_value)
+        manifest_report = atomic_json(partial_root / "manifest.json", manifest_value)
+        manifest_sha256 = manifest_report["sha256"]
+        moved_verification = [
+            _verify_linkedit_recovery_moved_artifact(partial_root, artifact)
+            for artifact in expected["artifacts"]
+        ]
         os.replace(str(partial_root), str(final_root))
     except BaseException as original_error:
         try:
+            if os.path.lexists(str(final_root)):
+                if os.path.lexists(str(partial_root)):
+                    raise PipelineError(
+                        "both partial and final LINKEDIT recovery roots exist"
+                    )
+                if final_root.is_symlink() or not final_root.is_dir():
+                    raise PipelineError(
+                        "published LINKEDIT recovery root is unsafe"
+                    )
+                final_manifest = final_root / "manifest.json"
+                if (
+                    manifest_sha256 is None
+                    or final_manifest.is_symlink()
+                    or not final_manifest.is_file()
+                    or sha256_file(final_manifest) != manifest_sha256
+                ):
+                    raise PipelineError(
+                        "published LINKEDIT recovery manifest cannot be normalized"
+                    )
+                for artifact in expected["artifacts"]:
+                    _verify_linkedit_recovery_moved_artifact(
+                        final_root, artifact
+                    )
+                os.replace(str(final_root), str(partial_root))
             if arm_args.is_file() and not arm_args.is_symlink():
                 if sha256_file(arm_args) != expected["restore_arm_args"]["sha256"]:
                     raise PipelineError("unsafe recovered arm64 args during rollback")
@@ -4108,10 +4231,16 @@ def execute_linkedit_recovery(source, developer_dir, plan, allow_recovery_move):
             if partial_root.is_dir() and not partial_root.is_symlink():
                 shutil.rmtree(str(partial_root))
         except BaseException as rollback_error:
+            if os.path.lexists(str(final_root)):
+                retained_root = str(final_root)
+            elif os.path.lexists(str(partial_root)):
+                retained_root = str(partial_root)
+            else:
+                retained_root = "<none>"
             raise PipelineError(
-                "LINKEDIT recovery and rollback failed; partial retained at {}: "
+                "LINKEDIT recovery and rollback failed; recovery state retained at {}: "
                 "original={!r}; rollback={!r}".format(
-                    partial_root, original_error, rollback_error
+                    retained_root, original_error, rollback_error
                 )
             ) from original_error
         raise
@@ -4124,6 +4253,7 @@ def execute_linkedit_recovery(source, developer_dir, plan, allow_recovery_move):
         "restored_arm_args": expected["restore_arm_args"],
         "x64_objects_preserved": expected["preserve_x64_objects"],
         "required_followup_stages": expected["required_followup_stages"],
+        "moved_artifacts": moved_verification,
         "postprocess_existing_binaries": False,
     }
 
@@ -4708,8 +4838,38 @@ def merge_plan(source, developer_dir, dmg_output):
             "path": str(linkedit_receipt_path),
             "sha256": sha256_file(linkedit_receipt_path),
         },
+        "runtime_acceptance": {
+            "signed_app_before_packaging": True,
+            "mounted_final_dmg": True,
+            "architectures": ["arm64", "x86_64"],
+            "native_arm64_required": True,
+            "rosetta_x86_64_required": True,
+            "fresh_profiles": True,
+            "incognito": True,
+            "offline_navigation": "data:text/html",
+            "timeout_seconds": runtime_smoke.DEFAULT_TIMEOUT_SECONDS,
+        },
         "developer_dir": str(developer_dir),
     }
+
+
+def _unlink_created_dmg(output, identity):
+    """Remove only the exact regular DMG inode created by this execution."""
+    output = Path(output)
+    if not os.path.lexists(str(output)):
+        return False
+    observed = os.lstat(str(output))
+    if (
+        not stat.S_ISREG(observed.st_mode)
+        or (observed.st_dev, observed.st_ino) != tuple(identity)
+    ):
+        raise PipelineError(
+            "refusing to remove a changed DMG after acceptance failure"
+        )
+    output.unlink()
+    if os.path.lexists(str(output)):
+        raise PipelineError("failed to remove rejected DMG output")
+    return True
 
 
 def execute_merge(source, developer_dir, plan):
@@ -4812,6 +4972,11 @@ def execute_merge(source, developer_dir, plan):
     )
     if "Signature=adhoc" not in signature_detail.splitlines():
         raise PipelineError("signed app is not ad-hoc signed")
+    signed_app_digest = tree_digest(signed_app)
+    signing_matrix = runtime_smoke.validate_adhoc_signing_matrix(signed_app)
+    signed_runtime = runtime_smoke.validate_universal_app_runtime(signed_app)
+    if tree_digest(signed_app) != signed_app_digest:
+        raise PipelineError("signed app changed during runtime acceptance")
     universal_size = physical_size(signed_app)
     output = Path(plan["dmg_output"])
     package_required = SOFT_FLOOR_GIB + 5 + (3 * universal_size) / GIB
@@ -4827,9 +4992,43 @@ def execute_merge(source, developer_dir, plan):
     )
     if output.is_symlink() or not output.is_file() or output.stat().st_size <= 0:
         raise PipelineError("DMG packager did not create the expected regular output")
-    app_identity = package_local_dmg.validate_app(signed_app)
-    if app_identity["architectures"] != ["arm64", "x86_64"]:
-        raise PipelineError("packaged app is no longer universal")
+    output_stat = os.lstat(str(output))
+    if not stat.S_ISREG(output_stat.st_mode):
+        raise PipelineError("DMG packager output is no longer regular")
+    output_identity = (output_stat.st_dev, output_stat.st_ino)
+    try:
+        mounted_runtime = runtime_smoke.validate_mounted_dmg_runtime(output)
+        app_identity = package_local_dmg.validate_app(signed_app)
+        if app_identity["architectures"] != ["arm64", "x86_64"]:
+            raise PipelineError("packaged app is no longer universal")
+        accepted_stat = os.lstat(str(output))
+        if (
+            not stat.S_ISREG(accepted_stat.st_mode)
+            or (accepted_stat.st_dev, accepted_stat.st_ino) != output_identity
+            or accepted_stat.st_size != mounted_runtime["size_bytes"]
+        ):
+            raise PipelineError("final DMG changed after mounted runtime acceptance")
+        output_digest = package_local_dmg.sha256_file(output)
+        if output_digest != mounted_runtime["sha256"]:
+            raise PipelineError("final DMG hash changed after runtime acceptance")
+    except BaseException as original_error:
+        if isinstance(original_error, runtime_smoke.DmgDetachError):
+            raise PipelineError(
+                "final DMG acceptance could not prove that the image detached; "
+                "retained the exact backing DMG for manual detach at {}: {!r}".format(
+                    output, original_error
+                )
+            ) from original_error
+        try:
+            _unlink_created_dmg(output, output_identity)
+        except BaseException as cleanup_error:
+            raise PipelineError(
+                "final DMG acceptance failed and safe output cleanup also failed: "
+                "original={!r}; cleanup={!r}".format(
+                    original_error, cleanup_error
+                )
+            ) from original_error
+        raise
     report = {
         "app": str(signed_app),
         "output": str(output),
@@ -4838,9 +5037,12 @@ def execute_merge(source, developer_dir, plan):
         "architectures": app_identity["architectures"],
         "require_universal": True,
         "format": "UDZO",
-        "size_bytes": output.stat().st_size,
-        "sha256": package_local_dmg.sha256_file(output),
-        "signature": "ad-hoc; nested signature and mounted DMG verified",
+        "size_bytes": accepted_stat.st_size,
+        "sha256": output_digest,
+        "signature": (
+            "ad-hoc; exact nested policy, signed-app runtime, and mounted-DMG "
+            "runtime verified"
+        ),
         "signing_performed": True,
         "notarization_performed": False,
         "local_only": True,
@@ -4848,9 +5050,14 @@ def execute_merge(source, developer_dir, plan):
         "swiftshader_disabled_signing": current_swiftshader,
         "adhoc_runtime_signing": current_adhoc,
         "xcode27_linkedit_strip_compatibility": current_linkedit,
+        "codesign_matrix": signing_matrix,
+        "runtime_acceptance": {
+            "signed_app": signed_runtime,
+            "mounted_final_dmg": mounted_runtime,
+        },
     }
     report["signed_app"] = str(signed_app)
-    report["signed_app_tree_sha256"] = tree_digest(signed_app)
+    report["signed_app_tree_sha256"] = signed_app_digest
     report["notarized"] = False
     report["developer_id_signed"] = False
     return report
@@ -4979,6 +5186,7 @@ def main(argv=None):
         PipelineError,
         focus_macos.ContractError,
         package_local_dmg.PackageError,
+        runtime_smoke.RuntimeSmokeError,
         OSError,
         ValueError,
         plistlib.InvalidFileException,

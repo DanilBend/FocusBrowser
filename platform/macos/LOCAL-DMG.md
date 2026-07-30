@@ -13,9 +13,14 @@ do not repair a broken bundle with a blanket `codesign --deep --force` command.
 After the separate arm64 and x86_64 builds are merged and the complete
 `Focus Browser.app` is signed, acceptance is:
 
-1. Launch the app directly and run the native Incognito checklist.
-2. Verify the complete nested signature with `codesign --verify --deep --strict
-   --verbose=2` and inspect it with `codesign -dv --verbose=4`.
+1. Verify the complete nested signature with `codesign --verify --deep --strict
+   --verbose=2`, then inspect both architecture CodeDirectories and
+   entitlements for the seven Framework loaders, Crashpad, the Framework, and
+   every dylib.
+2. Before creating a DMG, launch the signed app natively as arm64 and through
+   mandatory Rosetta as x86_64. Each bounded launch uses a fresh profile,
+   Incognito, an offline nonce-bearing `data:` marker, and process-group
+   cleanup; either failure prevents packaging.
 3. Place the verified app and an `/Applications` link in an isolated staging
    directory.
 4. Run `package_local_dmg.py`; it stages with system `ditto`, creates a
@@ -23,7 +28,13 @@ After the separate arm64 and x86_64 builds are merged and the complete
    read-only, and revalidates the app and `/Applications` link. The release
    invocation must include `--require-universal`; thin images are only for
    architecture-specific local testing.
-5. Record the app/DMG SHA-256 and exact Chromium/Focus versions.
+5. Mount the exact placed DMG read-only and repeat both runtime smokes from its
+   app. A failed final check rejects only the unchanged device/inode created by
+   this pipeline, never an unrelated replacement. If neither normal nor forced
+   detach succeeds, retain the exact DMG for manual detach; never unlink the
+   backing file while its detach state is unproven.
+6. Record the app/DMG SHA-256, both runtime reports, and exact Chromium/Focus
+   versions.
 
 The DMG container itself does not require an Apple account for local use. An
 ad-hoc signature satisfies the native-code signature requirement but does not

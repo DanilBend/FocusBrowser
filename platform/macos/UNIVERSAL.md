@@ -33,10 +33,11 @@ the exact same patched Chromium 150.0.7871.128 tree twice:
    `out/FocusMacUniversal/Focus Browser.app`;
 4. apply the reviewed nested ad-hoc signing workflow while preserving the
    Chromium helper entitlements;
-5. verify the complete bundle, both main executable slices, native launch, and
-   the Incognito/FocusBlock/FocusYoutube acceptance matrix before packaging;
+5. verify the complete bundle and signing matrix, then require a native arm64
+   and Rosetta x86_64 offline-Incognito smoke before packaging;
 6. create one drag-and-drop DMG from the accepted universal app with
-   `package_local_dmg.py --require-universal`.
+   `package_local_dmg.py --require-universal`, mount the final image read-only,
+   and repeat both runtime smokes from the mounted app.
 
 Do not replace Chromium's universalizer with a recursive hand-written `lipo`
 loop. It handles parallel bundle trees, property-list differences, symlinks,
@@ -46,9 +47,10 @@ permissions, and Mach-O alignment rules expected by Chromium.
 
 At minimum, release acceptance requires a native Apple Silicon run and a native
 Intel run, plus a macOS 12 launch check and a current-macOS launch check. Rosetta
-is useful for an extra x64 smoke test on Apple Silicon but does not replace an
-Intel Mac. Until these runs exist, compatibility remains planned rather than
-runtime-verified.
+is a required local x64 smoke on this Apple Silicon build host but does not
+replace an Intel Mac. The automated gate therefore catches architecture,
+linker, signing, launch, Incognito, and packaging regressions in both slices;
+physical Intel and macOS 12 runs remain separate compatibility evidence.
 
 The exact upstream references are:
 

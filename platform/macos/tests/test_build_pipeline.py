@@ -3,13 +3,16 @@
 
 import hashlib
 import json
+import os
 import plistlib
+import re
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -2056,6 +2059,192 @@ class BuildPipelineTests(unittest.TestCase):
         universalizer.write_text("universalize\n", encoding="utf-8")
         return arm_app, x64_out, universalizer
 
+    def prepare_execute_merge_fixture(self):
+        python = {"path": str(self.root / "pinned-python3.11")}
+        output = self.root / "FocusBrowser-runtime-gated.dmg"
+        receipts = {}
+        for label, relative in (
+            ("linkedit", build_pipeline.XCODE27_LINKEDIT_STRIP_RECEIPT),
+            ("swiftshader", build_pipeline.SWIFTSHADER_DISABLED_SIGNING_RECEIPT),
+            ("adhoc", build_pipeline.ADHOC_RUNTIME_SIGNING_RECEIPT),
+        ):
+            receipts[label] = self.write_json(
+                self.source / relative, {"fixture": label}
+            )
+        digest = "a" * 64
+        plan = {
+            "packaging_python": python,
+            "commands": {
+                "copy_packaging": ["/usr/bin/ditto", "packaging", "unsigned"],
+                "universalize": [python["path"], "universalize.py"],
+                "sign": [python["path"], "sign_chrome.py"],
+                "package": [python["path"], "package_local_dmg.py"],
+            },
+            "arm_app": str(self.root / "arm64/Focus Browser.app"),
+            "x64_app": str(self.root / "x64/Focus Browser.app"),
+            "unsigned_root": str(self.source / build_pipeline.UNSIGNED_ROOT),
+            "signed_root": str(self.source / build_pipeline.SIGNED_ROOT),
+            "dmg_output": str(output),
+            "xcode27_linkedit_strip_compatibility": {
+                "path": str(receipts["linkedit"]),
+                "sha256": digest,
+            },
+            "swiftshader_disabled_signing": {
+                "path": str(receipts["swiftshader"]),
+                "sha256": digest,
+            },
+            "adhoc_runtime_signing": {
+                "path": str(receipts["adhoc"]),
+                "sha256": digest,
+            },
+        }
+        return {
+            "plan": plan,
+            "python": python,
+            "output": output,
+            "receipts": receipts,
+            "digest": digest,
+        }
+
+    @contextmanager
+    def mocked_merge_dependencies(
+        self,
+        fixture,
+        monitored,
+        signed_runtime_side_effect=None,
+        mounted_runtime_side_effect=None,
+    ):
+        generated_hashes = {
+            Path(relative).name: hashes["post_sha256"]
+            for relative, hashes in (
+                build_pipeline.ADHOC_RUNTIME_SIGNING_GENERATED_FILES.items()
+            )
+        }
+
+        def pinned_hash(path):
+            path = Path(path)
+            if path.name == "sign_chrome.py":
+                return build_pipeline.SIGN_CHROME_SHA256
+            if path.name in generated_hashes:
+                return generated_hashes[path.name]
+            return fixture["digest"]
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(
+                    build_pipeline,
+                    "packaging_python_contract",
+                    return_value=fixture["python"],
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    build_pipeline,
+                    "xcode27_linkedit_strip_receipt_contract",
+                    return_value=(fixture["receipts"]["linkedit"], {}),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    build_pipeline,
+                    "swiftshader_disabled_signing_receipt_contract",
+                    return_value=(fixture["receipts"]["swiftshader"], {}),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    build_pipeline,
+                    "adhoc_runtime_signing_receipt_contract",
+                    return_value=(fixture["receipts"]["adhoc"], {}),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    build_pipeline, "sha256_file", side_effect=pinned_hash
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(build_pipeline, "physical_size", return_value=1024)
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    build_pipeline, "require_free", return_value=100 * build_pipeline.GIB
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(build_pipeline, "safe_environment", return_value={})
+            )
+            stack.enter_context(
+                mock.patch.object(build_pipeline, "run_monitored", side_effect=monitored)
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    build_pipeline,
+                    "app_report",
+                    return_value={"architectures": ["arm64", "x86_64"]},
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    build_pipeline, "capture", return_value="Signature=adhoc"
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(build_pipeline, "tree_digest", return_value="b" * 64)
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    build_pipeline.package_local_dmg,
+                    "validate_app",
+                    return_value={
+                        "bundle_id": build_pipeline.focus_macos.BUNDLE_ID,
+                        "executable": "Focus Browser",
+                        "architectures": ["arm64", "x86_64"],
+                    },
+                )
+            )
+            matrix = stack.enter_context(
+                mock.patch.object(
+                    build_pipeline.runtime_smoke,
+                    "validate_adhoc_signing_matrix",
+                    return_value={"passed": True},
+                )
+            )
+            signed_kwargs = (
+                {"side_effect": signed_runtime_side_effect}
+                if signed_runtime_side_effect is not None
+                else {"return_value": {"passed": True, "location": "signed"}}
+            )
+            signed = stack.enter_context(
+                mock.patch.object(
+                    build_pipeline.runtime_smoke,
+                    "validate_universal_app_runtime",
+                    **signed_kwargs,
+                )
+            )
+            mounted_kwargs = (
+                {"side_effect": mounted_runtime_side_effect}
+                if mounted_runtime_side_effect is not None
+                else {
+                    "side_effect": lambda path: {
+                        "passed": True,
+                        "location": "mounted",
+                        "size_bytes": Path(path).stat().st_size,
+                        "sha256": build_pipeline.package_local_dmg.sha256_file(
+                            Path(path)
+                        ),
+                    }
+                }
+            )
+            mounted = stack.enter_context(
+                mock.patch.object(
+                    build_pipeline.runtime_smoke,
+                    "validate_mounted_dmg_runtime",
+                    **mounted_kwargs,
+                )
+            )
+            yield {"matrix": matrix, "signed": signed, "mounted": mounted}
+
     def prepare_swiftshader_execute_fixture(self):
         source_parts = self.source / "chrome/installer/mac/signing/parts.py"
         source_parts.parent.mkdir(parents=True, exist_ok=True)
@@ -2153,6 +2342,10 @@ class BuildPipelineTests(unittest.TestCase):
             "refresh": {
                 "command": ["autoninja", "-j8", "-C", "out", "copy_signing"],
                 "ninja": {"path": str(self.ninja)},
+            },
+            "refresh_strategy": {
+                "mtime_independent": True,
+                "forced_missing_outputs": [str(packaging_parts)],
             },
             "receipt": str(receipt),
             "preparation_receipt": {"path": "prep", "sha256": "c" * 64},
@@ -2384,6 +2577,81 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertEqual(fixture["pre"], fixture["packaging_parts"].read_bytes())
         self.assertFalse(Path(fixture["plan"]["receipt"]).exists())
 
+    def test_adhoc_runtime_refresh_forces_missing_output_when_source_is_older(self):
+        fixture = self.prepare_adhoc_runtime_execute_fixture()
+        fixture["source_parts"].write_bytes(fixture["post"])
+        fixture["source_test"].write_bytes(fixture["post"])
+        fixture["packaging_parts"].write_bytes(fixture["pre"])
+        fixture["plan"]["source_state"] = "post"
+        fixture["plan"]["packaging_state"] = "pre"
+        old_ns = 1_000_000_000
+        newer_ns = 2_000_000_000
+        os.utime(fixture["source_parts"], ns=(old_ns, old_ns))
+        os.utime(fixture["source_test"], ns=(old_ns, old_ns))
+        os.utime(fixture["packaging_parts"], ns=(newer_ns, newer_ns))
+        self.assertLess(
+            fixture["source_parts"].stat().st_mtime_ns,
+            fixture["packaging_parts"].stat().st_mtime_ns,
+        )
+        calls = []
+
+        def monitored(command, *_args, **_kwargs):
+            calls.append(command)
+            if command == fixture["plan"]["refresh"]["command"]:
+                self.assertFalse(
+                    os.path.lexists(str(fixture["packaging_parts"]))
+                )
+                fixture["packaging_parts"].write_bytes(fixture["post"])
+
+        with mock.patch.object(
+            build_pipeline,
+            "adhoc_runtime_signing_plan",
+            return_value=fixture["plan"],
+        ), mock.patch.object(
+            build_pipeline, "ADHOC_RUNTIME_SIGNING_FILES", fixture["files"]
+        ), mock.patch.object(
+            build_pipeline,
+            "ADHOC_RUNTIME_SIGNING_GENERATED_FILES",
+            fixture["generated"],
+        ), mock.patch.object(
+            build_pipeline, "ADHOC_RUNTIME_SIGNING_PATCH", fixture["patch"]
+        ), mock.patch.object(
+            build_pipeline.prepare_source, "apply_patch_plan"
+        ) as apply_patch, mock.patch.object(
+            build_pipeline, "run_monitored", side_effect=monitored
+        ), mock.patch.object(
+            build_pipeline, "safe_environment", return_value={}
+        ), mock.patch.object(
+            build_pipeline, "require_free", return_value=50 * build_pipeline.GIB
+        ), mock.patch.object(
+            build_pipeline,
+            "swiftshader_disabled_build_contract",
+            return_value={"app_tree_sha256": fixture["plan"]["app_tree_sha256"]},
+        ), mock.patch.object(
+            build_pipeline, "adhoc_runtime_signing_receipt_contract"
+        ):
+            build_pipeline.execute_adhoc_runtime_signing(
+                self.source, self.developer, fixture["plan"]
+            )
+
+        apply_patch.assert_not_called()
+        self.assertEqual(fixture["post"], fixture["packaging_parts"].read_bytes())
+        self.assertEqual(
+            [
+                fixture["plan"]["tests"]["command"],
+                fixture["plan"]["refresh"]["command"],
+            ],
+            calls,
+        )
+        receipt = json.loads(
+            Path(fixture["plan"]["receipt"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            {"source": "post", "packaging": "pre"},
+            receipt["recovery_state"],
+        )
+        self.assertTrue(receipt["refresh_strategy"]["mtime_independent"])
+
     def test_merge_plan_uses_chromium_x64_first_and_ad_hoc_signing(self):
         _, x64_out, universalizer = self.prepare_merge_fixture()
         linkedit_receipt = (
@@ -2477,6 +2745,14 @@ class BuildPipelineTests(unittest.TestCase):
             ),
             package[package.index("--app") + 1],
         )
+        runtime = plan["runtime_acceptance"]
+        self.assertTrue(runtime["signed_app_before_packaging"])
+        self.assertTrue(runtime["mounted_final_dmg"])
+        self.assertTrue(runtime["native_arm64_required"])
+        self.assertTrue(runtime["rosetta_x86_64_required"])
+        self.assertEqual(["arm64", "x86_64"], runtime["architectures"])
+        self.assertEqual("data:text/html", runtime["offline_navigation"])
+        self.assertTrue(runtime["incognito"])
         joined = " ".join(sign).lower()
         self.assertNotIn("developer id", joined)
         self.assertNotIn("notarytool", joined)
@@ -2557,9 +2833,311 @@ class BuildPipelineTests(unittest.TestCase):
             build_pipeline.execute_merge(self.source, self.developer, plan)
         self.assertFalse(unsigned.exists())
 
+    def test_merge_runtime_gates_signed_app_before_package_then_mounted_dmg(self):
+        fixture = self.prepare_execute_merge_fixture()
+        events = []
+
+        def monitored(command, *_args, **_kwargs):
+            if command == fixture["plan"]["commands"]["package"]:
+                events.append("package")
+                fixture["output"].write_bytes(b"runtime-gated dmg")
+
+        with self.mocked_merge_dependencies(
+            fixture, monitored
+        ) as dependencies:
+            dependencies["matrix"].side_effect = lambda *_args: (
+                events.append("matrix") or {"passed": True}
+            )
+            dependencies["signed"].side_effect = lambda *_args: (
+                events.append("signed-runtime")
+                or {"passed": True, "location": "signed"}
+            )
+            dependencies["mounted"].side_effect = lambda *_args: (
+                events.append("mounted-runtime")
+                or {
+                    "passed": True,
+                    "location": "mounted",
+                    "size_bytes": fixture["output"].stat().st_size,
+                    "sha256": build_pipeline.package_local_dmg.sha256_file(
+                        fixture["output"]
+                    ),
+                }
+            )
+            report = build_pipeline.execute_merge(
+                self.source, self.developer, fixture["plan"]
+            )
+
+        self.assertEqual(
+            ["matrix", "signed-runtime", "package", "mounted-runtime"],
+            events,
+        )
+        self.assertTrue(fixture["output"].is_file())
+        self.assertTrue(report["codesign_matrix"]["passed"])
+        self.assertEqual(
+            "signed", report["runtime_acceptance"]["signed_app"]["location"]
+        )
+        self.assertEqual(
+            "mounted",
+            report["runtime_acceptance"]["mounted_final_dmg"]["location"],
+        )
+
+    def test_signed_app_runtime_failure_prevents_dmg_packaging(self):
+        fixture = self.prepare_execute_merge_fixture()
+        commands = []
+
+        def monitored(command, *_args, **_kwargs):
+            commands.append(command)
+            if command == fixture["plan"]["commands"]["package"]:
+                fixture["output"].write_bytes(b"must not be created")
+
+        failure = build_pipeline.runtime_smoke.RuntimeSmokeError(
+            "synthetic signed runtime failure"
+        )
+        with self.mocked_merge_dependencies(
+            fixture,
+            monitored,
+            signed_runtime_side_effect=failure,
+        ), self.assertRaisesRegex(
+            build_pipeline.runtime_smoke.RuntimeSmokeError,
+            "synthetic signed runtime failure",
+        ):
+            build_pipeline.execute_merge(
+                self.source, self.developer, fixture["plan"]
+            )
+
+        self.assertNotIn(fixture["plan"]["commands"]["package"], commands)
+        self.assertFalse(fixture["output"].exists())
+
+    def test_mounted_dmg_runtime_failure_unlinks_exact_created_inode(self):
+        fixture = self.prepare_execute_merge_fixture()
+
+        def monitored(command, *_args, **_kwargs):
+            if command == fixture["plan"]["commands"]["package"]:
+                fixture["output"].write_bytes(b"rejected dmg")
+
+        failure = build_pipeline.runtime_smoke.RuntimeSmokeError(
+            "synthetic mounted runtime failure"
+        )
+        with self.mocked_merge_dependencies(
+            fixture,
+            monitored,
+            mounted_runtime_side_effect=failure,
+        ), self.assertRaisesRegex(
+            build_pipeline.runtime_smoke.RuntimeSmokeError,
+            "synthetic mounted runtime failure",
+        ):
+            build_pipeline.execute_merge(
+                self.source, self.developer, fixture["plan"]
+            )
+
+        self.assertFalse(fixture["output"].exists())
+
+    def test_mounted_dmg_detach_failure_retains_exact_created_inode(self):
+        fixture = self.prepare_execute_merge_fixture()
+
+        def monitored(command, *_args, **_kwargs):
+            if command == fixture["plan"]["commands"]["package"]:
+                fixture["output"].write_bytes(b"still mounted dmg")
+
+        failure = build_pipeline.runtime_smoke.DmgDetachError(
+            "synthetic normal and forced detach failure"
+        )
+        with self.mocked_merge_dependencies(
+            fixture,
+            monitored,
+            mounted_runtime_side_effect=failure,
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError,
+            "retained the exact backing DMG",
+        ):
+            build_pipeline.execute_merge(
+                self.source, self.developer, fixture["plan"]
+            )
+
+        self.assertEqual(b"still mounted dmg", fixture["output"].read_bytes())
+
+    def test_rejected_dmg_cleanup_refuses_replaced_inode(self):
+        output = self.root / "FocusBrowser-replaced.dmg"
+        output.write_bytes(b"created by pipeline")
+        created = os.lstat(str(output))
+        identity = (created.st_dev, created.st_ino)
+        output.unlink()
+        output.write_bytes(b"unrelated replacement")
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "changed DMG"):
+            build_pipeline._unlink_created_dmg(output, identity)
+        self.assertEqual(b"unrelated replacement", output.read_bytes())
+
     def test_recursive_reclamation_requires_explicit_flag(self):
         with self.assertRaisesRegex(build_pipeline.PipelineError, "allow-reclaim"):
             build_pipeline.execute_stage_arm(self.source, {}, False)
+
+    def prepare_minimal_linkedit_recovery_execute_fixture(self):
+        artifact_source = self.source / build_pipeline.STAGED_ARM_APP
+        payload = artifact_source / "Contents/evidence.bin"
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_bytes(b"legacy invalid evidence\n")
+        arm_out = self.source / build_pipeline.ARM_OUT
+        if arm_out.exists():
+            shutil.rmtree(arm_out)
+        partial_root = self.source / build_pipeline.LINKEDIT_RECOVERY_PARTIAL
+        final_root = self.source / build_pipeline.LINKEDIT_RECOVERY_ROOT
+        profiles = build_pipeline.focus_macos.validate_gn_profiles()["profiles"]
+        arm_args_text = profiles["arm64"]["args_gn"]
+        artifact = {
+            "relative_path": build_pipeline.STAGED_ARM_APP,
+            "source": str(artifact_source),
+            "archive_relative_path": (
+                "artifacts/" + build_pipeline.STAGED_ARM_APP
+            ),
+            "kind": "tree",
+            "sha256": build_pipeline.tree_digest(artifact_source),
+            "bytes": build_pipeline.physical_size(artifact_source),
+        }
+        plan = {
+            "partial_root": str(partial_root),
+            "recovery_root": str(final_root),
+            "artifacts": [artifact],
+            "restore_arm_args": {
+                "path": str(arm_out / "args.gn"),
+                "sha256": hashlib.sha256(
+                    arm_args_text.encode("utf-8")
+                ).hexdigest(),
+                "bytes": len(arm_args_text.encode("utf-8")),
+            },
+            "linkedit_strip_receipt": {"path": "fixture", "sha256": "a" * 64},
+            "legacy_alignment": {"arm64": {}, "x86_64": {}},
+            "signing_state": {"source": "post", "packaging": "post"},
+            "preserve_x64_objects": {"incremental_relink": True},
+            "required_followup_stages": ["build-arm64"],
+        }
+        return {
+            "plan": plan,
+            "artifact_source": artifact_source,
+            "payload": payload,
+            "partial_root": partial_root,
+            "final_root": final_root,
+            "arm_out": arm_out,
+        }
+
+    def test_linkedit_recovery_rehashes_moved_artifact_before_publication(self):
+        fixture = self.prepare_minimal_linkedit_recovery_execute_fixture()
+        real_publish = build_pipeline.prepare_source.atomic_publish_text
+        moved_payload = (
+            fixture["partial_root"]
+            / fixture["plan"]["artifacts"][0]["archive_relative_path"]
+            / "Contents/evidence.bin"
+        )
+
+        def publish_then_tamper(destination, text):
+            result = real_publish(destination, text)
+            moved_payload.write_bytes(b"concurrent mutation\n")
+            return result
+
+        with mock.patch.object(
+            build_pipeline,
+            "linkedit_recovery_plan",
+            return_value=fixture["plan"],
+        ), mock.patch.object(
+            build_pipeline, "require_free", return_value=60 * build_pipeline.GIB
+        ), mock.patch.object(
+            build_pipeline.prepare_source,
+            "atomic_publish_text",
+            side_effect=publish_then_tamper,
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "changed before publication"
+        ):
+            build_pipeline.execute_linkedit_recovery(
+                self.source, self.developer, fixture["plan"], True
+            )
+
+        self.assertFalse(fixture["final_root"].exists())
+        self.assertFalse(fixture["partial_root"].exists())
+        self.assertFalse(fixture["arm_out"].exists())
+        self.assertEqual(
+            b"concurrent mutation\n",
+            fixture["payload"].read_bytes(),
+        )
+
+    def test_linkedit_recovery_rolls_back_interrupt_after_final_rename(self):
+        fixture = self.prepare_minimal_linkedit_recovery_execute_fixture()
+        real_replace = os.replace
+        interrupted = False
+
+        def replace_then_interrupt(source, destination):
+            nonlocal interrupted
+            result = real_replace(source, destination)
+            if (
+                not interrupted
+                and Path(source) == fixture["partial_root"]
+                and Path(destination) == fixture["final_root"]
+            ):
+                interrupted = True
+                raise KeyboardInterrupt("synthetic post-publication interrupt")
+            return result
+
+        with mock.patch.object(
+            build_pipeline,
+            "linkedit_recovery_plan",
+            return_value=fixture["plan"],
+        ), mock.patch.object(
+            build_pipeline, "require_free", return_value=60 * build_pipeline.GIB
+        ), mock.patch.object(
+            build_pipeline.os, "replace", side_effect=replace_then_interrupt
+        ), self.assertRaisesRegex(
+            KeyboardInterrupt, "synthetic post-publication interrupt"
+        ):
+            build_pipeline.execute_linkedit_recovery(
+                self.source, self.developer, fixture["plan"], True
+            )
+
+        self.assertTrue(interrupted)
+        self.assertFalse(fixture["final_root"].exists())
+        self.assertFalse(fixture["partial_root"].exists())
+        self.assertFalse(fixture["arm_out"].exists())
+        self.assertEqual(
+            b"legacy invalid evidence\n",
+            fixture["payload"].read_bytes(),
+        )
+
+    def test_linkedit_recovery_reports_final_root_when_normalization_is_unsafe(self):
+        fixture = self.prepare_minimal_linkedit_recovery_execute_fixture()
+        real_replace = os.replace
+        interrupted = False
+
+        def replace_tamper_then_interrupt(source, destination):
+            nonlocal interrupted
+            result = real_replace(source, destination)
+            if (
+                not interrupted
+                and Path(source) == fixture["partial_root"]
+                and Path(destination) == fixture["final_root"]
+            ):
+                interrupted = True
+                (fixture["final_root"] / "manifest.json").write_bytes(
+                    b"unsafe replacement\n"
+                )
+                raise KeyboardInterrupt("synthetic unsafe publication")
+            return result
+
+        with mock.patch.object(
+            build_pipeline,
+            "linkedit_recovery_plan",
+            return_value=fixture["plan"],
+        ), mock.patch.object(
+            build_pipeline, "require_free", return_value=60 * build_pipeline.GIB
+        ), mock.patch.object(
+            build_pipeline.os, "replace", side_effect=replace_tamper_then_interrupt
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError,
+            re.escape(str(fixture["final_root"])),
+        ):
+            build_pipeline.execute_linkedit_recovery(
+                self.source, self.developer, fixture["plan"], True
+            )
+
+        self.assertTrue(interrupted)
+        self.assertTrue(fixture["final_root"].is_dir())
+        self.assertFalse(fixture["partial_root"].exists())
 
     def test_linkedit_recovery_archives_invalid_evidence_and_preserves_x64_objects(self):
         arm_out = self.source / build_pipeline.ARM_OUT

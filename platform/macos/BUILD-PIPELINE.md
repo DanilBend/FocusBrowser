@@ -233,6 +233,12 @@ Chromium signing tests must pass before the stage refreshes only
 tree hashes, test command, and receipt publication are protected by one
 transactional rollback boundary.
 
+The refresh never trusts source/output mtimes. After backing up and hashing the
+two exact generated outputs (`parts.py` and `modification.py`), the stage
+removes only those outputs before invoking Ninja. Missing outputs force the
+copy rule to run even during recovery from `source=post, packaging=pre`; any
+failure restores generated files first and source files second.
+
 ### 8. Merge, ad-hoc sign, and create the local DMG
 
 ```sh
@@ -247,10 +253,28 @@ signing receipts and exact signing sources, combines both apps, and signs nested
 code with Chromium's generated scripts. It consumes Chromium's deterministic
 unpackaged `stable/`
 distribution output, requires `Signature=adhoc`, verifies the complete
-signature and both architectures, then runs the local DMG packager as a
-monitored process. The source and DMG filesystems are watched throughout
-packaging. The LINKEDIT gate is repeated after universalization and after
-signing, once per slice of every Mach-O file.
+signature and both architectures, and inspects the effective CodeDirectory
+flags and entitlements for both slices of every protected signing part. Exactly
+seven Framework loaders must retain hardened runtime while omitting explicit
+Library Validation and carrying
+`com.apple.security.cs.disable-library-validation=true`; Crashpad retains
+Library Validation, while the Framework and every bundled dylib remain
+unrelaxed.
+
+Before packaging, the signed app must launch natively as arm64 and through a
+mandatory Rosetta x86_64 probe. Each launch uses a distinct new profile,
+`--incognito`, a nonce-bearing offline `data:text/html` marker, network-
+disabling switches, a 60-second timeout, and an isolated process group that is
+interrupted and killed during bounded cleanup. Only then does the monitored
+DMG packager run. The exact final DMG is mounted read-only and the same two
+runtime smokes are repeated from the mounted app. If this final acceptance
+fails after the image is detached, the pipeline removes only the just-created
+regular DMG with the same device/inode; it refuses to remove a replaced path.
+If both normal and forced detach fail, the exact backing DMG is retained for
+manual detach instead of unlinking a possibly mounted image. Both runtime
+reports are included in the final JSON. The source and DMG filesystems are watched
+throughout packaging. The LINKEDIT gate is repeated after universalization and
+after signing, once per slice of every Mach-O file.
 
 ## One-time Xcode 27 LINKEDIT recovery
 
@@ -279,7 +303,13 @@ hashes. It audits those apps with `require_aligned=false`, atomically archives
 the invalid staged arm64 app, x86_64 app, build/stage/reclaim receipts, and
 stale SwiftShader receipt under `out/FocusMacXcode27LinkeditRecovery`, restores
 the exact arm64 `args.gn`, and leaves x86_64 objects in place. It does not
-modify any Mach-O bytes. Then run steps 4 through 8 in order: arm64 is rebuilt
+modify any Mach-O bytes. Immediately before publishing the recovery root, it
+re-hashes and re-sizes every moved destination against the plan. If an
+interrupt lands after the `.part` root has already been renamed, rollback
+first verifies the published manifest/artifacts, normalizes that exact root
+back to `.part`, and restores every move; an unsafe tree is retained at the
+path named in the error instead of being guessed at. Then run steps 4 through
+8 in order: arm64 is rebuilt
 from source and restaged/reclaimed; x86_64 is incrementally relinked after GN
 regeneration; the SwiftShader and ad-hoc receipts are regenerated against the
 new slices; only then may universal merge/sign/package begin. Preserve `-j8`.
