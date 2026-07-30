@@ -760,12 +760,18 @@ def validate_recovery_checkpoint_report(
     return report
 
 
-def validate_recovery_execution_link(execution_report, recovery_checkpoint):
+def validate_recovery_execution_link(
+    execution_report, recovery_checkpoint, path_projector=None
+):
     """Bind the split recovery checkpoint to its exact patch-prefix history."""
-    validate_preparation_execution_report(execution_report)
+    validate_preparation_execution_report(
+        execution_report, path_projector=path_projector
+    )
     validate_recovery_checkpoint_report(recovery_checkpoint)
     if recovery_checkpoint is not None and execution_report != (
-        expected_resume_execution_report(RESUME_FULL_PATCH_SET_APPLIED)
+        expected_resume_execution_report(
+            RESUME_FULL_PATCH_SET_APPLIED, path_projector=path_projector
+        )
     ):
         raise PreparationError(
             "post-version recovery requires the exact full-prefix execution report"
@@ -2934,7 +2940,33 @@ def fresh_preparation_execution_report(total_patches=324):
     }
 
 
-def expected_resume_execution_report(applied_patches):
+def _project_expected_patch_path(path, path_projector, label):
+    """Project only a trusted patch-plan Path to an exact same-inode alias."""
+    path = Path(path)
+    if path_projector is None:
+        return str(path)
+    try:
+        projected = Path(path_projector(path))
+    except Exception as exc:
+        raise PreparationError("{} projection failed".format(label)) from exc
+    if (
+        not projected.is_absolute()
+        or Path(os.path.abspath(str(projected))) != projected
+        or projected.name != path.name
+        or projected.is_symlink()
+    ):
+        raise PreparationError("{} projection is not absolute and exact".format(label))
+    try:
+        physical = os.stat(str(path), follow_symlinks=True)
+        logical = os.stat(str(projected), follow_symlinks=True)
+    except OSError as exc:
+        raise PreparationError("{} projection cannot be verified".format(label)) from exc
+    if (physical.st_dev, physical.st_ino) != (logical.st_dev, logical.st_ino):
+        raise PreparationError("{} projection changed patch identity".format(label))
+    return str(projected)
+
+
+def expected_resume_execution_report(applied_patches, path_projector=None):
     """Reconstruct one audited exact-prefix execution report from pins."""
     patch_plan = build_patch_plan()
     expected_resume_working_tree(applied_patches)
@@ -2966,14 +2998,18 @@ def expected_resume_execution_report(applied_patches):
             ),
             "last_applied_patch": {
                 "position": applied_patches,
-                "path": str(last_path),
+                "path": _project_expected_patch_path(
+                    last_path, path_projector, "last applied patch"
+                ),
                 "sha256": sha256_file(last_path),
                 "reverse_applicable": True,
             },
             "next_patch": (
                 {
                     "position": applied_patches + 1,
-                    "path": str(next_path),
+                    "path": _project_expected_patch_path(
+                        next_path, path_projector, "next patch"
+                    ),
                     "sha256": sha256_file(next_path),
                     "forward_applicable": True,
                 }
@@ -2984,7 +3020,7 @@ def expected_resume_execution_report(applied_patches):
     }
 
 
-def validate_preparation_execution_report(report):
+def validate_preparation_execution_report(report, path_projector=None):
     """Validate honest fresh or exact-prefix preparation provenance."""
     required = {
         "mode",
@@ -3048,7 +3084,11 @@ def validate_preparation_execution_report(report):
         raise PreparationError("resume checkpoint patch-prefix mismatch")
     expected_last = {
         "position": initial_applied,
-        "path": str(patch_plan[initial_applied - 1]),
+        "path": _project_expected_patch_path(
+            patch_plan[initial_applied - 1],
+            path_projector,
+            "last applied patch",
+        ),
         "sha256": sha256_file(patch_plan[initial_applied - 1]),
         "reverse_applicable": True,
     }
@@ -3056,7 +3096,9 @@ def validate_preparation_execution_report(report):
     if initial_applied < len(patch_plan):
         expected_next = {
             "position": initial_applied + 1,
-            "path": str(patch_plan[initial_applied]),
+            "path": _project_expected_patch_path(
+                patch_plan[initial_applied], path_projector, "next patch"
+            ),
             "sha256": sha256_file(patch_plan[initial_applied]),
             "forward_applicable": True,
         }

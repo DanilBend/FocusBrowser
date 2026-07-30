@@ -2837,6 +2837,68 @@ class PrepareSourceTests(unittest.TestCase):
                 prepare_source.validate_recovery_execution_link(earlier, None)
             )
 
+    def test_resume_execution_projects_only_trusted_same_inode_patch_paths(self):
+        logical_repo = self.root / "logical-repo"
+        logical_repo.symlink_to(
+            prepare_source.REPO_ROOT, target_is_directory=True
+        )
+
+        def projector(path):
+            return logical_repo / Path(path).relative_to(prepare_source.REPO_ROOT)
+
+        full = prepare_source.expected_resume_execution_report(
+            324, path_projector=projector
+        )
+        expected_last = projector(prepare_source.build_patch_plan()[-1])
+        self.assertEqual(
+            str(expected_last),
+            full["resume_checkpoint"]["last_applied_patch"]["path"],
+        )
+        self.assertEqual(
+            full,
+            prepare_source.validate_preparation_execution_report(
+                full, path_projector=projector
+            ),
+        )
+        with mock.patch.object(
+            prepare_source, "validate_recovery_checkpoint_report"
+        ):
+            self.assertTrue(
+                prepare_source.validate_recovery_execution_link(
+                    full, {"phase": "fixture"}, path_projector=projector
+                )
+            )
+        with self.assertRaisesRegex(
+            prepare_source.PreparationError, "last patch mismatch"
+        ):
+            prepare_source.validate_preparation_execution_report(full)
+
+        tampered = json.loads(json.dumps(full))
+        tampered["resume_checkpoint"]["last_applied_patch"]["path"] = (
+            "/Users/attacker/native-incognito-contract.patch"
+        )
+        with self.assertRaisesRegex(
+            prepare_source.PreparationError, "last patch mismatch"
+        ):
+            prepare_source.validate_preparation_execution_report(
+                tampered, path_projector=projector
+            )
+
+        rival = self.root / prepare_source.build_patch_plan()[-1].name
+        rival.write_bytes(prepare_source.build_patch_plan()[-1].read_bytes())
+        with self.assertRaisesRegex(
+            prepare_source.PreparationError, "changed patch identity"
+        ):
+            prepare_source.expected_resume_execution_report(
+                324, path_projector=lambda _path: rival
+            )
+        with self.assertRaisesRegex(
+            prepare_source.PreparationError, "not absolute and exact"
+        ):
+            prepare_source.expected_resume_execution_report(
+                324, path_projector=lambda path: Path(path.name)
+            )
+
     def test_finalizer_snapshot_restores_files_args_and_receipt(self):
         source = self.root / "transaction-source"
         backup = self.root / "transaction-backup"

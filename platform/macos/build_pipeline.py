@@ -15,6 +15,7 @@ import os
 import platform
 import plistlib
 import re
+import selectors
 import shutil
 import signal
 import stat
@@ -23,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -32,6 +34,7 @@ if str(MACOS_DIR) not in sys.path:
 
 import acquire_chromium  # pylint: disable=wrong-import-position
 import focus_macos  # pylint: disable=wrong-import-position
+import onboarding_alias_compat  # pylint: disable=wrong-import-position
 import package_local_dmg  # pylint: disable=wrong-import-position
 import prepare_source  # pylint: disable=wrong-import-position
 import runtime_smoke  # pylint: disable=wrong-import-position
@@ -55,6 +58,9 @@ STAGING_ROOT = "out/FocusMacStaging"
 STAGED_ARM_APP = STAGING_ROOT + "/arm64/" + APP_NAME
 STAGE_RECEIPT = STAGING_ROOT + "/arm64-receipt.json"
 RECLAIM_RECEIPT = STAGING_ROOT + "/arm64-reclaim-complete.json"
+HOME_ALIAS_RECEIPT = "out/FocusMacHomeAliasCompatibility.json"
+HOME_ALIAS_RECEIPT_SCHEMA = 2
+RESUMED_SLICE_RECEIPT_SCHEMA = 2
 UNSIGNED_ROOT = "out/FocusMacUnsignedUniversal"
 SIGNED_ROOT = "out/FocusMacSignedUniversal"
 SIGNED_DISTRIBUTION_DIR = "stable"
@@ -221,6 +227,8 @@ BUNDLED_LLVM_REVISION_SHA256 = (
 SWIFTSHADER_DISABLED_SIGNING_RECEIPT = (
     "out/FocusMacSwiftShaderDisabledSigningCompatibility.json"
 )
+SIGNING_TRANSACTION_ROOT = "out/FocusMacSigningTransactions"
+SWIFTSHADER_SIGNING_TRANSACTION = SIGNING_TRANSACTION_ROOT + "/swiftshader"
 SWIFTSHADER_DISABLED_SIGNING_PATCH = (
     MACOS_DIR / "patches/swiftshader-disabled-signing.patch"
 )
@@ -264,6 +272,7 @@ SWIFTSHADER_DISABLED_SIGNING_UPSTREAM = {
 ADHOC_RUNTIME_SIGNING_RECEIPT = (
     "out/FocusMacAdHocRuntimeSigningCompatibility.json"
 )
+ADHOC_SIGNING_TRANSACTION = SIGNING_TRANSACTION_ROOT + "/adhoc"
 ADHOC_RUNTIME_SIGNING_PATCH = MACOS_DIR / "patches/adhoc-runtime-signing.patch"
 ADHOC_RUNTIME_SIGNING_PATCH_SHA256 = (
     "133638295cf4cb04a651017b07366d39c0aa0ae3e1595fbc45e57c390dff4e13"
@@ -390,6 +399,8 @@ ENSURE_BOOTSTRAP_SHA256 = (
     "a88ab230f6d92fea7588747a21854981442ba5866026fe48f792a2e43c5a986c"
 )
 MAX_RECEIPT_BYTES = 1024 * 1024
+MAX_RESUME_STDOUT_BYTES = 128 * 1024 * 1024
+MAX_NO_WORK_OUTPUT_BYTES = 1024 * 1024
 TOOL_RECEIPT_KEYS = frozenset(
     (
         "schema",
@@ -412,6 +423,67 @@ class PipelineError(RuntimeError):
     """Raised when a staged build safety or provenance contract fails."""
 
 
+class ReceiptPublication(dict):
+    """Public receipt report carrying a non-serialized inode capability."""
+
+    def __init__(self, value, publication_identity):
+        super().__init__(value)
+        self.publication_identity = publication_identity
+
+
+@dataclass(frozen=True)
+class AliasContext:
+    """One immutable logical-to-physical home relocation contract.
+
+    ``st_dev`` is deliberately not part of the durable identity: APFS may
+    renumber it across boots.  The stable volume UUID, path, owner, and inode
+    bind persisted evidence; current logical/physical pairs must still have
+    the same device and inode while a contract is evaluated.
+    """
+
+    logical_home: Path
+    physical_home: Path
+    logical_workspace: Path
+    physical_workspace: Path
+    logical_source: Path
+    physical_source: Path
+    logical_developer: Path
+    physical_developer: Path
+    logical_repo: Path
+    physical_repo: Path
+    volume_uuid: str
+
+    def pairs(self):
+        return (
+            ("workspace", self.logical_workspace, self.physical_workspace),
+            ("source", self.logical_source, self.physical_source),
+            ("developer", self.logical_developer, self.physical_developer),
+            ("repo", self.logical_repo, self.physical_repo),
+        )
+
+    def project(self, value):
+        """Project a verified physical path into the recorded logical tree."""
+        path = Path(value)
+        if not path.is_absolute() or Path(os.path.abspath(str(path))) != path:
+            raise PipelineError("projected path must be absolute and normalized")
+        pairs = sorted(
+            self.pairs(), key=lambda item: len(item[2].parts), reverse=True
+        )
+        for _, logical, physical in pairs:
+            try:
+                return logical / path.relative_to(physical)
+            except ValueError:
+                pass
+            try:
+                path.relative_to(logical)
+                return path
+            except ValueError:
+                pass
+        raise PipelineError(
+            "path is outside the explicit home-alias mappings: {}".format(path)
+        )
+
+
 def sha256_file(path):
     path = Path(path)
     if path.is_symlink() or not path.is_file():
@@ -432,17 +504,70 @@ def atomic_json(path, value):
     temporary = path.with_name("." + path.name + ".tmp")
     if temporary.exists() or temporary.is_symlink():
         raise PipelineError("temporary receipt already exists: {}".format(temporary))
+    published = False
+    temporary_identity = None
     try:
         with temporary.open("x", encoding="utf-8") as stream:
             stream.write(json.dumps(value, indent=2, sort_keys=True) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(str(temporary), str(path))
+            try:
+                os.link(
+                    str(temporary),
+                    str(path),
+                    src_dir_fd=None,
+                    dst_dir_fd=None,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as exc:
+                raise PipelineError(
+                    "refusing to replace receipt: {}".format(path)
+                ) from exc
+            published = True
+            temporary_identity = _stat_identity_value(os.fstat(stream.fileno()))
+        try:
+            _unlink_regular_identity(
+                temporary, temporary_identity, "temporary receipt"
+            )
+        except (OSError, PipelineError):
+            # The published inode is already complete and immutable. A stale
+            # private hard link is cleanup-only and must not turn publication
+            # into a false failure.
+            pass
+        directory_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        current_identity = _lstat_identity(path)
+        if (
+            not stat.S_ISREG(current_identity["mode"])
+            or temporary_identity is None
+            or (current_identity["device"], current_identity["inode"])
+            != (temporary_identity["device"], temporary_identity["inode"])
+            or current_identity["uid"] != temporary_identity["uid"]
+            or current_identity["gid"] != temporary_identity["gid"]
+            or current_identity["mode"] != temporary_identity["mode"]
+            or current_identity["bytes"] != temporary_identity["bytes"]
+            or current_identity["mtime_ns"] != temporary_identity["mtime_ns"]
+        ):
+            raise PipelineError("receipt path changed during atomic publication")
     except Exception:
-        if temporary.is_file() and not temporary.is_symlink():
-            temporary.unlink()
+        if (
+            not published
+            and temporary_identity is not None
+            and os.path.lexists(str(temporary))
+        ):
+            _unlink_regular_identity(
+                temporary, temporary_identity, "failed temporary receipt"
+            )
         raise
-    return {"path": str(path), "sha256": sha256_file(path)}
+    return ReceiptPublication(
+        {"path": str(path), "sha256": hashlib.sha256(
+            (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        ).hexdigest()},
+        current_identity,
+    )
 
 
 def best_effort_remove_tree(path):
@@ -481,15 +606,28 @@ def load_json(path, label):
     return value
 
 
-def resolve_source(value):
-    supplied = Path(value).expanduser().absolute()
+def resolve_source(
+    value, allow_recorded_home_alias=False, allow_unrecorded_home_alias=False
+):
+    supplied = Path(os.path.abspath(os.path.expanduser(value)))
     if supplied.is_symlink():
         raise PipelineError("source root must not be a symlink")
     try:
-        source, _ = focus_macos.resolve_source_root(str(supplied))
+        physical, _ = focus_macos.resolve_source_root(str(supplied))
     except focus_macos.ContractError as exc:
         raise PipelineError(str(exc)) from exc
-    return source
+    if supplied == physical:
+        return physical
+    if not (allow_recorded_home_alias or allow_unrecorded_home_alias):
+        raise PipelineError(
+            "source root resolves through a symlink; use the explicit home-alias "
+            "compatibility workflow"
+        )
+    if allow_recorded_home_alias:
+        receipt = supplied / HOME_ALIAS_RECEIPT
+        if receipt.is_symlink() or not receipt.is_file():
+            raise PipelineError("recorded home-alias compatibility receipt is missing")
+    return supplied
 
 
 def in_source(source, relative, label, must_exist=False, directory=False):
@@ -505,7 +643,7 @@ def in_source(source, relative, label, must_exist=False, directory=False):
         if cursor.is_symlink():
             raise PipelineError("{} traverses a symlink: {}".format(label, cursor))
     try:
-        cursor.resolve(strict=False).relative_to(source)
+        cursor.resolve(strict=False).relative_to(source.resolve(strict=True))
     except ValueError as exc:
         raise PipelineError("{} escapes source root".format(label)) from exc
     if must_exist:
@@ -561,7 +699,7 @@ def acquisition_contract(source):
     verification = marker.get("verification", {})
     if not isinstance(verification, dict):
         raise PipelineError("acquisition verification must be an object")
-    if Path(verification.get("source_root", "")).resolve() != source:
+    if Path(verification.get("source_root", "")).resolve() != source.resolve():
         raise PipelineError("acquisition marker source_root mismatch")
     if verification.get("chromium_version") != acquire_chromium.CHROMIUM_VERSION:
         raise PipelineError("acquisition marker Chromium version mismatch")
@@ -604,19 +742,42 @@ def ensure_bootstrap_path(source):
     return path
 
 
-def safe_environment(source, developer_dir, inherited=None, build_ninja=None):
+def safe_environment(
+    source,
+    developer_dir,
+    inherited=None,
+    build_ninja=None,
+    alias_context=None,
+):
     inherited = os.environ if inherited is None else inherited
+    if Path(source).resolve(strict=True) != Path(source) and alias_context is None:
+        raise PipelineError(
+            "logical alias source requires an explicit validated AliasContext"
+        )
     result = {"LANG": "C", "LC_ALL": "C", "TZ": "UTC"}
     inherited_home = inherited.get("HOME")
     if inherited_home:
         home_path = Path(inherited_home)
+        home_is_symlink = home_path.is_symlink()
         if (
             not home_path.is_absolute()
             or any(ord(character) < 0x20 for character in inherited_home)
-            or home_path.is_symlink()
             or not home_path.is_dir()
         ):
             raise PipelineError("inherited HOME is not a safe real absolute directory")
+        if home_is_symlink:
+            if (
+                not isinstance(alias_context, AliasContext)
+                or home_path != alias_context.logical_home
+                or Path(source) != alias_context.logical_source
+                or Path(developer_dir) != alias_context.logical_developer
+                or _recorded_alias_context(source, developer_dir) != alias_context
+            ):
+                raise PipelineError(
+                    "symlink HOME is not the revalidated recorded home alias"
+                )
+        elif alias_context is not None:
+            raise PipelineError("alias context requires its exact logical HOME")
         result["HOME"] = inherited_home
     depot = source.parent / "depot_tools"
     path_entries = [str(depot)]
@@ -657,13 +818,66 @@ def require_free(path, minimum_gib, label):
     return observed
 
 
-def _stop_process(process, force=False):
-    if process.poll() is not None:
-        return
+def _process_group_exists(pgid):
     try:
-        os.killpg(process.pid, signal.SIGKILL if force else signal.SIGINT)
+        os.killpg(pgid, 0)
     except ProcessLookupError:
+        return False
+    except PermissionError:
+        # macOS can transiently report EPERM while a just-signalled orphaned
+        # group is being reparented.  It still means the PGID has not yet
+        # disappeared, so keep waiting and fail closed if it persists.
+        return True
+    return True
+
+
+def _wait_process_group_absent(pgid, timeout_seconds):
+    deadline = time.monotonic() + timeout_seconds
+    while _process_group_exists(pgid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def _stop_process(process, force=False, grace_seconds=5):
+    """Terminate the entire new-session group, even if its leader exited."""
+    pgid = process.pid
+    signal_to_send = signal.SIGKILL if force else signal.SIGINT
+    try:
+        os.killpg(pgid, signal_to_send)
+    except ProcessLookupError:
+        try:
+            process.wait(timeout=0)
+        except (subprocess.TimeoutExpired, ChildProcessError):
+            pass
         return
+    deadline = time.monotonic() + (0 if force else grace_seconds)
+    try:
+        while not force and _process_group_exists(pgid):
+            if time.monotonic() >= deadline:
+                break
+            process.poll()
+            time.sleep(0.05)
+    finally:
+        if _process_group_exists(pgid):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        if _process_group_exists(pgid):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        process.wait(timeout=10)
+    if not _wait_process_group_absent(pgid, 2):
+        raise PipelineError(
+            "process group {} survived unconditional SIGKILL".format(pgid)
+        )
 
 
 def run_monitored(
@@ -682,42 +896,60 @@ def run_monitored(
         raise PipelineError("every watched disk path must exist")
     for path in watched:
         require_free(path, SOFT_FLOOR_GIB, "pre-command {}".format(path))
-    process = subprocess.Popen(
-        command,
-        cwd=str(cwd),
-        env=environ,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    stopped = None
-    while process.poll() is None:
-        available = min(free_bytes(path) for path in watched)
-        if available < HARD_FLOOR_GIB * GIB:
-            stopped = "hard"
-            _stop_process(process, force=True)
-            break
-        if available < SOFT_FLOOR_GIB * GIB:
-            stopped = "soft"
-            _stop_process(process, force=False)
-            break
-        time.sleep(poll_seconds)
     try:
-        returncode = process.wait(timeout=20)
-    except subprocess.TimeoutExpired:
-        _stop_process(process, force=True)
-        returncode = process.wait(timeout=10)
-    if stopped:
-        raise PipelineError(
-            "{} disk floor crossed; build process stopped (return {})".format(
-                stopped, returncode
+        process = subprocess.Popen(
+            command,
+            cwd=str(cwd),
+            env=environ,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        stopped = None
+        while process.poll() is None:
+            available = min(free_bytes(path) for path in watched)
+            if available < HARD_FLOOR_GIB * GIB:
+                stopped = "hard"
+                _stop_process(process, force=True)
+                break
+            if available < SOFT_FLOOR_GIB * GIB:
+                stopped = "soft"
+                _stop_process(process, force=False)
+                break
+            time.sleep(poll_seconds)
+        try:
+            returncode = process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            _stop_process(process, force=True)
+            returncode = process.wait(timeout=10)
+        if _process_group_exists(process.pid):
+            _stop_process(process, force=True)
+            raise PipelineError("command leader exited while descendants remained")
+        if stopped:
+            raise PipelineError(
+                "{} disk floor crossed; build process stopped (return {})".format(
+                    stopped, returncode
+                )
             )
-        )
-    if returncode:
-        raise PipelineError(
-            "command failed with exit {}: {}".format(returncode, " ".join(command))
-        )
-    for path in watched:
-        require_free(path, SOFT_FLOOR_GIB, "post-command {}".format(path))
+        if returncode:
+            raise PipelineError(
+                "command failed with exit {}: {}".format(
+                    returncode, " ".join(command)
+                )
+            )
+        for path in watched:
+            require_free(path, SOFT_FLOOR_GIB, "post-command {}".format(path))
+    except BaseException as original_error:
+        if "process" in locals():
+            try:
+                _stop_process(process, force=False)
+            except BaseException as cleanup_error:
+                raise PipelineError(
+                    "command failed and its process group could not be stopped: "
+                    "original={!r}; cleanup={!r}".format(
+                        original_error, cleanup_error
+                    )
+                ) from original_error
+        raise
 
 
 def capture(command, cwd, environ, stderr_is_output=False):
@@ -883,6 +1115,29 @@ def developer_contract(value):
         raise PipelineError(str(exc)) from exc
 
 
+def _path_hash_report_matches(report, current_path, expected_hash, alias_context=None):
+    """Accept one immutable path report through only the proven home alias."""
+    if not isinstance(report, dict) or set(report) != {"path", "sha256"}:
+        return False
+    if report.get("sha256") != expected_hash:
+        return False
+    current_path = Path(current_path)
+    recorded = Path(report.get("path", ""))
+    if not recorded.is_absolute() or not current_path.is_absolute():
+        return False
+    if alias_context is not None:
+        try:
+            expected_path = alias_context.project(current_path)
+        except PipelineError:
+            return False
+        if recorded == expected_path:
+            return True
+    try:
+        return recorded.resolve(strict=True) == current_path.resolve(strict=True)
+    except OSError:
+        return False
+
+
 def gn_compat_is_required(source, allow_missing_arm=False):
     """Return whether both prepared profiles disable the guarded features."""
     states = []
@@ -907,7 +1162,9 @@ def gn_compat_is_required(source, allow_missing_arm=False):
     return states[0]
 
 
-def gn_compat_receipt_contract(source, preparation_receipt_path, required=True):
+def gn_compat_receipt_contract(
+    source, preparation_receipt_path, required=True, alias_context=None
+):
     """Validate the audited post-preparation fix for disabled GN features."""
     receipt_path = in_source(source, GN_COMPAT_RECEIPT, "GN compatibility receipt")
     if not receipt_path.exists():
@@ -933,14 +1190,15 @@ def gn_compat_receipt_contract(source, preparation_receipt_path, required=True):
         "path": str(preparation_receipt_path),
         "sha256": sha256_file(preparation_receipt_path),
     }
-    expected_patch = {
-        "path": str(GN_COMPAT_PATCH),
-        "sha256": GN_COMPAT_PATCH_SHA256,
-    }
     if (
         receipt.get("source_root") != str(source)
         or receipt.get("preparation_receipt") != expected_preparation
-        or receipt.get("patch") != expected_patch
+        or not _path_hash_report_matches(
+            receipt.get("patch"),
+            GN_COMPAT_PATCH,
+            GN_COMPAT_PATCH_SHA256,
+            alias_context,
+        )
         or receipt.get("files") != GN_COMPAT_FILES
         or receipt.get("offline") is not True
         or receipt.get("network_operations") != 0
@@ -1012,6 +1270,7 @@ def execute_gn_compat(source, plan):
     require_free(source, SOFT_FLOOR_GIB, "GN compatibility fix")
     snapshot_root = Path(tempfile.mkdtemp(prefix="focus-gn-compat-rollback-")).resolve()
     backups = {}
+    receipt_publication_identity = None
     try:
         for position, relative in enumerate(GN_COMPAT_FILES, 1):
             current = in_source(
@@ -1045,18 +1304,25 @@ def execute_gn_compat(source, plan):
             "packaging_executed": False,
         }
         receipt_report = atomic_json(expected["receipt"], receipt_value)
+        receipt_publication_identity = getattr(
+            receipt_report, "publication_identity", None
+        )
         gn_compat_receipt_contract(
             source, Path(expected["preparation_receipt"]["path"]), required=True
         )
     except BaseException as original_error:
         try:
             receipt_path = Path(expected["receipt"])
-            if receipt_path.is_symlink() or (
-                receipt_path.exists() and not receipt_path.is_file()
-            ):
-                raise PipelineError("unsafe GN compatibility receipt during rollback")
-            if receipt_path.is_file():
-                receipt_path.unlink()
+            _remove_failed_execution_receipt(
+                receipt_path,
+                receipt_publication_identity,
+                lambda: gn_compat_receipt_contract(
+                    source,
+                    Path(expected["preparation_receipt"]["path"]),
+                    required=True,
+                ),
+                "GN compatibility receipt",
+            )
             for relative, backup in backups.items():
                 target = in_source(
                     source, relative, "GN compatibility rollback", must_exist=True
@@ -1112,17 +1378,22 @@ def xcode27_toolchain_identity(report):
 
 
 def xcode27_provenance_links(
-    source, developer_dir=None, allow_reclaimed_arm=False
+    source, developer_dir=None, allow_reclaimed_arm=False, alias_context=None
 ):
     """Resolve the exact preparation, optional GN fix, and tool receipts."""
     preparation_path, _ = preparation_contract(
-        source, allow_reclaimed_arm=allow_reclaimed_arm
+        source,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
     )
     tool_path, _ = tool_receipt_contract(source, developer_dir)
     gn_path = in_source(source, GN_COMPAT_RECEIPT, "GN compatibility receipt")
     if gn_path.exists():
         gn_path, _ = gn_compat_receipt_contract(
-            source, preparation_path, required=True
+            source,
+            preparation_path,
+            required=True,
+            alias_context=alias_context,
         )
         gn_link = {"path": str(gn_path), "sha256": sha256_file(gn_path)}
     else:
@@ -1141,7 +1412,11 @@ def xcode27_provenance_links(
 
 
 def xcode27_compat_receipt_contract(
-    source, developer_dir=None, required=True, allow_reclaimed_arm=False
+    source,
+    developer_dir=None,
+    required=True,
+    allow_reclaimed_arm=False,
+    alias_context=None,
 ):
     """Validate the exact upstream explicit-module fix for Xcode 27."""
     receipt_path = in_source(
@@ -1169,7 +1444,10 @@ def xcode27_compat_receipt_contract(
         "packaging_executed",
     }
     links = xcode27_provenance_links(
-        source, developer_dir, allow_reclaimed_arm=allow_reclaimed_arm
+        source,
+        developer_dir,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
     )
     if set(receipt) != expected_keys or receipt.get("schema") != 1:
         raise PipelineError("Xcode 27 compatibility receipt schema mismatch")
@@ -1182,11 +1460,12 @@ def xcode27_compat_receipt_contract(
         != links["tool_bootstrap_receipt"]
         or receipt.get("toolchain") != XCODE27_COMPAT_TOOLCHAIN
         or receipt.get("upstream") != XCODE27_COMPAT_UPSTREAM
-        or receipt.get("patch")
-        != {
-            "path": str(XCODE27_COMPAT_PATCH),
-            "sha256": XCODE27_COMPAT_PATCH_SHA256,
-        }
+        or not _path_hash_report_matches(
+            receipt.get("patch"),
+            XCODE27_COMPAT_PATCH,
+            XCODE27_COMPAT_PATCH_SHA256,
+            alias_context,
+        )
         or receipt.get("files") != XCODE27_COMPAT_FILES
         or receipt.get("offline") is not True
         or receipt.get("network_operations") != 0
@@ -1261,6 +1540,7 @@ def execute_xcode27_compat(source, developer_dir, plan):
         tempfile.mkdtemp(prefix="focus-xcode27-compat-rollback-")
     ).resolve()
     backups = {}
+    receipt_publication_identity = None
     try:
         for position, relative in enumerate(XCODE27_COMPAT_FILES, 1):
             current = in_source(
@@ -1302,18 +1582,21 @@ def execute_xcode27_compat(source, developer_dir, plan):
             "packaging_executed": False,
         }
         receipt_report = atomic_json(expected["receipt"], receipt_value)
+        receipt_publication_identity = getattr(
+            receipt_report, "publication_identity", None
+        )
         xcode27_compat_receipt_contract(source, developer_dir, required=True)
     except BaseException as original_error:
         try:
             receipt_path = Path(expected["receipt"])
-            if receipt_path.is_symlink() or (
-                receipt_path.exists() and not receipt_path.is_file()
-            ):
-                raise PipelineError(
-                    "unsafe Xcode 27 compatibility receipt during rollback"
-                )
-            if receipt_path.is_file():
-                receipt_path.unlink()
+            _remove_failed_execution_receipt(
+                receipt_path,
+                receipt_publication_identity,
+                lambda: xcode27_compat_receipt_contract(
+                    source, developer_dir, required=True
+                ),
+                "Xcode 27 compatibility receipt",
+            )
             for relative, backup in backups.items():
                 target = in_source(
                     source,
@@ -1356,7 +1639,7 @@ def execute_xcode27_compat(source, developer_dir, plan):
 
 
 def xcode27_seatbelt_provenance_link(
-    source, developer_dir=None, allow_reclaimed_arm=False
+    source, developer_dir=None, allow_reclaimed_arm=False, alias_context=None
 ):
     """Bind the sandbox fix to the already-validated module compatibility fix."""
     receipt_path, _ = xcode27_compat_receipt_contract(
@@ -1364,6 +1647,7 @@ def xcode27_seatbelt_provenance_link(
         developer_dir,
         required=True,
         allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
     )
     return {
         "path": str(receipt_path),
@@ -1372,7 +1656,11 @@ def xcode27_seatbelt_provenance_link(
 
 
 def xcode27_seatbelt_receipt_contract(
-    source, developer_dir=None, required=True, allow_reclaimed_arm=False
+    source,
+    developer_dir=None,
+    required=True,
+    allow_reclaimed_arm=False,
+    alias_context=None,
 ):
     """Validate Chromium's exact macOS 27 Seatbelt source backport."""
     receipt_path = in_source(
@@ -1398,7 +1686,10 @@ def xcode27_seatbelt_receipt_contract(
         "packaging_executed",
     }
     module_link = xcode27_seatbelt_provenance_link(
-        source, developer_dir, allow_reclaimed_arm=allow_reclaimed_arm
+        source,
+        developer_dir,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
     )
     if set(receipt) != expected_keys or receipt.get("schema") != 1:
         raise PipelineError("Xcode 27 Seatbelt compatibility receipt schema mismatch")
@@ -1407,11 +1698,12 @@ def xcode27_seatbelt_receipt_contract(
         or receipt.get("xcode27_module_compatibility_receipt") != module_link
         or receipt.get("toolchain") != XCODE27_COMPAT_TOOLCHAIN
         or receipt.get("upstream") != XCODE27_SEATBELT_UPSTREAM
-        or receipt.get("patch")
-        != {
-            "path": str(XCODE27_SEATBELT_PATCH),
-            "sha256": XCODE27_SEATBELT_PATCH_SHA256,
-        }
+        or not _path_hash_report_matches(
+            receipt.get("patch"),
+            XCODE27_SEATBELT_PATCH,
+            XCODE27_SEATBELT_PATCH_SHA256,
+            alias_context,
+        )
         or receipt.get("files") != XCODE27_SEATBELT_FILES
         or receipt.get("offline") is not True
         or receipt.get("network_operations") != 0
@@ -1486,6 +1778,7 @@ def execute_xcode27_seatbelt(source, developer_dir, plan):
         tempfile.mkdtemp(prefix="focus-xcode27-seatbelt-rollback-")
     ).resolve()
     backups = {}
+    receipt_publication_identity = None
     try:
         for position, relative in enumerate(XCODE27_SEATBELT_FILES, 1):
             current = in_source(
@@ -1525,18 +1818,21 @@ def execute_xcode27_seatbelt(source, developer_dir, plan):
             "packaging_executed": False,
         }
         receipt_report = atomic_json(expected["receipt"], receipt_value)
+        receipt_publication_identity = getattr(
+            receipt_report, "publication_identity", None
+        )
         xcode27_seatbelt_receipt_contract(source, developer_dir, required=True)
     except BaseException as original_error:
         try:
             receipt_path = Path(expected["receipt"])
-            if receipt_path.is_symlink() or (
-                receipt_path.exists() and not receipt_path.is_file()
-            ):
-                raise PipelineError(
-                    "unsafe Xcode 27 Seatbelt receipt during rollback"
-                )
-            if receipt_path.is_file():
-                receipt_path.unlink()
+            _remove_failed_execution_receipt(
+                receipt_path,
+                receipt_publication_identity,
+                lambda: xcode27_seatbelt_receipt_contract(
+                    source, developer_dir, required=True
+                ),
+                "Xcode 27 Seatbelt receipt",
+            )
             for relative, backup in backups.items():
                 target = in_source(
                     source, relative, "Xcode 27 Seatbelt rollback", must_exist=True
@@ -1576,7 +1872,7 @@ def execute_xcode27_seatbelt(source, developer_dir, plan):
 
 
 def screen_ai_disabled_provenance_link(
-    source, developer_dir=None, allow_reclaimed_arm=False
+    source, developer_dir=None, allow_reclaimed_arm=False, alias_context=None
 ):
     """Bind the disabled-ScreenAI guard to validated toolchain fixes."""
     receipt_path, _ = xcode27_seatbelt_receipt_contract(
@@ -1584,6 +1880,7 @@ def screen_ai_disabled_provenance_link(
         developer_dir,
         required=True,
         allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
     )
     return {"path": str(receipt_path), "sha256": sha256_file(receipt_path)}
 
@@ -1607,7 +1904,11 @@ def screen_ai_disabled_config_contract(source):
 
 
 def screen_ai_disabled_receipt_contract(
-    source, developer_dir=None, required=True, allow_reclaimed_arm=False
+    source,
+    developer_dir=None,
+    required=True,
+    allow_reclaimed_arm=False,
+    alias_context=None,
 ):
     """Validate the exact disabled-ScreenAI macOS link compatibility fix."""
     receipt_path = in_source(
@@ -1634,7 +1935,10 @@ def screen_ai_disabled_receipt_contract(
     }
     current_keys = legacy_keys | {"config_files"}
     seatbelt_link = screen_ai_disabled_provenance_link(
-        source, developer_dir, allow_reclaimed_arm=allow_reclaimed_arm
+        source,
+        developer_dir,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
     )
     legacy_receipt = (
         receipt.get("schema") == 1
@@ -1653,11 +1957,12 @@ def screen_ai_disabled_receipt_contract(
     if (
         receipt.get("source_root") != str(source)
         or receipt.get("xcode27_seatbelt_compatibility_receipt") != seatbelt_link
-        or receipt.get("patch")
-        != {
-            "path": str(SCREEN_AI_DISABLED_PATCH),
-            "sha256": SCREEN_AI_DISABLED_PATCH_SHA256,
-        }
+        or not _path_hash_report_matches(
+            receipt.get("patch"),
+            SCREEN_AI_DISABLED_PATCH,
+            SCREEN_AI_DISABLED_PATCH_SHA256,
+            alias_context,
+        )
         or receipt.get("files") != SCREEN_AI_DISABLED_FILES
         or (current_receipt and receipt.get("config_files") != config_files)
         or receipt.get("enable_screen_ai_service") is not False
@@ -1743,6 +2048,7 @@ def execute_screen_ai_disabled(source, developer_dir, plan):
     snapshot_root = None
     backups = {}
     snapshot_cleanup_complete = True
+    receipt_publication_identity = None
     try:
         if expected["source_state"] == "pre":
             snapshot_root = Path(
@@ -1795,18 +2101,21 @@ def execute_screen_ai_disabled(source, developer_dir, plan):
             "packaging_executed": False,
         }
         receipt_report = atomic_json(expected["receipt"], receipt_value)
+        receipt_publication_identity = getattr(
+            receipt_report, "publication_identity", None
+        )
         screen_ai_disabled_receipt_contract(source, developer_dir, required=True)
     except BaseException as original_error:
         try:
             receipt_path = Path(expected["receipt"])
-            if receipt_path.is_symlink() or (
-                receipt_path.exists() and not receipt_path.is_file()
-            ):
-                raise PipelineError(
-                    "unsafe disabled ScreenAI receipt during rollback"
-                )
-            if receipt_path.is_file():
-                receipt_path.unlink()
+            _remove_failed_execution_receipt(
+                receipt_path,
+                receipt_publication_identity,
+                lambda: screen_ai_disabled_receipt_contract(
+                    source, developer_dir, required=True
+                ),
+                "disabled ScreenAI receipt",
+            )
             if expected["source_state"] == "pre":
                 for relative, backup in backups.items():
                     target = in_source(
@@ -1855,18 +2164,22 @@ def execute_screen_ai_disabled(source, developer_dir, plan):
 
 def xcode27_linkedit_strip_tool_contract(source, developer_dir):
     """Pin both the rejected LLVM strip and selected Xcode 27 strip."""
-    developer_dir = Path(developer_dir).resolve(strict=True)
-    identity = xcode27_toolchain_identity(developer_contract(developer_dir))
+    logical_developer_dir = Path(developer_dir)
+    physical_developer_dir = logical_developer_dir.resolve(strict=True)
+    identity = xcode27_toolchain_identity(
+        developer_contract(physical_developer_dir)
+    )
     if identity != XCODE27_COMPAT_TOOLCHAIN:
         raise PipelineError("Xcode 27 LINKEDIT strip toolchain mismatch")
-    selected = developer_dir / XCODE27_LINKEDIT_STRIP_RELATIVE
+    selected = logical_developer_dir / XCODE27_LINKEDIT_STRIP_RELATIVE
+    physical_selected = physical_developer_dir / XCODE27_LINKEDIT_STRIP_RELATIVE
     try:
         focus_macos.require_executable_file(
-            selected, developer_dir, "Xcode 27 strip"
+            physical_selected, physical_developer_dir, "Xcode 27 strip"
         )
     except focus_macos.ContractError as exc:
         raise PipelineError(str(exc)) from exc
-    if sha256_file(selected) != XCODE27_LINKEDIT_STRIP_SHA256:
+    if sha256_file(physical_selected) != XCODE27_LINKEDIT_STRIP_SHA256:
         raise PipelineError("Xcode 27 strip hash mismatch")
 
     llvm_bin = in_source(
@@ -1925,7 +2238,7 @@ def xcode27_linkedit_strip_tool_contract(source, developer_dir):
 
 
 def xcode27_linkedit_strip_provenance_link(
-    source, developer_dir=None, allow_reclaimed_arm=False
+    source, developer_dir=None, allow_reclaimed_arm=False, alias_context=None
 ):
     """Bind the strip workaround to the last source compatibility receipt."""
     receipt_path, _ = screen_ai_disabled_receipt_contract(
@@ -1933,12 +2246,17 @@ def xcode27_linkedit_strip_provenance_link(
         developer_dir,
         required=True,
         allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
     )
     return {"path": str(receipt_path), "sha256": sha256_file(receipt_path)}
 
 
 def xcode27_linkedit_strip_receipt_contract(
-    source, developer_dir, required=True, allow_reclaimed_arm=False
+    source,
+    developer_dir,
+    required=True,
+    allow_reclaimed_arm=False,
+    alias_context=None,
 ):
     """Validate the exact Xcode-strip selection and its provenance."""
     receipt_path = in_source(
@@ -1968,7 +2286,10 @@ def xcode27_linkedit_strip_receipt_contract(
         "packaging_executed",
     }
     upstream_link = xcode27_linkedit_strip_provenance_link(
-        source, developer_dir, allow_reclaimed_arm=allow_reclaimed_arm
+        source,
+        developer_dir,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
     )
     tools = xcode27_linkedit_strip_tool_contract(source, developer_dir)
     expected_scope = {
@@ -1986,11 +2307,12 @@ def xcode27_linkedit_strip_receipt_contract(
         != upstream_link
         or receipt.get("toolchain") != XCODE27_COMPAT_TOOLCHAIN
         or receipt.get("upstream") != XCODE27_LINKEDIT_STRIP_UPSTREAM
-        or receipt.get("patch")
-        != {
-            "path": str(XCODE27_LINKEDIT_STRIP_PATCH),
-            "sha256": XCODE27_LINKEDIT_STRIP_PATCH_SHA256,
-        }
+        or not _path_hash_report_matches(
+            receipt.get("patch"),
+            XCODE27_LINKEDIT_STRIP_PATCH,
+            XCODE27_LINKEDIT_STRIP_PATCH_SHA256,
+            alias_context,
+        )
         or receipt.get("files") != XCODE27_LINKEDIT_STRIP_FILES
         or receipt.get("tools") != tools
         or receipt.get("scope") != expected_scope
@@ -2080,6 +2402,7 @@ def execute_xcode27_linkedit_strip(source, developer_dir, plan):
         tempfile.mkdtemp(prefix="focus-xcode27-linkedit-strip-rollback-")
     ).resolve()
     backups = {}
+    receipt_publication_identity = None
     try:
         for position, relative in enumerate(XCODE27_LINKEDIT_STRIP_FILES, 1):
             current = in_source(
@@ -2129,20 +2452,26 @@ def execute_xcode27_linkedit_strip(source, developer_dir, plan):
             "packaging_executed": False,
         }
         receipt_report = atomic_json(expected["receipt"], receipt_value)
+        receipt_publication_identity = getattr(
+            receipt_report, "publication_identity", None
+        )
         xcode27_linkedit_strip_receipt_contract(
             source, developer_dir, required=True, allow_reclaimed_arm=True
         )
     except BaseException as original_error:
         try:
             receipt_path = Path(expected["receipt"])
-            if receipt_path.is_symlink() or (
-                receipt_path.exists() and not receipt_path.is_file()
-            ):
-                raise PipelineError(
-                    "unsafe Xcode 27 LINKEDIT strip receipt during rollback"
-                )
-            if receipt_path.is_file():
-                receipt_path.unlink()
+            _remove_failed_execution_receipt(
+                receipt_path,
+                receipt_publication_identity,
+                lambda: xcode27_linkedit_strip_receipt_contract(
+                    source,
+                    developer_dir,
+                    required=True,
+                    allow_reclaimed_arm=True,
+                ),
+                "Xcode 27 LINKEDIT strip receipt",
+            )
             for relative, backup in backups.items():
                 target = in_source(
                     source,
@@ -2249,7 +2578,11 @@ def swiftshader_app_library_contract(app):
     }
 
 
-def swiftshader_disabled_build_contract(source):
+def swiftshader_disabled_build_contract(
+    source,
+    allow_resumed_history_growth=False,
+    authorized_resumed_history=None,
+):
     """Bind the signing exception to both exact Focus build profiles and apps."""
     profiles = {}
     for architecture in ("arm64", "x64"):
@@ -2265,7 +2598,13 @@ def swiftshader_disabled_build_contract(source):
     x64_out = in_source(
         source, X64_OUT, "x86_64 output", must_exist=True, directory=True
     )
-    x64_receipt_path, _ = slice_receipt_contract(source, x64_out, "x64")
+    x64_receipt_path, _ = slice_receipt_contract(
+        source,
+        x64_out,
+        "x64",
+        allow_resumed_history_growth=allow_resumed_history_growth,
+        authorized_resumed_history=authorized_resumed_history,
+    )
     x64_args = _disabled_swiftshader_text_contract(
         x64_out / "args.gn",
         "x64 generated args",
@@ -2361,6 +2700,20 @@ def swiftshader_disabled_signing_plan(source, developer_dir):
         SWIFTSHADER_DISABLED_SIGNING_RECEIPT,
         "disabled SwiftShader signing receipt",
     )
+    crash_recovery = _load_durable_signing_transaction(
+        source, "swiftshader", receipt_path
+    )
+    if crash_recovery is not None:
+        return {
+            "stage": "recover-swiftshader-signing-transaction",
+            "source_root": str(source),
+            "developer_dir": str(developer_dir),
+            "receipt": str(receipt_path),
+            "crash_recovery": crash_recovery,
+            "build_executed": False,
+            "signing_executed": False,
+            "packaging_executed": False,
+        }
     if receipt_path.exists() or receipt_path.is_symlink():
         raise PipelineError("disabled SwiftShader signing receipt already exists")
     patch = SWIFTSHADER_DISABLED_SIGNING_PATCH
@@ -2394,6 +2747,18 @@ def swiftshader_disabled_signing_plan(source, developer_dir):
             raise PipelineError(str(exc)) from exc
     build = swiftshader_disabled_build_contract(source)
     refresh = swiftshader_signing_refresh_contract(source)
+    alias_active = _home_alias_is_active(source)
+    ninja_history_before = None
+    if alias_active:
+        ninja_history_before = _ninja_history_snapshot(
+            in_source(
+                source,
+                X64_OUT,
+                "x86_64 output",
+                must_exist=True,
+                directory=True,
+            )
+        )
     return {
         "stage": "apply-swiftshader-disabled-signing-compat",
         "source_root": str(source),
@@ -2414,6 +2779,11 @@ def swiftshader_disabled_signing_plan(source, developer_dir):
         "source_state": source_state,
         "packaging_state": packaging_state,
         "refresh": refresh,
+        **(
+            {"ninja_history_before": ninja_history_before}
+            if alias_active
+            else {}
+        ),
         "receipt": str(receipt_path),
         "offline": True,
         "network_operations": 0,
@@ -2431,6 +2801,7 @@ def swiftshader_disabled_signing_receipt_contract(
         must_exist=True,
     )
     receipt = load_json(receipt_path, "disabled SwiftShader signing receipt")
+    alias_active = _home_alias_is_active(source)
     expected_keys = {
         "schema",
         "source_root",
@@ -2454,8 +2825,30 @@ def swiftshader_disabled_signing_receipt_contract(
         "signing_executed",
         "packaging_executed",
     }
+    if alias_active:
+        expected_keys.update(("ninja_history_before", "ninja_history_after"))
     preparation_path, _ = preparation_contract(source, allow_reclaimed_arm=True)
-    build = swiftshader_disabled_build_contract(source)
+    x64_out = in_source(
+        source, X64_OUT, "x86_64 output", must_exist=True, directory=True
+    )
+    adhoc_receipt_path = in_source(
+        source, ADHOC_RUNTIME_SIGNING_RECEIPT, "ad-hoc runtime signing receipt"
+    )
+    adhoc_chain = None
+    if adhoc_receipt_path.exists() and not adhoc_receipt_path.is_symlink():
+        adhoc_chain = load_json(
+            adhoc_receipt_path, "ad-hoc runtime signing history chain"
+        )
+    authorized_history = (
+        adhoc_chain.get("ninja_history_after")
+        if isinstance(adhoc_chain, dict)
+        else receipt.get("ninja_history_after")
+    )
+    build = swiftshader_disabled_build_contract(
+        source,
+        allow_resumed_history_growth=alias_active,
+        authorized_resumed_history=authorized_history,
+    )
     refresh = swiftshader_signing_refresh_contract(source)
     recovery_state = receipt.get("recovery_state")
     allowed_recovery_states = (
@@ -2466,6 +2859,45 @@ def swiftshader_disabled_signing_receipt_contract(
     )
     if set(receipt) != expected_keys or receipt.get("schema") != 1:
         raise PipelineError("disabled SwiftShader signing receipt schema mismatch")
+    x64_receipt = load_json(
+        build["x64_build_receipt"]["path"], "x86_64 build receipt"
+    )
+    if alias_active and x64_receipt.get("schema") == RESUMED_SLICE_RECEIPT_SCHEMA:
+        base_post = x64_receipt.get("resume_execution", {}).get("post_run", {})
+        base_history = {
+            name: base_post.get(name) for name in ("ninja_log", "ninja_deps")
+        }
+        if receipt.get("ninja_history_before") != base_history:
+            raise PipelineError(
+                "disabled SwiftShader history does not start at raw-Ninja completion"
+            )
+    before_history = receipt.get("ninja_history_before")
+    after_history = receipt.get("ninja_history_after")
+    if alias_active:
+        for name in ("ninja_log", "ninja_deps"):
+            expected_path = x64_out / (
+                ".ninja_log" if name == "ninja_log" else ".ninja_deps"
+            )
+            _validate_recorded_file_snapshot(
+                before_history.get(name)
+                if isinstance(before_history, dict)
+                else None,
+                expected_path,
+                "SwiftShader pre-refresh {}".format(name),
+            )
+            _validate_recorded_file_snapshot(
+                after_history.get(name)
+                if isinstance(after_history, dict)
+                else None,
+                expected_path,
+                "SwiftShader post-refresh {}".format(name),
+            )
+        if isinstance(adhoc_chain, dict) and adhoc_chain.get(
+            "ninja_history_before"
+        ) != after_history:
+            raise PipelineError(
+                "ad-hoc history does not continue SwiftShader history"
+            )
     if (
         receipt.get("source_root") != str(source)
         or receipt.get("developer_dir") != str(developer_dir)
@@ -2485,6 +2917,8 @@ def swiftshader_disabled_signing_receipt_contract(
         }
         or receipt.get("files") != SWIFTSHADER_DISABLED_SIGNING_FILES
         or receipt.get("refresh") != refresh
+        or (alias_active and receipt.get("ninja_history_before") != before_history)
+        or (alias_active and receipt.get("ninja_history_after") != after_history)
         or recovery_state not in allowed_recovery_states
         or receipt.get("offline") is not True
         or receipt.get("network_operations") != 0
@@ -2532,6 +2966,50 @@ def execute_swiftshader_disabled_signing(source, developer_dir, plan):
     expected = swiftshader_disabled_signing_plan(source, developer_dir)
     if plan != expected:
         raise PipelineError("disabled SwiftShader signing plan changed")
+    if expected.get("crash_recovery") is not None:
+        if expected["crash_recovery"]["receipt_published"]:
+            try:
+                swiftshader_disabled_signing_receipt_contract(
+                    source, developer_dir
+                )
+            except PipelineError:
+                if expected["crash_recovery"].get("cleanup_only"):
+                    raise PipelineError(
+                        "published SwiftShader receipt is invalid and its "
+                        "rollback journal is incomplete"
+                    )
+                _remove_invalid_transaction_receipt(
+                    Path(expected["receipt"]),
+                    expected["crash_recovery"]["receipt_identity"],
+                )
+                _restore_durable_signing_transaction(
+                    source, "swiftshader", Path(expected["receipt"])
+                )
+                fresh = swiftshader_disabled_signing_plan(source, developer_dir)
+                result = execute_swiftshader_disabled_signing(
+                    source, developer_dir, fresh
+                )
+                result["invalid_receipt_rolled_back"] = True
+                return result
+            _discard_durable_signing_transaction(source, "swiftshader")
+            return {
+                "stage": "recover-swiftshader-signing-transaction",
+                "recovered": True,
+                "receipt": {
+                    "path": expected["receipt"],
+                    "sha256": sha256_file(expected["receipt"]),
+                },
+            }
+        _restore_durable_signing_transaction(
+            source, "swiftshader", Path(expected["receipt"])
+        )
+        fresh = swiftshader_disabled_signing_plan(source, developer_dir)
+        result = execute_swiftshader_disabled_signing(
+            source, developer_dir, fresh
+        )
+        result["crash_recovered"] = True
+        return result
+    _live_alias_slice_no_work(source, developer_dir, "x64")
     require_free(source, SOFT_FLOOR_GIB, "disabled SwiftShader signing fix")
     source_parts = Path(expected["source_parts"])
     packaging_parts = Path(expected["packaging_parts"])
@@ -2541,9 +3019,14 @@ def execute_swiftshader_disabled_signing(source, developer_dir, plan):
     ).resolve()
     source_backup = snapshot_root / "source-parts.py"
     packaging_backup = snapshot_root / "packaging-parts.py"
+    history_rollback = _snapshot_alias_ninja_history(source, snapshot_root)
     prepare_source.atomic_copy(source_parts, source_backup)
     prepare_source.atomic_copy(packaging_parts, packaging_backup)
+    durable_transaction = _begin_durable_signing_transaction(
+        source, "swiftshader", Path(expected["receipt"])
+    )
     receipt_report = None
+    receipt_publication_identity = None
     try:
         if expected["source_state"] == "pre":
             prepare_source.apply_patch_plan(
@@ -2559,7 +3042,7 @@ def execute_swiftshader_disabled_signing(source, developer_dir, plan):
         ) != expected_final_state:
             raise PipelineError("Chromium signing parts post-fix hash mismatch")
         if expected["packaging_state"] == "pre":
-            environment = safe_environment(
+            environment = _build_child_environment(
                 source,
                 developer_dir,
                 build_ninja=Path(expected["refresh"]["ninja"]["path"]),
@@ -2569,7 +3052,22 @@ def execute_swiftshader_disabled_signing(source, developer_dir, plan):
             packaging_parts, "generated signing parts"
         ) != expected_final_state:
             raise PipelineError("generated signing parts post-fix hash mismatch")
-        current_build = swiftshader_disabled_build_contract(source)
+        current_history = None
+        if "ninja_history_before" in expected:
+            current_history = _ninja_history_snapshot(
+                in_source(
+                    source,
+                    X64_OUT,
+                    "x86_64 output",
+                    must_exist=True,
+                    directory=True,
+                )
+            )
+        current_build = swiftshader_disabled_build_contract(
+            source,
+            allow_resumed_history_growth=(current_history is not None),
+            authorized_resumed_history=current_history,
+        )
         if current_build["app_tree_sha256"] != initial_app_trees:
             raise PipelineError("signing-script refresh changed an app bundle")
         receipt_value = {
@@ -2587,6 +3085,14 @@ def execute_swiftshader_disabled_signing(source, developer_dir, plan):
             "patch": expected["patch"],
             "files": SWIFTSHADER_DISABLED_SIGNING_FILES,
             "refresh": expected["refresh"],
+            **(
+                {
+                    "ninja_history_before": expected["ninja_history_before"],
+                    "ninja_history_after": current_history,
+                }
+                if current_history is not None
+                else {}
+            ),
             "recovery_state": {
                 "source": expected["source_state"],
                 "packaging": expected["packaging_state"],
@@ -2598,19 +3104,31 @@ def execute_swiftshader_disabled_signing(source, developer_dir, plan):
             "signing_executed": False,
             "packaging_executed": False,
         }
+        if durable_transaction is not None:
+            _fsync_durable_signing_targets(source, "swiftshader")
         receipt_report = atomic_json(Path(expected["receipt"]), receipt_value)
+        receipt_publication_identity = getattr(
+            receipt_report, "publication_identity", None
+        )
         swiftshader_disabled_signing_receipt_contract(source, developer_dir)
     except BaseException as original_error:
         try:
             receipt_path = Path(expected["receipt"])
-            if receipt_path.is_symlink() or (
-                receipt_path.exists() and not receipt_path.is_file()
-            ):
-                raise PipelineError("unsafe SwiftShader receipt during rollback")
-            if receipt_path.is_file():
-                receipt_path.unlink()
+            _remove_failed_execution_receipt(
+                receipt_path,
+                receipt_publication_identity,
+                lambda: swiftshader_disabled_signing_receipt_contract(
+                    source, developer_dir
+                ),
+                "SwiftShader receipt",
+            )
             prepare_source.atomic_copy(source_backup, source_parts)
             prepare_source.atomic_copy(packaging_backup, packaging_parts)
+            _restore_alias_ninja_history(history_rollback)
+            if durable_transaction is not None:
+                _restore_durable_signing_transaction(
+                    source, "swiftshader", Path(expected["receipt"])
+                )
             if (
                 _swiftshader_signing_file_state(
                     source_parts, "rolled-back Chromium signing parts"
@@ -2634,6 +3152,8 @@ def execute_swiftshader_disabled_signing(source, developer_dir, plan):
             raise PipelineError(str(original_error)) from original_error
         raise
     else:
+        if durable_transaction is not None:
+            _discard_durable_signing_transaction(source, "swiftshader")
         shutil.rmtree(snapshot_root)
     return {
         "stage": "apply-swiftshader-disabled-signing-compat",
@@ -2732,13 +3252,27 @@ def adhoc_runtime_signing_plan(source, developer_dir):
     acquisition_contract(source)
     tool_receipt_contract(source, developer_dir)
     preparation_path, _ = preparation_contract(source, allow_reclaimed_arm=True)
-    swiftshader_path, _ = swiftshader_disabled_signing_receipt_contract(
-        source, developer_dir, allow_adhoc_runtime_signing=True
-    )
     receipt_path = in_source(
         source,
         ADHOC_RUNTIME_SIGNING_RECEIPT,
         "ad-hoc runtime signing receipt",
+    )
+    crash_recovery = _load_durable_signing_transaction(
+        source, "adhoc", receipt_path
+    )
+    if crash_recovery is not None:
+        return {
+            "stage": "recover-adhoc-signing-transaction",
+            "source_root": str(source),
+            "developer_dir": str(developer_dir),
+            "receipt": str(receipt_path),
+            "crash_recovery": crash_recovery,
+            "build_executed": False,
+            "signing_executed": False,
+            "packaging_executed": False,
+        }
+    swiftshader_path, swiftshader_receipt = swiftshader_disabled_signing_receipt_contract(
+        source, developer_dir, allow_adhoc_runtime_signing=True
     )
     if receipt_path.exists() or receipt_path.is_symlink():
         raise PipelineError("ad-hoc runtime signing receipt already exists")
@@ -2764,7 +3298,22 @@ def adhoc_runtime_signing_plan(source, developer_dir):
         )
     except prepare_source.PreparationError as exc:
         raise PipelineError(str(exc)) from exc
-    build = swiftshader_disabled_build_contract(source)
+    x64_out = in_source(
+        source, X64_OUT, "x86_64 output", must_exist=True, directory=True
+    )
+    alias_active = _home_alias_is_active(source)
+    ninja_history_before = None
+    if alias_active:
+        ninja_history_before = _ninja_history_snapshot(x64_out)
+        if ninja_history_before != swiftshader_receipt.get("ninja_history_after"):
+            raise PipelineError(
+                "Ninja history changed between SwiftShader and ad-hoc refreshes"
+            )
+    build = swiftshader_disabled_build_contract(
+        source,
+        allow_resumed_history_growth=alias_active,
+        authorized_resumed_history=ninja_history_before,
+    )
     return {
         "stage": "apply-adhoc-runtime-signing-compat",
         "source_root": str(source),
@@ -2801,6 +3350,11 @@ def adhoc_runtime_signing_plan(source, developer_dir):
         "packaging_state": packaging_state,
         "tests": adhoc_runtime_signing_test_contract(source),
         "refresh": adhoc_runtime_signing_refresh_contract(source),
+        **(
+            {"ninja_history_before": ninja_history_before}
+            if alias_active
+            else {}
+        ),
         "refresh_strategy": {
             "mtime_independent": True,
             "forced_missing_outputs": [
@@ -2822,6 +3376,7 @@ def adhoc_runtime_signing_receipt_contract(source, developer_dir):
         must_exist=True,
     )
     receipt = load_json(receipt_path, "ad-hoc runtime signing receipt")
+    alias_active = _home_alias_is_active(source)
     expected_keys = {
         "schema",
         "source_root",
@@ -2850,11 +3405,17 @@ def adhoc_runtime_signing_receipt_contract(source, developer_dir):
         "signing_executed",
         "packaging_executed",
     }
+    if alias_active:
+        expected_keys.update(("ninja_history_before", "ninja_history_after"))
     preparation_path, _ = preparation_contract(source, allow_reclaimed_arm=True)
-    swiftshader_path, _ = swiftshader_disabled_signing_receipt_contract(
+    swiftshader_path, swiftshader_receipt = swiftshader_disabled_signing_receipt_contract(
         source, developer_dir, allow_adhoc_runtime_signing=True
     )
-    build = swiftshader_disabled_build_contract(source)
+    build = swiftshader_disabled_build_contract(
+        source,
+        allow_resumed_history_growth=alias_active,
+        authorized_resumed_history=receipt.get("ninja_history_after"),
+    )
     tests = adhoc_runtime_signing_test_contract(source)
     refresh = adhoc_runtime_signing_refresh_contract(source)
     _, packaging_paths = _adhoc_runtime_signing_paths(source)
@@ -2872,6 +3433,34 @@ def adhoc_runtime_signing_receipt_contract(source, developer_dir):
     )
     if set(receipt) != expected_keys or receipt.get("schema") != 1:
         raise PipelineError("ad-hoc runtime signing receipt schema mismatch")
+    x64_out = in_source(
+        source, X64_OUT, "x86_64 output", must_exist=True, directory=True
+    )
+    if alias_active and receipt.get("ninja_history_before") != swiftshader_receipt.get(
+        "ninja_history_after"
+    ):
+        raise PipelineError("ad-hoc Ninja history does not follow SwiftShader history")
+    before_history = receipt.get("ninja_history_before")
+    after_history = receipt.get("ninja_history_after")
+    if alias_active:
+        for name in ("ninja_log", "ninja_deps"):
+            expected_path = x64_out / (
+                ".ninja_log" if name == "ninja_log" else ".ninja_deps"
+            )
+            _validate_recorded_file_snapshot(
+                before_history.get(name)
+                if isinstance(before_history, dict)
+                else None,
+                expected_path,
+                "ad-hoc pre-refresh {}".format(name),
+            )
+            _validate_recorded_file_snapshot(
+                after_history.get(name)
+                if isinstance(after_history, dict)
+                else None,
+                expected_path,
+                "ad-hoc post-refresh {}".format(name),
+            )
     if (
         receipt.get("source_root") != str(source)
         or receipt.get("developer_dir") != str(developer_dir)
@@ -2896,6 +3485,8 @@ def adhoc_runtime_signing_receipt_contract(source, developer_dir):
         != ADHOC_RUNTIME_SIGNING_GENERATED_FILES
         or receipt.get("tests") != tests
         or receipt.get("refresh") != refresh
+        or (alias_active and receipt.get("ninja_history_before") != before_history)
+        or (alias_active and receipt.get("ninja_history_after") != after_history)
         or receipt.get("refresh_strategy") != refresh_strategy
         or recovery_state not in allowed_recovery_states
         or receipt.get("offline") is not True
@@ -2936,6 +3527,51 @@ def execute_adhoc_runtime_signing(source, developer_dir, plan):
     expected = adhoc_runtime_signing_plan(source, developer_dir)
     if plan != expected:
         raise PipelineError("ad-hoc runtime signing plan changed")
+    if expected.get("crash_recovery") is not None:
+        if expected["crash_recovery"]["receipt_published"]:
+            try:
+                adhoc_runtime_signing_receipt_contract(source, developer_dir)
+            except PipelineError:
+                if expected["crash_recovery"].get("cleanup_only"):
+                    raise PipelineError(
+                        "published ad-hoc receipt is invalid and its rollback "
+                        "journal is incomplete"
+                    )
+                _remove_invalid_transaction_receipt(
+                    Path(expected["receipt"]),
+                    expected["crash_recovery"]["receipt_identity"],
+                )
+                _restore_durable_signing_transaction(
+                    source, "adhoc", Path(expected["receipt"])
+                )
+                fresh = adhoc_runtime_signing_plan(source, developer_dir)
+                result = execute_adhoc_runtime_signing(
+                    source, developer_dir, fresh
+                )
+                result["invalid_receipt_rolled_back"] = True
+                return result
+            _discard_durable_signing_transaction(source, "adhoc")
+            return {
+                "stage": "recover-adhoc-signing-transaction",
+                "recovered": True,
+                "receipt": {
+                    "path": expected["receipt"],
+                    "sha256": sha256_file(expected["receipt"]),
+                },
+            }
+        _restore_durable_signing_transaction(
+            source, "adhoc", Path(expected["receipt"])
+        )
+        fresh = adhoc_runtime_signing_plan(source, developer_dir)
+        result = execute_adhoc_runtime_signing(source, developer_dir, fresh)
+        result["crash_recovered"] = True
+        return result
+    _live_alias_slice_no_work(
+        source,
+        developer_dir,
+        "x64",
+        authorized_history=plan.get("ninja_history_before"),
+    )
     require_free(source, SOFT_FLOOR_GIB, "ad-hoc runtime signing fix")
     source_paths = {
         relative: Path(path) for relative, path in expected["source_paths"].items()
@@ -2950,7 +3586,12 @@ def execute_adhoc_runtime_signing(source, developer_dir, plan):
     ).resolve()
     source_backups = {}
     packaging_backups = {}
+    history_rollback = _snapshot_alias_ninja_history(source, snapshot_root)
+    durable_transaction = _begin_durable_signing_transaction(
+        source, "adhoc", Path(expected["receipt"])
+    )
     receipt_report = None
+    receipt_publication_identity = None
     try:
         for position, (relative, path) in enumerate(source_paths.items(), 1):
             backup = snapshot_root / "source-{:02d}".format(position)
@@ -2970,14 +3611,14 @@ def execute_adhoc_runtime_signing(source, developer_dir, plan):
             "Chromium signing sources",
         ) != "post":
             raise PipelineError("Chromium ad-hoc signing post-fix hash mismatch")
-        environment = safe_environment(source, developer_dir)
+        environment = _build_child_environment(source, developer_dir)
         run_monitored(
             expected["tests"]["command"],
             Path(expected["tests"]["working_directory"]),
             environment,
             watched_paths=(source,),
         )
-        refresh_environment = safe_environment(
+        refresh_environment = _build_child_environment(
             source,
             developer_dir,
             build_ninja=Path(expected["refresh"]["ninja"]["path"]),
@@ -3011,7 +3652,22 @@ def execute_adhoc_runtime_signing(source, developer_dir, plan):
             "generated signing package",
         ) != "post":
             raise PipelineError("generated ad-hoc signing post-fix hash mismatch")
-        current_build = swiftshader_disabled_build_contract(source)
+        current_history = None
+        if "ninja_history_before" in expected:
+            current_history = _ninja_history_snapshot(
+                in_source(
+                    source,
+                    X64_OUT,
+                    "x86_64 output",
+                    must_exist=True,
+                    directory=True,
+                )
+            )
+        current_build = swiftshader_disabled_build_contract(
+            source,
+            allow_resumed_history_growth=(current_history is not None),
+            authorized_resumed_history=current_history,
+        )
         if current_build["app_tree_sha256"] != initial_app_trees:
             raise PipelineError("ad-hoc signing refresh changed an app bundle")
         receipt_value = {
@@ -3035,6 +3691,14 @@ def execute_adhoc_runtime_signing(source, developer_dir, plan):
             "generated_files": ADHOC_RUNTIME_SIGNING_GENERATED_FILES,
             "tests": expected["tests"],
             "refresh": expected["refresh"],
+            **(
+                {
+                    "ninja_history_before": expected["ninja_history_before"],
+                    "ninja_history_after": current_history,
+                }
+                if current_history is not None
+                else {}
+            ),
             "refresh_strategy": expected["refresh_strategy"],
             "recovery_state": {
                 "source": expected["source_state"],
@@ -3049,21 +3713,33 @@ def execute_adhoc_runtime_signing(source, developer_dir, plan):
             "signing_executed": False,
             "packaging_executed": False,
         }
+        if durable_transaction is not None:
+            _fsync_durable_signing_targets(source, "adhoc")
         receipt_report = atomic_json(Path(expected["receipt"]), receipt_value)
+        receipt_publication_identity = getattr(
+            receipt_report, "publication_identity", None
+        )
         adhoc_runtime_signing_receipt_contract(source, developer_dir)
     except BaseException as original_error:
         try:
             receipt_path = Path(expected["receipt"])
-            if receipt_path.is_symlink() or (
-                receipt_path.exists() and not receipt_path.is_file()
-            ):
-                raise PipelineError("unsafe ad-hoc receipt during rollback")
-            if receipt_path.is_file():
-                receipt_path.unlink()
+            _remove_failed_execution_receipt(
+                receipt_path,
+                receipt_publication_identity,
+                lambda: adhoc_runtime_signing_receipt_contract(
+                    source, developer_dir
+                ),
+                "ad-hoc receipt",
+            )
             for relative, backup in packaging_backups.items():
                 prepare_source.atomic_copy(backup, packaging_paths[relative])
             for relative, backup in source_backups.items():
                 prepare_source.atomic_copy(backup, source_paths[relative])
+            _restore_alias_ninja_history(history_rollback)
+            if durable_transaction is not None:
+                _restore_durable_signing_transaction(
+                    source, "adhoc", Path(expected["receipt"])
+                )
             if (
                 _adhoc_runtime_signing_set_state(
                     source_paths,
@@ -3091,6 +3767,8 @@ def execute_adhoc_runtime_signing(source, developer_dir, plan):
             raise PipelineError(str(original_error)) from original_error
         raise
     else:
+        if durable_transaction is not None:
+            _discard_durable_signing_transaction(source, "adhoc")
         shutil.rmtree(snapshot_root)
     return {
         "stage": "apply-adhoc-runtime-signing-compat",
@@ -3107,8 +3785,14 @@ def execute_adhoc_runtime_signing(source, developer_dir, plan):
 
 
 def preparation_contract(
-    source, allow_reclaimed_arm=False, allow_missing_gn_compat=False
+    source,
+    allow_reclaimed_arm=False,
+    allow_missing_gn_compat=False,
+    alias_context=None,
 ):
+    if alias_context is None and Path(source).resolve(strict=True) != Path(source):
+        alias_context = _recorded_alias_context(source)
+    path_projector = alias_context.project if alias_context is not None else None
     receipt_path = in_source(
         source, PREPARATION_RECEIPT, "preparation receipt", must_exist=True
     )
@@ -3158,9 +3842,12 @@ def preparation_contract(
         prepare_source.validate_recovery_execution_link(
             receipt.get("preparation_execution"),
             receipt.get("recovery_checkpoint"),
+            path_projector=path_projector,
         )
         prepare_source.validate_recovery_checkpoint_report(
-            receipt.get("recovery_checkpoint"), source
+            receipt.get("recovery_checkpoint"),
+            source_root=source,
+            path_projector=path_projector,
         )
     except prepare_source.PreparationError as exc:
         raise PipelineError(str(exc)) from exc
@@ -3193,7 +3880,9 @@ def preparation_contract(
         raise PipelineError("preparation dependency cache-marker path mismatch")
     try:
         current_cache_marker = prepare_source.validate_dependency_cache_marker(
-            marker_path.parent, prepare_source.DEPENDENCY_CONTRACTS
+            marker_path.parent,
+            prepare_source.DEPENDENCY_CONTRACTS,
+            path_projector=path_projector,
         )
     except prepare_source.PreparationError as exc:
         raise PipelineError(str(exc)) from exc
@@ -3268,7 +3957,9 @@ def preparation_contract(
     }:
         raise PipelineError("localized strings preparation contract schema mismatch")
     try:
-        current_node = prepare_source.onboarding_node_contract(source)
+        current_node = prepare_source.onboarding_node_contract(
+            source, path_projector=path_projector
+        )
     except prepare_source.PreparationError as exc:
         raise PipelineError(str(exc)) from exc
     generator = in_source(
@@ -3445,13 +4136,27 @@ def verify_pristine_bootstrap_source(source, developer_dir):
     }
 
 
-def slice_receipt_contract(source, out, architecture):
+def slice_receipt_contract(
+    source,
+    out,
+    architecture,
+    allow_resumed_history_growth=False,
+    authorized_resumed_history=None,
+):
     """Bind staging/merging to a completed slice build from this checkout."""
     receipt_path = Path(out) / SLICE_RECEIPT_NAME
     receipt = load_json(receipt_path, "{} build receipt".format(architecture))
     expected_arch = "arm64" if architecture == "arm64" else "x86_64"
+    schema = receipt.get("schema")
+    alias_receipt = in_source(source, HOME_ALIAS_RECEIPT, "home-alias receipt")
+    if (alias_receipt.exists() or alias_receipt.is_symlink()) and (
+        schema != RESUMED_SLICE_RECEIPT_SCHEMA
+    ):
+        raise PipelineError(
+            "home-alias builds require a resumed schema-two slice receipt"
+        )
     if (
-        receipt.get("schema") != 1
+        schema not in (1, RESUMED_SLICE_RECEIPT_SCHEMA)
         or receipt.get("architecture") != architecture
         or receipt.get("mach_o_architecture") != expected_arch
         or receipt.get("source_root") != str(source)
@@ -3524,8 +4229,63 @@ def slice_receipt_contract(source, out, architecture):
         raise PipelineError(
             "{} generated LINKEDIT strip provenance mismatch".format(architecture)
         )
-    if receipt.get("ninja") != ninja_contract(source):
+    current_ninja = ninja_contract(source)
+    if receipt.get("ninja") != current_ninja:
         raise PipelineError("{} Ninja provenance mismatch".format(architecture))
+    if schema == RESUMED_SLICE_RECEIPT_SCHEMA:
+        if receipt.get("app_tree_sha256") != tree_digest(
+            Path(out) / APP_NAME
+        ):
+            raise PipelineError("resumed slice app tree changed")
+        developer_dir = Path(tool_receipt_contract(source)[1]["developer_dir"])
+        alias_path, alias = home_alias_receipt_contract(source, developer_dir)
+        if receipt.get("home_alias_compatibility") != {
+            "path": str(alias_path),
+            "sha256": sha256_file(alias_path),
+        }:
+            raise PipelineError("resumed slice home-alias provenance mismatch")
+        _, _, onboarding_alias_root = onboarding_alias_root_receipt_contract(
+            source
+        )
+        if (
+            receipt.get("onboarding_alias_root_compatibility")
+            != onboarding_alias_root
+        ):
+            raise PipelineError(
+                "resumed slice onboarding alias-root provenance mismatch"
+            )
+        execution_path = receipt.get("resume_execution", {}).get("path", "")
+        execution = resume_execution_record_contract(
+            execution_path,
+            alias,
+            source,
+            developer_dir,
+            architecture,
+            Path(out),
+            current_ninja,
+            allow_history_growth=allow_resumed_history_growth,
+            authorized_history=authorized_resumed_history,
+        )
+        if receipt.get("resume_execution") != execution:
+            raise PipelineError("resumed slice execution record changed")
+        mixed = changed_path_scan(
+            Path(out),
+            execution["started_at_ns"],
+            Path(alias["logical_home"]),
+            Path(alias["physical_home"]),
+        )
+        if (
+            not allow_resumed_history_growth
+            and receipt.get("mixed_path_scan") != mixed
+        ):
+            raise PipelineError("resumed slice mixed-path inventory changed")
+        if (
+            receipt.get("raw_ninja_completed") is not True
+            or receipt.get("gn_gen_executed_by_finalizer") is not False
+            or receipt.get("build_command_executed_by_finalizer") is not False
+            or receipt.get("no_work_probe", {}).get("no_work") is not True
+        ):
+            raise PipelineError("resumed slice execution provenance mismatch")
     return receipt_path, receipt
 
 
@@ -4475,7 +5235,3222 @@ def execute_bootstrap(source, developer_dir, plan):
     return atomic_json(source.parent / TOOL_RECEIPT, receipt)
 
 
+def _path_identity(path):
+    observed = os.stat(str(path), follow_symlinks=True)
+    return {"device": observed.st_dev, "inode": observed.st_ino}
+
+
+def _run_bounded_output(command, max_bytes, timeout_seconds, label):
+    """Run one local inspection command with a hard combined-output bound."""
+    process = subprocess.Popen(
+        command,
+        env={
+            "PATH": SYSTEM_PATH,
+            "LANG": "C",
+            "LC_ALL": "C",
+            "TZ": "UTC",
+        },
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    if process.stdout is None:
+        raise PipelineError("{} has no output pipe".format(label))
+    output = bytearray()
+    deadline = time.monotonic() + timeout_seconds
+    selector = selectors.DefaultSelector()
+    descriptor = process.stdout.fileno()
+    os.set_blocking(descriptor, False)
+    selector.register(descriptor, selectors.EVENT_READ)
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PipelineError("{} timed out".format(label))
+            events = selector.select(min(remaining, 0.25))
+            if not events and process.poll() is not None:
+                events = [(selector.get_key(descriptor), selectors.EVENT_READ)]
+            for key, _ in events:
+                try:
+                    chunk = os.read(key.fd, min(64 * 1024, max_bytes + 1))
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(key.fd)
+                    continue
+                if len(output) + len(chunk) > max_bytes:
+                    raise PipelineError("{} output exceeded its bound".format(label))
+                output.extend(chunk)
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            raise PipelineError("{} timed out".format(label)) from exc
+        if _process_group_exists(process.pid):
+            _stop_process(process, force=True)
+            raise PipelineError("{} left descendant processes".format(label))
+        if process.returncode:
+            raise PipelineError("{} failed with exit {}".format(label, process.returncode))
+        return bytes(output)
+    except BaseException:
+        _stop_process(process, force=True)
+        raise
+    finally:
+        selector.close()
+        process.stdout.close()
+
+
+def _volume_identity(path):
+    """Return a stable APFS volume UUID for one existing local path."""
+    path = Path(path)
+    if not path.is_absolute() or Path(os.path.abspath(str(path))) != path:
+        raise PipelineError("home-alias volume path must be absolute and normalized")
+    try:
+        before = os.lstat(str(path))
+    except OSError as exc:
+        raise PipelineError("home-alias volume path must exist") from exc
+    if stat.S_ISLNK(before.st_mode) or not (
+        stat.S_ISREG(before.st_mode) or stat.S_ISDIR(before.st_mode)
+    ):
+        raise PipelineError("home-alias volume path must be absolute and existing")
+    df_output = _run_bounded_output(
+        ["/bin/df", "-P", str(path)],
+        64 * 1024,
+        10,
+        "home-alias filesystem inspection",
+    )
+    try:
+        df_lines = [
+            line for line in df_output.decode("utf-8").splitlines() if line.strip()
+        ]
+    except UnicodeDecodeError as exc:
+        raise PipelineError("home-alias filesystem report is not UTF-8") from exc
+    if (
+        len(df_lines) != 2
+        or not df_lines[0].startswith("Filesystem ")
+        or len(df_lines[1].split()) < 6
+    ):
+        raise PipelineError("home-alias filesystem report is invalid")
+    device_node = df_lines[1].split()[0]
+    if not re.fullmatch(r"/dev/[A-Za-z0-9._-]+", device_node):
+        raise PipelineError("home-alias filesystem device is invalid")
+    disk_output = _run_bounded_output(
+        ["/usr/sbin/diskutil", "info", "-plist", device_node],
+        256 * 1024,
+        10,
+        "home-alias APFS inspection",
+    )
+    try:
+        value = plistlib.loads(disk_output)
+    except (plistlib.InvalidFileException, ValueError, TypeError) as exc:
+        raise PipelineError("home-alias volume report is invalid") from exc
+    if not isinstance(value, dict):
+        raise PipelineError("home-alias volume report is not a dictionary")
+    volume_uuid = value.get("VolumeUUID")
+    mount_point = value.get("MountPoint")
+    if (
+        value.get("DeviceNode") != device_node
+        or value.get("FilesystemType") != "apfs"
+        or not isinstance(mount_point, str)
+        or not mount_point.startswith("/")
+        or Path(os.path.abspath(mount_point)) != Path(mount_point)
+        or not Path(mount_point).is_dir()
+        or not isinstance(volume_uuid, str)
+        or not re.fullmatch(
+            r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}",
+            volume_uuid,
+        )
+    ):
+        raise PipelineError("home-alias volume identity is incomplete")
+    mount_stat = os.lstat(mount_point)
+    try:
+        after = os.lstat(str(path))
+    except OSError as exc:
+        raise PipelineError("home-alias volume path changed during inspection") from exc
+    if (
+        stat.S_ISLNK(mount_stat.st_mode)
+        or not stat.S_ISDIR(mount_stat.st_mode)
+        or before.st_dev != mount_stat.st_dev
+        or (before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode))
+        != (after.st_dev, after.st_ino, stat.S_IFMT(after.st_mode))
+    ):
+        raise PipelineError("home-alias path and APFS mount device do not match")
+    return {
+        "device_node": device_node,
+        "mount_point": mount_point,
+        "volume_uuid": volume_uuid.upper(),
+    }
+
+
+def _same_inode_mapping(logical, physical, label, volume_uuid=None):
+    logical_identity = _path_identity(logical)
+    physical_identity = _path_identity(physical)
+    if logical_identity != physical_identity:
+        raise PipelineError("{} alias does not resolve to the same inode".format(label))
+    observed = os.stat(str(physical), follow_symlinks=False)
+    return {
+        "logical": str(logical),
+        "physical": str(physical),
+        "identity": {
+            "volume_uuid": volume_uuid,
+            "device": logical_identity["device"],
+            "inode": logical_identity["inode"],
+            "uid": observed.st_uid,
+            "gid": observed.st_gid,
+            "mode": stat.S_IMODE(observed.st_mode),
+        },
+    }
+
+
+def _require_real_descendant(root, path, label, allow_root_symlink=False):
+    root = Path(root)
+    path = Path(path)
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise PipelineError("{} is outside its declared root".format(label)) from exc
+    cursor = root
+    if (cursor.is_symlink() and not allow_root_symlink) or not cursor.is_dir():
+        raise PipelineError("{} root must be a real directory".format(label))
+    for part in relative.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise PipelineError("{} traverses an extra symlink: {}".format(label, cursor))
+    return relative
+
+
+def _legacy_receipt_inventory(source, developer_dir, alias_context):
+    """Hash the immutable receipt chain without rewriting legacy bytes."""
+    allow_reclaimed_arm = not (source / ARM_OUT).exists()
+    preparation_path, preparation = preparation_contract(
+        source,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
+    )
+    acquisition_path, _ = acquisition_contract(source)
+    tool_path, _ = tool_receipt_contract(source, developer_dir)
+    gn_path, _ = gn_compat_receipt_contract(
+        source, preparation_path, required=True, alias_context=alias_context
+    )
+    xcode_path, _ = xcode27_compat_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
+    )
+    seatbelt_path, _ = xcode27_seatbelt_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
+    )
+    screen_ai_path, _ = screen_ai_disabled_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
+    )
+    linkedit_path, _ = xcode27_linkedit_strip_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
+    )
+    cache_marker = Path(
+        preparation["dependency_contract"]["cache_marker"]["path"]
+    )
+    ordered = (
+        ("acquisition", acquisition_path),
+        ("tool_bootstrap", tool_path),
+        ("dependency_cache", cache_marker),
+        ("preparation", preparation_path),
+        ("gn_compatibility", gn_path),
+        ("xcode27_compatibility", xcode_path),
+        ("xcode27_seatbelt_compatibility", seatbelt_path),
+        ("screen_ai_disabled_compatibility", screen_ai_path),
+        ("xcode27_linkedit_strip_compatibility", linkedit_path),
+    )
+    return {
+        name: {"path": str(path), "sha256": sha256_file(path)}
+        for name, path in ordered
+    }
+
+
+def _build_alias_context(source, developer_dir, logical_home, logical_workspace):
+    source = Path(source)
+    developer_dir = Path(developer_dir)
+    logical_home = Path(logical_home)
+    logical_workspace = Path(logical_workspace)
+    for label, path in (
+        ("source root", source),
+        ("Developer directory", developer_dir),
+        ("logical home", logical_home),
+        ("logical workspace", logical_workspace),
+    ):
+        if not path.is_absolute() or Path(os.path.abspath(str(path))) != path:
+            raise PipelineError("{} must be an absolute normalized path".format(label))
+    if logical_home.parent != Path("/Users"):
+        raise PipelineError("logical home alias must be a direct /Users child")
+    alias_stat = os.lstat(str(logical_home))
+    if not stat.S_ISLNK(alias_stat.st_mode) or alias_stat.st_uid != 0:
+        raise PipelineError("logical home alias must be a root-owned symbolic link")
+    if alias_stat.st_mode & 0o022:
+        raise PipelineError("logical home alias metadata is unexpectedly writable")
+    raw_target = Path(os.readlink(str(logical_home)))
+    if not raw_target.is_absolute():
+        raise PipelineError("logical home alias target must be absolute")
+    physical_home = raw_target.resolve(strict=True)
+    if raw_target != physical_home or physical_home.is_symlink() or not physical_home.is_dir():
+        raise PipelineError("logical home alias target must be one exact real directory")
+    if physical_home.parent != Path("/Users"):
+        raise PipelineError("physical home must be a direct /Users child")
+    physical_home_stat = os.stat(str(physical_home), follow_symlinks=False)
+    if (
+        physical_home_stat.st_uid != os.getuid()
+        or physical_home_stat.st_mode & 0o022
+    ):
+        raise PipelineError("physical home must be owned by the invoking user")
+    workspace_suffix = _require_real_descendant(
+        logical_home,
+        logical_workspace,
+        "logical workspace",
+        allow_root_symlink=True,
+    )
+    source_suffix = _require_real_descendant(
+        logical_workspace, source, "logical Chromium source"
+    )
+    developer_suffix = _require_real_descendant(
+        logical_home,
+        developer_dir,
+        "logical Xcode Developer directory",
+        allow_root_symlink=True,
+    )
+    physical_workspace = physical_home / workspace_suffix
+    physical_source = physical_workspace / source_suffix
+    physical_developer = physical_home / developer_suffix
+    physical_repo = MACOS_DIR.parent.parent
+    repo_suffix = _require_real_descendant(
+        physical_workspace, physical_repo, "physical macOS repository"
+    )
+    logical_repo = logical_workspace / repo_suffix
+    _require_real_descendant(physical_home, physical_workspace, "physical workspace")
+    _require_real_descendant(
+        physical_workspace, physical_source, "physical Chromium source"
+    )
+    _require_real_descendant(
+        physical_home, physical_developer, "physical Xcode Developer directory"
+    )
+    try:
+        validated_source, _ = focus_macos.resolve_source_root(str(physical_source))
+        developer_contract(physical_developer)
+    except focus_macos.ContractError as exc:
+        raise PipelineError(str(exc)) from exc
+    if validated_source != physical_source:
+        raise PipelineError("physical Chromium source identity changed")
+    volume = _volume_identity(physical_home)
+    for label, path in (
+        ("workspace", physical_workspace),
+        ("source", physical_source),
+        ("Developer directory", physical_developer),
+        ("repository", physical_repo),
+    ):
+        if _volume_identity(path)["volume_uuid"] != volume["volume_uuid"]:
+            raise PipelineError("{} is on a different volume".format(label))
+    return AliasContext(
+        logical_home=logical_home,
+        physical_home=physical_home,
+        logical_workspace=logical_workspace,
+        physical_workspace=physical_workspace,
+        logical_source=source,
+        physical_source=physical_source,
+        logical_developer=developer_dir,
+        physical_developer=physical_developer,
+        logical_repo=logical_repo,
+        physical_repo=physical_repo,
+        volume_uuid=volume["volume_uuid"],
+    )
+
+
+def _home_alias_value(source, developer_dir, logical_home, logical_workspace):
+    context = _build_alias_context(
+        source, developer_dir, logical_home, logical_workspace
+    )
+    logical_home = context.logical_home
+    physical_home = context.physical_home
+    alias_stat = os.lstat(str(logical_home))
+    physical_home_stat = os.stat(str(physical_home), follow_symlinks=False)
+    raw_target = Path(os.readlink(str(logical_home)))
+    mappings = {}
+    for name, logical, physical in context.pairs():
+        mappings[name] = _same_inode_mapping(
+            logical, physical, name, volume_uuid=context.volume_uuid
+        )
+    parent_stat = os.stat("/Users", follow_symlinks=False)
+    if (
+        parent_stat.st_uid != 0
+        or not stat.S_ISDIR(parent_stat.st_mode)
+        or parent_stat.st_mode & 0o022
+    ):
+        raise PipelineError("/Users must remain a non-writable root-owned directory")
+    value = {
+        "schema": HOME_ALIAS_RECEIPT_SCHEMA,
+        "logical_home": str(logical_home),
+        "physical_home": str(physical_home),
+        "volume": {
+            "filesystem": "apfs",
+            "volume_uuid": context.volume_uuid,
+        },
+        "alias": {
+            "path": str(logical_home),
+            "target": str(raw_target),
+            "device": alias_stat.st_dev,
+            "inode": alias_stat.st_ino,
+            "uid": alias_stat.st_uid,
+            "gid": alias_stat.st_gid,
+            "mode": stat.S_IMODE(alias_stat.st_mode),
+            "root_owned": True,
+            "absolute_exact_target": True,
+            "target_identity": {
+                "device": physical_home_stat.st_dev,
+                "inode": physical_home_stat.st_ino,
+                "uid": physical_home_stat.st_uid,
+                "gid": physical_home_stat.st_gid,
+                "mode": stat.S_IMODE(physical_home_stat.st_mode),
+                "volume_uuid": context.volume_uuid,
+            },
+        },
+        "mappings": mappings,
+        "legacy_receipts": _legacy_receipt_inventory(
+            context.logical_source, context.logical_developer, context
+        ),
+        "legacy_receipts_rewritten": False,
+        "gn_gen_executed": False,
+        "build_executed": False,
+        "signing_executed": False,
+        "packaging_executed": False,
+        "offline": True,
+        "network_operations": 0,
+    }
+    final_alias_stat = os.lstat(str(logical_home))
+    if (
+        final_alias_stat.st_dev != alias_stat.st_dev
+        or final_alias_stat.st_ino != alias_stat.st_ino
+        or final_alias_stat.st_uid != alias_stat.st_uid
+        or final_alias_stat.st_gid != alias_stat.st_gid
+        or final_alias_stat.st_mode != alias_stat.st_mode
+        or Path(os.readlink(str(logical_home))) != raw_target
+    ):
+        raise PipelineError("logical home alias changed during validation")
+    return value
+
+
+def home_alias_plan(source, developer_dir, logical_home, logical_workspace):
+    receipt = in_source(source, HOME_ALIAS_RECEIPT, "home-alias receipt")
+    if receipt.exists() or receipt.is_symlink():
+        raise PipelineError("home-alias compatibility receipt already exists")
+    value = _home_alias_value(
+        source, developer_dir, logical_home, logical_workspace
+    )
+    return {
+        "stage": "adopt-home-alias",
+        "receipt": str(receipt),
+        "value": value,
+    }
+
+
+def execute_home_alias(
+    source,
+    developer_dir,
+    logical_home,
+    logical_workspace,
+    plan,
+    allow_adoption,
+):
+    if not allow_adoption:
+        raise PipelineError("home-alias adoption requires --confirm-home-alias")
+    expected = home_alias_plan(
+        source, developer_dir, logical_home, logical_workspace
+    )
+    if plan != expected:
+        raise PipelineError("home-alias compatibility changed before execution")
+    return atomic_json(Path(expected["receipt"]), expected["value"])
+
+
+def home_alias_receipt_contract(source, developer_dir):
+    receipt_path = in_source(
+        source, HOME_ALIAS_RECEIPT, "home-alias receipt", must_exist=True
+    )
+    receipt = load_json(receipt_path, "home-alias receipt")
+    expected_keys = {
+        "schema",
+        "logical_home",
+        "physical_home",
+        "volume",
+        "alias",
+        "mappings",
+        "legacy_receipts",
+        "legacy_receipts_rewritten",
+        "gn_gen_executed",
+        "build_executed",
+        "signing_executed",
+        "packaging_executed",
+        "offline",
+        "network_operations",
+    }
+    if (
+        set(receipt) != expected_keys
+        or receipt.get("schema") != HOME_ALIAS_RECEIPT_SCHEMA
+    ):
+        raise PipelineError("home-alias receipt schema mismatch")
+    workspace = receipt.get("mappings", {}).get("workspace", {}).get("logical")
+    if not isinstance(workspace, str):
+        raise PipelineError("home-alias workspace mapping is missing")
+    current = _home_alias_value(
+        source,
+        developer_dir,
+        Path(receipt.get("logical_home", "")),
+        Path(workspace),
+    )
+    def durable(value):
+        value = json.loads(json.dumps(value))
+        value["alias"].pop("device", None)
+        value["alias"]["target_identity"].pop("device", None)
+        for mapping in value["mappings"].values():
+            mapping["identity"].pop("device", None)
+        return value
+
+    recorded_devices = [
+        receipt.get("alias", {}).get("device"),
+        receipt.get("alias", {}).get("target_identity", {}).get("device"),
+    ] + [
+        mapping.get("identity", {}).get("device")
+        for mapping in receipt.get("mappings", {}).values()
+        if isinstance(mapping, dict)
+    ]
+    if any(type(device) is not int or device <= 0 for device in recorded_devices):
+        raise PipelineError("home-alias device observations are invalid")
+    if durable(receipt) != durable(current):
+        raise PipelineError("home-alias identity or immutable receipt chain changed")
+    return receipt_path, receipt
+
+
+def onboarding_alias_root_receipt_contract(source):
+    """Bind resumed builds to the audited fix for Vite's logical-home root."""
+    receipt_path = in_source(
+        source,
+        onboarding_alias_compat.RECEIPT_RELATIVE,
+        "onboarding alias-root receipt",
+        must_exist=True,
+    )
+    receipt = load_json(receipt_path, "onboarding alias-root receipt")
+    trial = receipt.get("trial_evidence")
+    trial_report = trial.get("trial_report") if isinstance(trial, dict) else None
+    failure_report = (
+        trial.get("failure_report") if isinstance(trial, dict) else None
+    )
+    if (
+        not isinstance(trial_report, dict)
+        or not isinstance(failure_report, dict)
+        or not isinstance(trial_report.get("path"), str)
+        or not isinstance(failure_report.get("path"), str)
+    ):
+        raise PipelineError("onboarding alias-root evidence links are missing")
+    try:
+        home_alias = onboarding_alias_compat.validate_home_alias_receipt(source)
+        physical_workspace = Path(
+            home_alias["mappings"]["workspace"]["physical"]
+        )
+        trial_path = (
+            physical_workspace
+            / "work/logs"
+            / onboarding_alias_compat.TRIAL_REPORT_BASENAME
+        )
+        failure_path = (
+            physical_workspace
+            / "work/logs"
+            / onboarding_alias_compat.FAILURE_REPORT_BASENAME
+        )
+        if (
+            Path(trial_report["path"]).name
+            != onboarding_alias_compat.TRIAL_REPORT_BASENAME
+            or Path(failure_report["path"]).name
+            != onboarding_alias_compat.FAILURE_REPORT_BASENAME
+        ):
+            raise onboarding_alias_compat.AliasCompatError(
+                "onboarding alias-root evidence basenames changed"
+            )
+        contract = onboarding_alias_compat.receipt_contract(
+            source,
+            trial_path=trial_path,
+            failure_path=failure_path,
+        )
+    except (KeyError, TypeError, onboarding_alias_compat.AliasCompatError) as exc:
+        raise PipelineError(str(exc)) from exc
+    physical_receipt = Path(contract.get("path", ""))
+    if (
+        physical_receipt.resolve(strict=True)
+        != receipt_path.resolve(strict=True)
+        or contract.get("value") != receipt
+        or contract.get("bytes") != receipt_path.stat().st_size
+        or contract.get("sha256") != sha256_file(receipt_path)
+    ):
+        raise PipelineError("onboarding alias-root receipt contract mismatch")
+    return receipt_path, receipt, {
+        "path": str(receipt_path),
+        "bytes": contract["bytes"],
+        "sha256": contract["sha256"],
+    }
+
+
+def _recorded_alias_context(source, developer_dir=None):
+    """Rebuild the explicit context without trusting persisted device numbers."""
+    receipt_path = in_source(
+        Path(source), HOME_ALIAS_RECEIPT, "home-alias receipt", must_exist=True
+    )
+    receipt = load_json(receipt_path, "home-alias receipt")
+    mappings = receipt.get("mappings")
+    if (
+        receipt.get("schema") != HOME_ALIAS_RECEIPT_SCHEMA
+        or not isinstance(mappings, dict)
+        or set(mappings) != {"workspace", "source", "developer", "repo"}
+    ):
+        raise PipelineError("home-alias receipt schema mismatch")
+    recorded_developer = Path(mappings["developer"].get("logical", ""))
+    if developer_dir is not None and Path(developer_dir) != recorded_developer:
+        raise PipelineError("home-alias Developer directory mismatch")
+    context = _build_alias_context(
+        Path(source),
+        recorded_developer,
+        Path(receipt.get("logical_home", "")),
+        Path(mappings["workspace"].get("logical", "")),
+    )
+    if (
+        receipt.get("physical_home") != str(context.physical_home)
+        or receipt.get("volume")
+        != {"filesystem": "apfs", "volume_uuid": context.volume_uuid}
+    ):
+        raise PipelineError("home-alias stable volume identity changed")
+    for name, logical, physical in context.pairs():
+        recorded = mappings.get(name)
+        current = _same_inode_mapping(
+            logical, physical, name, volume_uuid=context.volume_uuid
+        )
+        if not isinstance(recorded, dict):
+            raise PipelineError("home-alias {} mapping is missing".format(name))
+        recorded_stable = json.loads(json.dumps(recorded))
+        current_stable = json.loads(json.dumps(current))
+        recorded_device = recorded_stable.get("identity", {}).pop("device", None)
+        current_stable.get("identity", {}).pop("device", None)
+        if type(recorded_device) is not int or recorded_device <= 0:
+            raise PipelineError("home-alias device observation is invalid")
+        if recorded_stable != current_stable:
+            raise PipelineError("home-alias {} identity changed".format(name))
+    return context
+
+
+def _home_alias_is_active(source):
+    receipt = in_source(source, HOME_ALIAS_RECEIPT, "home-alias receipt")
+    return receipt.exists() or receipt.is_symlink()
+
+
+def _build_child_environment(source, developer_dir, build_ninja=None):
+    """Construct a child environment, revalidating the alias when applicable."""
+    source = Path(source)
+    developer_dir = Path(developer_dir)
+    if source.resolve(strict=True) != source:
+        context = _recorded_alias_context(source, developer_dir)
+        return safe_environment(
+            source,
+            developer_dir,
+            inherited={"HOME": str(context.logical_home)},
+            build_ninja=build_ninja,
+            alias_context=context,
+        )
+    return safe_environment(source, developer_dir, build_ninja=build_ninja)
+
+
+def _regular_file_snapshot(path):
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        raise PipelineError("execution evidence file must be regular: {}".format(path))
+    descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    digest = hashlib.sha256()
+    with os.fdopen(descriptor, "rb", closefd=True) as stream:
+        observed = os.fstat(stream.fileno())
+        if not stat.S_ISREG(observed.st_mode):
+            raise PipelineError("execution evidence file changed while opening")
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+        after_read = os.fstat(stream.fileno())
+        if (
+            after_read.st_dev != observed.st_dev
+            or after_read.st_ino != observed.st_ino
+            or after_read.st_size != observed.st_size
+            or after_read.st_mtime_ns != observed.st_mtime_ns
+            or after_read.st_ctime_ns != observed.st_ctime_ns
+        ):
+            raise PipelineError("execution evidence file changed while hashing")
+    after_path = os.stat(str(path), follow_symlinks=False)
+    if (
+        after_path.st_dev != observed.st_dev
+        or after_path.st_ino != observed.st_ino
+        or after_path.st_size != observed.st_size
+        or after_path.st_mtime_ns != observed.st_mtime_ns
+        or after_path.st_ctime_ns != observed.st_ctime_ns
+    ):
+        raise PipelineError("execution evidence path changed while hashing")
+    return {
+        "path": str(path),
+        "bytes": observed.st_size,
+        "mtime_ns": observed.st_mtime_ns,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _sha256_file_prefix(path, byte_count):
+    """Hash exactly the first recorded bytes of an unchanged regular inode."""
+    path = Path(path)
+    if type(byte_count) is not int or byte_count < 0:
+        raise PipelineError("prefix byte count is invalid")
+    before = os.stat(str(path), follow_symlinks=False)
+    if path.is_symlink() or not stat.S_ISREG(before.st_mode) or before.st_size < byte_count:
+        raise PipelineError("prefix source is not a large-enough regular file")
+    digest = hashlib.sha256()
+    remaining = byte_count
+    descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(descriptor, "rb", closefd=True) as stream:
+        opened = os.fstat(stream.fileno())
+        if (opened.st_dev, opened.st_ino, opened.st_size) != (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+        ):
+            raise PipelineError("prefix source changed while opening")
+        while remaining:
+            chunk = stream.read(min(1024 * 1024, remaining))
+            if not chunk:
+                raise PipelineError("prefix source was truncated while hashing")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(stream.fileno())
+        if (
+            after.st_size != opened.st_size
+            or after.st_mtime_ns != opened.st_mtime_ns
+            or after.st_ctime_ns != opened.st_ctime_ns
+        ):
+            raise PipelineError("prefix source changed while hashing")
+    return digest.hexdigest()
+
+
+def _ninja_history_snapshot(out):
+    out = Path(out)
+    return {
+        name: _regular_file_snapshot(out / relative)
+        for name, relative in (
+            ("ninja_log", ".ninja_log"),
+            ("ninja_deps", ".ninja_deps"),
+        )
+    }
+
+
+def _ninja_history_exact_contract(recorded, out, label):
+    if not isinstance(recorded, dict) or set(recorded) != {
+        "ninja_log",
+        "ninja_deps",
+    }:
+        raise PipelineError("{} history schema mismatch".format(label))
+    for name in ("ninja_log", "ninja_deps"):
+        expected_path = Path(out) / (
+            ".ninja_log" if name == "ninja_log" else ".ninja_deps"
+        )
+        _validate_recorded_file_snapshot(
+            recorded.get(name), expected_path, "{} {}".format(label, name)
+        )
+    current = _ninja_history_snapshot(out)
+    if recorded != current:
+        raise PipelineError("{} history changed after authorization".format(label))
+    return current
+
+
+def _copy_regular_snapshot(source, destination):
+    """Copy one regular file into a private rollback area and fsync it."""
+    source = Path(source)
+    destination = Path(destination)
+    before = os.stat(str(source), follow_symlinks=False)
+    if source.is_symlink() or not stat.S_ISREG(before.st_mode):
+        raise PipelineError("rollback source is not a regular file")
+    source_fd = os.open(str(source), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    destination_fd = os.open(
+        str(destination), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+    )
+    try:
+        with os.fdopen(source_fd, "rb", closefd=False) as input_stream, os.fdopen(
+            destination_fd, "wb", closefd=False
+        ) as output_stream:
+            shutil.copyfileobj(input_stream, output_stream, 1024 * 1024)
+            output_stream.flush()
+            os.fsync(output_stream.fileno())
+        after = os.fstat(source_fd)
+        if (
+            after.st_dev != before.st_dev
+            or after.st_ino != before.st_ino
+            or after.st_size != before.st_size
+            or after.st_mtime_ns != before.st_mtime_ns
+            or after.st_ctime_ns != before.st_ctime_ns
+        ):
+            raise PipelineError("rollback source changed while copying")
+        os.fchmod(destination_fd, stat.S_IMODE(before.st_mode))
+        os.utime(
+            destination,
+            ns=(before.st_atime_ns, before.st_mtime_ns),
+            follow_symlinks=False,
+        )
+        os.fsync(destination_fd)
+    finally:
+        os.close(source_fd)
+        os.close(destination_fd)
+    return {
+        "backup": str(destination),
+        "mode": stat.S_IMODE(before.st_mode),
+        "atime_ns": before.st_atime_ns,
+        "snapshot": _regular_file_snapshot(source),
+    }
+
+
+def _snapshot_alias_ninja_history(source, snapshot_root):
+    alias_receipt = in_source(source, HOME_ALIAS_RECEIPT, "home-alias receipt")
+    if not alias_receipt.exists() and not alias_receipt.is_symlink():
+        return None
+    out = in_source(
+        source, X64_OUT, "x86_64 output", must_exist=True, directory=True
+    )
+    snapshot_root = Path(snapshot_root)
+    return {
+        "out": str(out),
+        "files": {
+            name: _copy_regular_snapshot(out / relative, snapshot_root / name)
+            for name, relative in (
+                ("ninja_log", ".ninja_log"),
+                ("ninja_deps", ".ninja_deps"),
+            )
+        },
+    }
+
+
+def _restore_alias_ninja_history(rollback):
+    if rollback is None:
+        return
+    out = Path(rollback["out"])
+    for name, relative in (
+        ("ninja_log", ".ninja_log"),
+        ("ninja_deps", ".ninja_deps"),
+    ):
+        item = rollback["files"][name]
+        destination = out / relative
+        current = os.lstat(str(destination))
+        if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode):
+            raise PipelineError("unsafe Ninja history rollback destination")
+        temporary = destination.with_name(
+            ".{}.focus-history-rollback".format(destination.name)
+        )
+        if os.path.lexists(str(temporary)):
+            raise PipelineError("stale Ninja history rollback temporary exists")
+        _copy_regular_snapshot(Path(item["backup"]), temporary)
+        os.chmod(temporary, item["mode"], follow_symlinks=False)
+        os.utime(
+            temporary,
+            ns=(item["atime_ns"], item["snapshot"]["mtime_ns"]),
+            follow_symlinks=False,
+        )
+        temporary_fd = os.open(
+            str(temporary), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            os.fsync(temporary_fd)
+        finally:
+            os.close(temporary_fd)
+        os.replace(str(temporary), str(destination))
+        directory_fd = os.open(str(out), os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        if _regular_file_snapshot(destination) != item["snapshot"]:
+            raise PipelineError("Ninja history rollback did not restore exact bytes")
+
+
+def _fsync_directory(path):
+    descriptor = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _stat_identity_value(observed):
+    return {
+        "device": observed.st_dev,
+        "inode": observed.st_ino,
+        "uid": observed.st_uid,
+        "gid": observed.st_gid,
+        "mode": observed.st_mode,
+        "bytes": observed.st_size,
+        "mtime_ns": observed.st_mtime_ns,
+        "ctime_ns": observed.st_ctime_ns,
+    }
+
+
+def _lstat_identity(path):
+    return _stat_identity_value(os.lstat(str(path)))
+
+
+def _unlink_regular_identity(path, expected, label):
+    """Unlink one exact regular inode using a held parent directory fd."""
+    path = Path(path)
+    if not isinstance(expected, dict) or set(expected) != {
+        "device",
+        "inode",
+        "uid",
+        "gid",
+        "mode",
+        "bytes",
+        "mtime_ns",
+        "ctime_ns",
+    }:
+        raise PipelineError("{} identity schema mismatch".format(label))
+    parent_fd = os.open(
+        str(path.parent),
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    descriptor = None
+    try:
+        current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or _stat_identity_value(current) != expected
+        ):
+            raise PipelineError("{} identity changed before removal".format(label))
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (
+            expected["device"],
+            expected["inode"],
+        ):
+            raise PipelineError("{} changed while opening".format(label))
+        final = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        final_identity = _stat_identity_value(final)
+        if final_identity != expected:
+            raise PipelineError("{} identity changed before unlink".format(label))
+        os.unlink(path.name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent_fd)
+
+
+def _remove_failed_execution_receipt(
+    receipt_path, publication_identity, validator, label
+):
+    """Remove only this execution's invalid publication, never a valid commit."""
+    receipt_path = Path(receipt_path)
+    if not os.path.lexists(str(receipt_path)):
+        return False
+    try:
+        validator()
+    except PipelineError:
+        pass
+    else:
+        raise PipelineError(
+            "{} is a valid committed receipt; refusing rollback".format(label)
+        )
+    if publication_identity is None:
+        raise PipelineError(
+            "{} was not published by this execution; refusing removal".format(label)
+        )
+    observed = _lstat_identity(receipt_path)
+    if observed != publication_identity:
+        raise PipelineError("{} identity changed before rollback".format(label))
+    _unlink_regular_identity(receipt_path, publication_identity, label)
+    return True
+
+
+def _remove_directory_inode(path, expected, label):
+    """Recursively empty and remove only the directory inode authorized earlier."""
+    path = Path(path)
+    if not isinstance(expected, dict) or set(expected) != {
+        "device",
+        "inode",
+        "uid",
+        "gid",
+        "mode",
+    }:
+        raise PipelineError("{} live identity schema mismatch".format(label))
+    parent_fd = os.open(
+        str(path.parent),
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+
+    def remove_children(directory_fd):
+        for name in sorted(os.listdir(directory_fd)):
+            observed = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISDIR(observed.st_mode):
+                child_fd = os.open(
+                    name,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=directory_fd,
+                )
+                try:
+                    opened = os.fstat(child_fd)
+                    if (opened.st_dev, opened.st_ino) != (
+                        observed.st_dev,
+                        observed.st_ino,
+                    ):
+                        raise PipelineError(
+                            "{} child changed while opening".format(label)
+                        )
+                    remove_children(child_fd)
+                    current = os.stat(
+                        name, dir_fd=directory_fd, follow_symlinks=False
+                    )
+                    if (current.st_dev, current.st_ino) != (
+                        opened.st_dev,
+                        opened.st_ino,
+                    ):
+                        raise PipelineError(
+                            "{} child identity changed before rmdir".format(label)
+                        )
+                    os.rmdir(name, dir_fd=directory_fd)
+                finally:
+                    os.close(child_fd)
+            else:
+                os.unlink(name, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+
+    directory_fd = None
+    try:
+        directory_fd = os.open(
+            path.name,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        opened = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (
+                expected.get("device"),
+                expected.get("inode"),
+            )
+        ):
+            raise PipelineError("{} identity changed before cleanup".format(label))
+        remove_children(directory_fd)
+        current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+            raise PipelineError("{} path was replaced during cleanup".format(label))
+        os.rmdir(path.name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+        os.close(parent_fd)
+
+
+def _signing_transaction_targets(source, stage):
+    if stage == "swiftshader":
+        relative = next(iter(SWIFTSHADER_DISABLED_SIGNING_FILES))
+        return {
+            "source_parts": in_source(source, relative, "SwiftShader source rollback"),
+            "packaging_parts": in_source(
+                source,
+                X64_OUT + "/" + PACKAGING_NAME + "/signing/parts.py",
+                "SwiftShader package rollback",
+            ),
+            "ninja_log": in_source(
+                source, X64_OUT + "/.ninja_log", "SwiftShader Ninja log rollback"
+            ),
+            "ninja_deps": in_source(
+                source, X64_OUT + "/.ninja_deps", "SwiftShader Ninja deps rollback"
+            ),
+        }
+    if stage == "adhoc":
+        targets = {}
+        for position, relative in enumerate(ADHOC_RUNTIME_SIGNING_FILES, 1):
+            targets["source_{:02d}".format(position)] = in_source(
+                source, relative, "ad-hoc source rollback"
+            )
+        for position, relative in enumerate(
+            ADHOC_RUNTIME_SIGNING_GENERATED_FILES, 1
+        ):
+            targets["packaging_{:02d}".format(position)] = in_source(
+                source,
+                X64_OUT
+                + "/"
+                + PACKAGING_NAME
+                + "/signing/"
+                + Path(relative).name,
+                "ad-hoc package rollback",
+            )
+        targets["ninja_log"] = in_source(
+            source, X64_OUT + "/.ninja_log", "ad-hoc Ninja log rollback"
+        )
+        targets["ninja_deps"] = in_source(
+            source, X64_OUT + "/.ninja_deps", "ad-hoc Ninja deps rollback"
+        )
+        return targets
+    raise PipelineError("unknown durable signing transaction stage")
+
+
+def _signing_transaction_path(source, stage):
+    relative = (
+        SWIFTSHADER_SIGNING_TRANSACTION
+        if stage == "swiftshader"
+        else ADHOC_SIGNING_TRANSACTION
+    )
+    return in_source(source, relative, "durable signing transaction")
+
+
+def _signing_transaction_cleanup_path(source, stage):
+    root = _signing_transaction_path(source, stage)
+    return root.with_name(root.name + ".cleanup")
+
+
+def _signing_transaction_cleanup_marker_path(source, stage):
+    root = _signing_transaction_path(source, stage)
+    return root.with_name(root.name + ".cleanup-authorization.json")
+
+
+def _signing_transaction_cleanup_marker_temp(source, stage):
+    marker = _signing_transaction_cleanup_marker_path(source, stage)
+    return marker.with_name(
+        ".{}.{}.tmp".format(marker.name, os.urandom(16).hex())
+    )
+
+
+def _live_directory_identity(path):
+    observed = os.lstat(str(path))
+    if not stat.S_ISDIR(observed.st_mode):
+        raise PipelineError("durable signing transaction root is not a directory")
+    return {
+        "device": observed.st_dev,
+        "inode": observed.st_ino,
+        "uid": observed.st_uid,
+        "gid": observed.st_gid,
+        "mode": observed.st_mode,
+    }
+
+
+def _stable_directory_identity(path):
+    before = _live_directory_identity(path)
+    volume_uuid = _volume_identity(path)["volume_uuid"]
+    after = _live_directory_identity(path)
+    if before != after:
+        raise PipelineError(
+            "durable signing transaction root changed during volume inspection"
+        )
+    return {
+        "volume_uuid": volume_uuid,
+        "inode": after["inode"],
+        "uid": after["uid"],
+        "gid": after["gid"],
+        "mode": after["mode"],
+    }
+
+
+def _publish_signing_cleanup_authorization(source, stage, root_identity):
+    marker = _signing_transaction_cleanup_marker_path(source, stage)
+    temporary = _signing_transaction_cleanup_marker_temp(source, stage)
+    if os.path.lexists(str(marker)):
+        raise PipelineError("durable signing cleanup authorization already exists")
+    alias_receipt = in_source(
+        source, HOME_ALIAS_RECEIPT, "home-alias receipt", must_exist=True
+    )
+    value = {
+        "schema": 1,
+        "kind": "focus-macos-signing-cleanup-authorization",
+        "stage": stage,
+        "source_root": str(source),
+        "transaction_root": str(_signing_transaction_path(source, stage)),
+        "cleanup_path": str(_signing_transaction_cleanup_path(source, stage)),
+        "root_identity": root_identity,
+        "home_alias_receipt": {
+            "path": str(alias_receipt),
+            "sha256": sha256_file(alias_receipt),
+        },
+    }
+    data = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    descriptor = os.open(
+        str(temporary), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444
+    )
+    published = False
+    temporary_identity = None
+    try:
+        offset = 0
+        while offset < len(data):
+            written = os.write(descriptor, data[offset:])
+            if written <= 0:
+                raise PipelineError("short cleanup authorization write")
+            offset += written
+        os.fsync(descriptor)
+        temporary_identity = _stat_identity_value(os.fstat(descriptor))
+        try:
+            os.link(str(temporary), str(marker), follow_symlinks=False)
+        except FileExistsError as exc:
+            raise PipelineError(
+                "durable signing cleanup authorization raced"
+            ) from exc
+        published = True
+        temporary_identity = _stat_identity_value(os.fstat(descriptor))
+        os.close(descriptor)
+        descriptor = None
+        try:
+            _unlink_regular_identity(
+                temporary, temporary_identity, "cleanup authorization temporary"
+            )
+        except (OSError, PipelineError):
+            # The uniquely named private link is never trusted or auto-removed
+            # later.  A cleanup failure must not invalidate the published
+            # no-replace authorization marker.
+            pass
+        _fsync_directory(marker.parent)
+        return marker
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        if (
+            not published
+            and temporary_identity is not None
+            and os.path.lexists(str(temporary))
+        ):
+            _unlink_regular_identity(
+                temporary,
+                temporary_identity,
+                "failed cleanup authorization temporary",
+            )
+        raise
+
+
+def _cleanup_signing_transaction_tombstone(source, stage):
+    """Idempotently finish a transaction cleanup atomically authorized earlier."""
+    root = _signing_transaction_path(source, stage)
+    cleanup = _signing_transaction_cleanup_path(source, stage)
+    marker = _signing_transaction_cleanup_marker_path(source, stage)
+    marker_exists = os.path.lexists(str(marker))
+    if not marker_exists:
+        if os.path.lexists(str(cleanup)):
+            raise PipelineError(
+                "durable signing cleanup tombstone has no authorization"
+            )
+        return
+    marker_identity = _lstat_identity(marker)
+    if (
+        not stat.S_ISREG(marker_identity["mode"])
+        or marker_identity["uid"] != os.getuid()
+        or stat.S_IMODE(marker_identity["mode"]) & 0o222
+    ):
+        raise PipelineError("durable signing cleanup authorization is unsafe")
+    authorization = load_json(marker, "durable signing cleanup authorization")
+    alias_receipt = in_source(
+        source, HOME_ALIAS_RECEIPT, "home-alias receipt", must_exist=True
+    )
+    expected_keys = {
+        "schema",
+        "kind",
+        "stage",
+        "source_root",
+        "transaction_root",
+        "cleanup_path",
+        "root_identity",
+        "home_alias_receipt",
+    }
+    if (
+        set(authorization) != expected_keys
+        or authorization.get("schema") != 1
+        or authorization.get("kind")
+        != "focus-macos-signing-cleanup-authorization"
+        or authorization.get("stage") != stage
+        or authorization.get("source_root") != str(source)
+        or authorization.get("transaction_root") != str(root)
+        or authorization.get("cleanup_path") != str(cleanup)
+        or authorization.get("home_alias_receipt")
+        != {"path": str(alias_receipt), "sha256": sha256_file(alias_receipt)}
+    ):
+        raise PipelineError("durable signing cleanup authorization mismatch")
+    root_identity = authorization.get("root_identity")
+    if not isinstance(root_identity, dict) or set(root_identity) != {
+        "volume_uuid",
+        "inode",
+        "uid",
+        "gid",
+        "mode",
+    } or not re.fullmatch(
+        r"[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}",
+        root_identity.get("volume_uuid", ""),
+    ):
+        raise PipelineError("durable signing cleanup root identity is invalid")
+    root_exists = os.path.lexists(str(root))
+    cleanup_exists = os.path.lexists(str(cleanup))
+    if root_exists and cleanup_exists:
+        raise PipelineError("durable signing cleanup has two live roots")
+    if root_exists:
+        if _stable_directory_identity(root) != root_identity:
+            raise PipelineError("durable signing transaction root was replaced")
+        live_identity = _live_directory_identity(root)
+        os.replace(str(root), str(cleanup))
+        _fsync_directory(cleanup.parent)
+        if _live_directory_identity(cleanup) != live_identity:
+            raise PipelineError(
+                "durable signing transaction changed while tombstoning"
+            )
+        cleanup_exists = True
+    if cleanup_exists:
+        if _stable_directory_identity(cleanup) != root_identity:
+            raise PipelineError("durable signing cleanup tombstone was replaced")
+        live_identity = _live_directory_identity(cleanup)
+        _remove_directory_inode(
+            cleanup, live_identity, "durable signing cleanup tombstone"
+        )
+    _unlink_regular_identity(
+        marker, marker_identity, "cleanup authorization marker"
+    )
+
+
+def _fsync_durable_signing_targets(source, stage):
+    """Make every mutation covered by the crash journal durable before receipt."""
+    parents = set()
+    for target in _signing_transaction_targets(source, stage).values():
+        target = Path(target)
+        before = os.stat(str(target), follow_symlinks=False)
+        if target.is_symlink() or not stat.S_ISREG(before.st_mode):
+            raise PipelineError("durable signing target is unsafe before fsync")
+        descriptor = os.open(
+            str(target), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                raise PipelineError("durable signing target changed while opening")
+            os.fsync(descriptor)
+            after = os.fstat(descriptor)
+            if (
+                after.st_dev != opened.st_dev
+                or after.st_ino != opened.st_ino
+                or after.st_size != opened.st_size
+                or after.st_mtime_ns != opened.st_mtime_ns
+                or after.st_ctime_ns != opened.st_ctime_ns
+            ):
+                raise PipelineError("durable signing target changed during fsync")
+            try:
+                current = os.stat(str(target), follow_symlinks=False)
+            except OSError as exc:
+                raise PipelineError(
+                    "durable signing target disappeared after fsync"
+                ) from exc
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or current.st_dev != after.st_dev
+                or current.st_ino != after.st_ino
+                or current.st_size != after.st_size
+                or current.st_mtime_ns != after.st_mtime_ns
+                or current.st_ctime_ns != after.st_ctime_ns
+            ):
+                raise PipelineError(
+                    "durable signing target path changed after fsync"
+                )
+        finally:
+            os.close(descriptor)
+        parents.add(target.parent)
+    for parent in sorted(parents, key=str):
+        if parent.is_symlink() or not parent.is_dir():
+            raise PipelineError("durable signing target parent is unsafe")
+        _fsync_directory(parent)
+
+
+def _begin_durable_signing_transaction(source, stage, receipt_path):
+    if not _home_alias_is_active(source):
+        return None
+    _cleanup_signing_transaction_tombstone(source, stage)
+    root = _signing_transaction_path(source, stage)
+    if os.path.lexists(str(root)):
+        raise PipelineError("durable signing transaction already exists")
+    root.parent.mkdir(parents=True, exist_ok=True)
+    if root.parent.is_symlink() or not root.parent.is_dir():
+        raise PipelineError("durable signing transaction parent is unsafe")
+    root.mkdir(parents=False, exist_ok=False)
+    backups = root / "backups"
+    backups.mkdir()
+    items = []
+    try:
+        for label, target in _signing_transaction_targets(source, stage).items():
+            if target.is_symlink() or not target.is_file():
+                raise PipelineError(
+                    "durable transaction target is not regular: {}".format(target)
+                )
+            item = _copy_regular_snapshot(target, backups / label)
+            os.chmod(item["backup"], 0o444, follow_symlinks=False)
+            backup_fd = os.open(
+                item["backup"], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            )
+            try:
+                os.fsync(backup_fd)
+            finally:
+                os.close(backup_fd)
+            items.append(
+                {
+                    "label": label,
+                    "target": str(target),
+                    "backup": item["backup"],
+                    "backup_sha256": sha256_file(item["backup"]),
+                    "mode": item["mode"],
+                    "atime_ns": item["atime_ns"],
+                    "snapshot": item["snapshot"],
+                }
+            )
+        _fsync_directory(backups)
+        alias_receipt = in_source(
+            source, HOME_ALIAS_RECEIPT, "home-alias receipt", must_exist=True
+        )
+        journal_value = {
+            "schema": 1,
+            "kind": "focus-macos-signing-transaction",
+            "stage": stage,
+            "source_root": str(source),
+            "receipt": str(receipt_path),
+            "home_alias_receipt": {
+                "path": str(alias_receipt),
+                "sha256": sha256_file(alias_receipt),
+            },
+            "files": items,
+            "prepared_before_mutation": True,
+            "offline": True,
+            "network_operations": 0,
+        }
+        journal_report = atomic_json(root / "journal.json", journal_value)
+        os.chmod(journal_report["path"], 0o444, follow_symlinks=False)
+        journal_fd = os.open(
+            journal_report["path"], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            os.fsync(journal_fd)
+        finally:
+            os.close(journal_fd)
+        _fsync_directory(root)
+        _fsync_directory(root.parent)
+        return root
+    except BaseException:
+        # Nothing in the build tree has been mutated yet. Retain a complete
+        # journal for recovery, but remove an incomplete private root.
+        journal = root / "journal.json"
+        if not journal.is_file() or journal.is_symlink():
+            _discard_durable_signing_transaction(source, stage)
+        raise
+
+
+def _load_durable_signing_transaction(source, stage, receipt_path):
+    if not _home_alias_is_active(source):
+        return None
+    _cleanup_signing_transaction_tombstone(source, stage)
+    root = _signing_transaction_path(source, stage)
+    if not os.path.lexists(str(root)):
+        return None
+    if root.is_symlink() or not root.is_dir():
+        raise PipelineError("durable signing transaction root is unsafe")
+    root_stat = os.stat(str(root), follow_symlinks=False)
+    if root_stat.st_uid != os.getuid() or stat.S_IMODE(root_stat.st_mode) & 0o022:
+        raise PipelineError("durable signing transaction ownership is unsafe")
+    receipt_path = Path(receipt_path)
+    receipt_exists = os.path.lexists(str(receipt_path))
+    receipt_identity = None
+    if receipt_exists:
+        receipt_stat = os.lstat(str(receipt_path))
+        if (
+            not stat.S_ISREG(receipt_stat.st_mode)
+            or receipt_stat.st_uid != os.getuid()
+            or stat.S_IMODE(receipt_stat.st_mode) & 0o022
+        ):
+            raise PipelineError("durable signing transaction receipt is unsafe")
+        receipt_identity = _lstat_identity(receipt_path)
+    journal_path = root / "journal.json"
+    if not os.path.lexists(str(journal_path)):
+        # begin() cannot return, and callers cannot mutate targets, before the
+        # immutable journal exists.  A missing journal is therefore either an
+        # interrupted begin or an interrupted cleanup after receipt publication.
+        if receipt_exists:
+            return {
+                "path": str(root),
+                "journal": None,
+                "journal_sha256": None,
+                "receipt_published": True,
+                "receipt_identity": receipt_identity,
+                "cleanup_only": True,
+            }
+        _discard_durable_signing_transaction(source, stage)
+        return None
+    if journal_path.is_symlink() or not journal_path.is_file():
+        raise PipelineError("durable signing transaction journal is unsafe")
+    journal_stat = os.stat(str(journal_path), follow_symlinks=False)
+    if stat.S_IMODE(journal_stat.st_mode) & 0o222:
+        if receipt_exists:
+            return {
+                "path": str(root),
+                "journal": None,
+                "journal_sha256": None,
+                "receipt_published": True,
+                "receipt_identity": receipt_identity,
+                "cleanup_only": True,
+            }
+        # atomic_json publishes before chmod; a mutable journal proves begin()
+        # never returned, so no covered target could have been mutated yet.
+        _discard_durable_signing_transaction(source, stage)
+        return None
+    try:
+        journal = load_json(journal_path, "durable signing transaction journal")
+        expected_keys = {
+            "schema",
+            "kind",
+            "stage",
+            "source_root",
+            "receipt",
+            "home_alias_receipt",
+            "files",
+            "prepared_before_mutation",
+            "offline",
+            "network_operations",
+        }
+        alias_receipt = in_source(
+            source, HOME_ALIAS_RECEIPT, "home-alias receipt", must_exist=True
+        )
+        if (
+            set(journal) != expected_keys
+            or journal.get("schema") != 1
+            or journal.get("kind") != "focus-macos-signing-transaction"
+            or journal.get("stage") != stage
+            or journal.get("source_root") != str(source)
+            or journal.get("receipt") != str(receipt_path)
+            or journal.get("home_alias_receipt")
+            != {"path": str(alias_receipt), "sha256": sha256_file(alias_receipt)}
+            or journal.get("prepared_before_mutation") is not True
+            or journal.get("offline") is not True
+            or journal.get("network_operations") != 0
+        ):
+            raise PipelineError("durable signing transaction journal mismatch")
+        targets = _signing_transaction_targets(source, stage)
+        items = journal.get("files")
+        if not isinstance(items, list) or [
+            item.get("label") for item in items
+        ] != list(targets):
+            raise PipelineError(
+                "durable signing transaction file inventory mismatch"
+            )
+        for item in items:
+            label = item["label"]
+            backup = Path(item.get("backup", ""))
+            expected_backup = root / "backups" / label
+            if (
+                set(item)
+                != {
+                    "label",
+                    "target",
+                    "backup",
+                    "backup_sha256",
+                    "mode",
+                    "atime_ns",
+                    "snapshot",
+                }
+                or item.get("target") != str(targets[label])
+                or backup != expected_backup
+                or backup.is_symlink()
+                or not backup.is_file()
+                or stat.S_IMODE(backup.stat().st_mode) & 0o222
+                or item.get("backup_sha256") != sha256_file(backup)
+            ):
+                raise PipelineError("durable signing transaction backup mismatch")
+            _validate_recorded_file_snapshot(
+                item.get("snapshot"), targets[label], "durable signing backup"
+            )
+    except PipelineError:
+        # An accepted receipt is the authority after commit.  If cleanup was
+        # interrupted, its now-partial private journal is no longer needed;
+        # the execute path must still validate the receipt before discarding it.
+        if receipt_exists:
+            return {
+                "path": str(root),
+                "journal": None,
+                "journal_sha256": None,
+                "receipt_published": True,
+                "receipt_identity": receipt_identity,
+                "cleanup_only": True,
+            }
+        raise
+    return {
+        "path": str(root),
+        "journal": str(journal_path),
+        "journal_sha256": sha256_file(journal_path),
+        "receipt_published": receipt_exists,
+        "receipt_identity": receipt_identity,
+    }
+
+
+def _restore_regular_transaction_item(item):
+    target = Path(item["target"])
+    backup = Path(item["backup"])
+    if os.path.lexists(str(target)):
+        current = os.lstat(str(target))
+        if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode):
+            raise PipelineError("durable signing rollback target is unsafe")
+    temporary = target.with_name(".{}.focus-signing-restore".format(target.name))
+    if os.path.lexists(str(temporary)):
+        observed = os.lstat(str(temporary))
+        if stat.S_ISLNK(observed.st_mode) or not stat.S_ISREG(observed.st_mode):
+            raise PipelineError("durable signing rollback temporary is unsafe")
+        temporary.unlink()
+    _copy_regular_snapshot(backup, temporary)
+    os.chmod(temporary, item["mode"], follow_symlinks=False)
+    os.utime(
+        temporary,
+        ns=(item["atime_ns"], item["snapshot"]["mtime_ns"]),
+        follow_symlinks=False,
+    )
+    temporary_fd = os.open(
+        str(temporary), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        os.fsync(temporary_fd)
+    finally:
+        os.close(temporary_fd)
+    os.replace(str(temporary), str(target))
+    _fsync_directory(target.parent)
+    if _regular_file_snapshot(target) != item["snapshot"]:
+        raise PipelineError("durable signing rollback did not restore exact bytes")
+
+
+def _discard_durable_signing_transaction(source, stage):
+    _cleanup_signing_transaction_tombstone(source, stage)
+    root = _signing_transaction_path(source, stage)
+    if not os.path.lexists(str(root)):
+        return
+    if root.is_symlink() or not root.is_dir():
+        raise PipelineError("durable signing transaction cleanup root is unsafe")
+    root_identity = _stable_directory_identity(root)
+    if (
+        root_identity["uid"] != os.getuid()
+        or stat.S_IMODE(root_identity["mode"]) & 0o022
+    ):
+        raise PipelineError("durable signing transaction cleanup root is unsafe")
+    _publish_signing_cleanup_authorization(source, stage, root_identity)
+    _cleanup_signing_transaction_tombstone(source, stage)
+
+
+def _remove_invalid_transaction_receipt(receipt_path, expected_identity):
+    """Remove only an unaccepted local receipt so journal rollback can proceed."""
+    receipt_path = Path(receipt_path)
+    observed = _lstat_identity(receipt_path)
+    if (
+        not stat.S_ISREG(observed["mode"])
+        or observed["uid"] != os.getuid()
+        or stat.S_IMODE(observed["mode"]) & 0o022
+        or observed != expected_identity
+    ):
+        raise PipelineError("invalid signing transaction receipt is unsafe")
+    _unlink_regular_identity(
+        receipt_path, expected_identity, "invalid signing transaction receipt"
+    )
+
+
+def _restore_durable_signing_transaction(source, stage, receipt_path):
+    recovery = _load_durable_signing_transaction(source, stage, receipt_path)
+    if recovery is None:
+        return
+    journal = load_json(recovery["journal"], "durable signing transaction journal")
+    for item in journal["files"]:
+        _restore_regular_transaction_item(item)
+    _discard_durable_signing_transaction(source, stage)
+
+
+def _toolchain_inventory(out):
+    out = Path(out)
+    files = []
+    for path in sorted(out.rglob("toolchain.ninja")):
+        if path.is_symlink() or not path.is_file():
+            raise PipelineError("toolchain inventory contains an unsafe file")
+        item = _regular_file_snapshot(path)
+        item["relative_path"] = path.relative_to(out).as_posix()
+        item.pop("path")
+        files.append(item)
+    if not files:
+        raise PipelineError("toolchain inventory is empty")
+    encoded = json.dumps(
+        files, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return {
+        "files": files,
+        "count": len(files),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _validate_recorded_file_snapshot(value, expected_path, label):
+    if not isinstance(value, dict) or set(value) != {
+        "path",
+        "bytes",
+        "mtime_ns",
+        "sha256",
+    }:
+        raise PipelineError("{} snapshot schema mismatch".format(label))
+    if (
+        value.get("path") != str(expected_path)
+        or type(value.get("bytes")) is not int
+        or value.get("bytes", -1) < 0
+        or type(value.get("mtime_ns")) is not int
+        or value.get("mtime_ns", 0) <= 0
+        or not re.fullmatch(r"[0-9a-f]{64}", value.get("sha256", ""))
+    ):
+        raise PipelineError("{} snapshot is invalid".format(label))
+
+
+def _validate_recorded_toolchain_inventory(value):
+    if not isinstance(value, dict) or set(value) != {"files", "count", "sha256"}:
+        raise PipelineError("recorded toolchain inventory schema mismatch")
+    files = value.get("files")
+    if not isinstance(files, list) or not files or value.get("count") != len(files):
+        raise PipelineError("recorded toolchain inventory is empty")
+    relative_paths = []
+    for item in files:
+        if not isinstance(item, dict) or set(item) != {
+            "relative_path",
+            "bytes",
+            "mtime_ns",
+            "sha256",
+        }:
+            raise PipelineError("recorded toolchain file schema mismatch")
+        relative = item.get("relative_path")
+        if (
+            not isinstance(relative, str)
+            or not relative.endswith("toolchain.ninja")
+            or relative.startswith("/")
+            or ".." in Path(relative).parts
+            or type(item.get("bytes")) is not int
+            or item.get("bytes", -1) < 0
+            or type(item.get("mtime_ns")) is not int
+            or item.get("mtime_ns", 0) <= 0
+            or not re.fullmatch(r"[0-9a-f]{64}", item.get("sha256", ""))
+        ):
+            raise PipelineError("recorded toolchain file is invalid")
+        relative_paths.append(relative)
+    if relative_paths != sorted(set(relative_paths)):
+        raise PipelineError("recorded toolchain paths are not unique and sorted")
+    encoded = json.dumps(
+        files, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    if value.get("sha256") != hashlib.sha256(encoded).hexdigest():
+        raise PipelineError("recorded toolchain inventory hash mismatch")
+
+
+def _execution_identity_mapping(mapping):
+    return {
+        "logical": mapping["logical"],
+        "physical": mapping["physical"],
+        "device": mapping["identity"]["device"],
+        "inode": mapping["identity"]["inode"],
+    }
+
+
+def _execution_evidence_path(path, alias_receipt, label):
+    path = Path(path)
+    if not path.is_absolute() or Path(os.path.abspath(str(path))) != path:
+        raise PipelineError("{} path is not absolute and normalized".format(label))
+    roots = (
+        Path(alias_receipt["mappings"]["workspace"]["logical"]),
+        Path(alias_receipt["mappings"]["workspace"]["physical"]),
+    )
+    for root in roots:
+        try:
+            _require_real_descendant(root, path, label)
+            return path
+        except PipelineError:
+            pass
+    raise PipelineError("{} is outside the recorded workspace".format(label))
+
+
+def _physical_execution_path(logical_path, alias_receipt, label):
+    """Map one logical workspace path through only the recorded home alias."""
+    logical_path = Path(logical_path)
+    logical_root = Path(alias_receipt["mappings"]["workspace"]["logical"])
+    physical_root = Path(alias_receipt["mappings"]["workspace"]["physical"])
+    try:
+        relative = logical_path.relative_to(logical_root)
+    except ValueError as exc:
+        raise PipelineError("{} is outside the logical workspace".format(label)) from exc
+    physical = physical_root / relative
+    _require_real_descendant(physical_root, physical, label)
+    return physical
+
+
+def _linked_execution_evidence(link, alias_receipt, label):
+    if not isinstance(link, dict) or set(link) != {"path", "sha256"}:
+        raise PipelineError("{} link schema mismatch".format(label))
+    path = _execution_evidence_path(link.get("path", ""), alias_receipt, label)
+    if path.is_symlink() or not path.is_file():
+        raise PipelineError("{} must be a regular file".format(label))
+    observed = os.stat(str(path), follow_symlinks=False)
+    if observed.st_uid != os.getuid() or stat.S_IMODE(observed.st_mode) & 0o222:
+        raise PipelineError("{} ownership or mode is unsafe".format(label))
+    if _volume_identity(path)["volume_uuid"] != alias_receipt["volume"][
+        "volume_uuid"
+    ]:
+        raise PipelineError("{} volume changed".format(label))
+    if link["sha256"] != sha256_file(path):
+        raise PipelineError("{} hash changed".format(label))
+    return path, load_json(path, label)
+
+
+def _validate_live_process_observation(
+    observation, initial_path, initial_hash, record, alias_receipt, ninja
+):
+    if (
+        not isinstance(observation, dict)
+        or observation.get("schema") != 1
+        or observation.get("kind")
+        != "focus-macos-alias-raw-ninja-live-process-chain-observation"
+    ):
+        raise PipelineError("resume live process observation schema mismatch")
+    initial = observation.get("existing_execution_part")
+    required_snapshot = {
+        "path",
+        "bytes",
+        "mtime_ns",
+        "sha256",
+        "device",
+        "inode",
+        "uid",
+        "gid",
+        "mode",
+    }
+    if not isinstance(initial, dict) or set(initial) != required_snapshot:
+        raise PipelineError("observed initial execution record schema mismatch")
+    current_initial = os.stat(str(initial_path), follow_symlinks=False)
+    if (
+        Path(initial.get("path", "")).resolve(strict=True)
+        != initial_path.resolve(strict=True)
+        or initial.get("sha256") != initial_hash
+        or initial.get("bytes") != current_initial.st_size
+        or initial.get("mtime_ns") != current_initial.st_mtime_ns
+        or initial.get("inode") != current_initial.st_ino
+        or initial.get("uid") != current_initial.st_uid
+        or initial.get("gid") != current_initial.st_gid
+        or initial.get("mode") & 0o022
+        or stat.S_IMODE(current_initial.st_mode) & 0o222
+        or type(initial.get("device")) is not int
+        or initial.get("device", 0) <= 0
+        or initial.get("mtime_ns", 0) > observation.get("observed_at_ns", 0)
+    ):
+        raise PipelineError("observed initial execution record changed")
+    observed_at = observation.get("observed_at_ns")
+    if (
+        type(observed_at) is not int
+        or observed_at < record["process"]["observed_live_at_ns"]
+        or observed_at > record["completion"]["ended_at_ns"]
+    ):
+        raise PipelineError("resume live process observation time is invalid")
+    group = observation.get("process_group")
+    members = group.get("members") if isinstance(group, dict) else None
+    if (
+        not isinstance(members, list)
+        or group.get("pgid") != record["process"]["pgid"]
+    ):
+        raise PipelineError("resume live process group schema mismatch")
+    by_role = {}
+    observed_pids = set()
+    for member in members:
+        if not isinstance(member, dict) or not isinstance(member.get("role"), str):
+            raise PipelineError("resume live process member is invalid")
+        role = member["role"]
+        pid = member.get("pid")
+        ppid = member.get("ppid")
+        if (
+            role in by_role
+            or type(pid) is not int
+            or pid <= 1
+            or pid in observed_pids
+            or type(ppid) is not int
+            or ppid <= 1
+        ):
+            raise PipelineError("resume live process role or PID is invalid")
+        if member.get("pgid") != group["pgid"]:
+            raise PipelineError("resume live process escaped its process group")
+        by_role[role] = member
+        observed_pids.add(pid)
+    expected_roles = {
+        "pipeline_shell_group_leader",
+        "autoninja_shell",
+        "stdout_tee",
+        "depot_python_launcher_shell",
+        "autoninja_python",
+        "pinned_ninja",
+        "ninja_caffeinate",
+    }
+    if set(by_role) != expected_roles:
+        raise PipelineError("resume live process roles mismatch")
+    leader = by_role["pipeline_shell_group_leader"]
+    autoninja_shell = by_role["autoninja_shell"]
+    tee = by_role["stdout_tee"]
+    launcher = by_role["depot_python_launcher_shell"]
+    python = by_role["autoninja_python"]
+    pinned = by_role["pinned_ninja"]
+    caffeinate = by_role["ninja_caffeinate"]
+    if (
+        leader.get("pid") != group["pgid"]
+        or leader.get("pid") != record["process"]["pid"]
+        or leader.get("ppid") in observed_pids
+        or leader.get("executable") != "/bin/zsh"
+        or autoninja_shell.get("ppid") != leader.get("pid")
+        or tee.get("ppid") != leader.get("pid")
+        or launcher.get("ppid") != autoninja_shell.get("pid")
+        or python.get("ppid") != launcher.get("pid")
+        or pinned.get("ppid") != python.get("pid")
+        or caffeinate.get("ppid") != pinned.get("pid")
+    ):
+        raise PipelineError("resume live process parent chain mismatch")
+    logical_source = Path(record["logical"]["source"])
+    physical_source = logical_source.resolve(strict=True)
+    logical_out = Path(record["logical"]["out"])
+    physical_out = logical_out.resolve(strict=True)
+    expected_autoninja = Path(record["process"]["argv"][0])
+    depot = logical_source.parent / "depot_tools"
+    physical_depot = depot.resolve(strict=True)
+    logical_autoninja_py = depot / "autoninja.py"
+    physical_autoninja_py = logical_autoninja_py.resolve(strict=True)
+    physical_python = (
+        physical_depot / PACKAGING_PYTHON_RELDIR / "python3.11"
+    ).resolve(strict=True)
+    physical_ninja = Path(ninja["path"]).resolve(strict=True)
+    physical_stdout = _physical_execution_path(
+        Path(record["stdout_log"]["path"]),
+        alias_receipt,
+        "resume live stdout path",
+    )
+    declared_args = " ".join(record["process"]["argv"])
+    environment = record["process"]["environment"]
+    environment_order = (
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "TZ",
+        "DEVELOPER_DIR",
+        "PATH",
+        "DEPOT_TOOLS_UPDATE",
+        "DEPOT_TOOLS_METRICS",
+        "GCLIENT_FILE",
+        "PYTHONDONTWRITEBYTECODE",
+        "NINJA_SUMMARIZE_BUILD",
+    )
+    environment_command = " ".join(
+        "{}={}".format(name, environment[name]) for name in environment_order
+    )
+    trailing_args = " ".join(record["process"]["argv"][1:])
+    pinned_command = "{} -d stats {}".format(ninja["path"], trailing_args)
+    expected_commands = {
+        "pipeline_shell_group_leader": (
+            "/bin/zsh -lc set -o pipefail\\012/usr/bin/env -i {} {} 2>&1 | "
+            "/usr/bin/tee -a {}"
+        ).format(environment_command, declared_args, physical_stdout),
+        "autoninja_shell": "bash {} {}".format(
+            expected_autoninja, trailing_args
+        ),
+        "stdout_tee": "/usr/bin/tee -a {}".format(physical_stdout),
+        "depot_python_launcher_shell": "bash {} {} {}".format(
+            depot / "python-bin" / "python3",
+            logical_autoninja_py,
+            trailing_args,
+        ),
+        "autoninja_python": "{} {} {}".format(
+            depot
+            / "python-bin"
+            / ".."
+            / PACKAGING_PYTHON_RELDIR
+            / "python3",
+            logical_autoninja_py,
+            trailing_args,
+        ),
+        "pinned_ninja": pinned_command,
+        "ninja_caffeinate": "caffeinate {}".format(pinned_command),
+    }
+    expected_executables = {
+        "pipeline_shell_group_leader": Path("/bin/zsh"),
+        "autoninja_shell": Path("/bin/bash"),
+        "stdout_tee": Path("/usr/bin/tee"),
+        "depot_python_launcher_shell": Path("/bin/bash"),
+        "autoninja_python": physical_python,
+        "pinned_ninja": physical_ninja,
+        "ninja_caffeinate": Path("/usr/bin/caffeinate"),
+    }
+    for role, member in by_role.items():
+        expected_cwd = physical_out if role == "pinned_ninja" else physical_source
+        executable = expected_executables[role]
+        if (
+            member.get("ps_command") != expected_commands[role]
+            or member.get("cwd_physical") != str(expected_cwd)
+            or Path(member.get("executable", "")) != executable
+            or member.get("executable_sha256") != sha256_file(executable)
+            or not isinstance(member.get("started_at_local_second"), str)
+            or not member.get("started_at_local_second")
+        ):
+            raise PipelineError("resume live {} identity mismatch".format(role))
+    if (
+        Path(autoninja_shell.get("script", "")).resolve(strict=True)
+        != expected_autoninja.resolve(strict=True)
+        or autoninja_shell.get("script_sha256") != sha256_file(expected_autoninja)
+        or Path(pinned.get("executable", "")).resolve(strict=True)
+        != Path(ninja["path"]).resolve(strict=True)
+        or pinned.get("executable_sha256") != ninja["sha256"]
+        or pinned.get("executable_bytes") != Path(ninja["path"]).stat().st_size
+    ):
+        raise PipelineError("resume live tool process identity mismatch")
+    expected_environment = dict(record["process"]["environment"])
+    expected_environment.pop("PATH")
+    expected_environment["PWD"] = str(Path(record["logical"]["source"]).resolve())
+    if (
+        python.get("allowlisted_environment") != expected_environment
+        or pinned.get("allowlisted_environment") != expected_environment
+    ):
+        raise PipelineError("resume live process environment mismatch")
+    live_stdout = observation.get("stdout_log_live_snapshot")
+    if not isinstance(live_stdout, dict) or set(live_stdout) != required_snapshot:
+        raise PipelineError("resume live stdout observation schema mismatch")
+    stdout_path = Path(record["stdout_log"]["path"])
+    physical_stdout = _physical_execution_path(
+        stdout_path, alias_receipt, "resume live stdout observation"
+    )
+    final_stdout_stat = os.stat(str(stdout_path), follow_symlinks=False)
+    if (
+        Path(live_stdout.get("path", "")) != physical_stdout
+        or live_stdout.get("inode") != record["stdout_log"]["inode"]
+        or live_stdout.get("uid") != os.getuid()
+        or live_stdout.get("gid") != final_stdout_stat.st_gid
+        or live_stdout.get("mode") & 0o022
+        or not re.fullmatch(r"[0-9a-f]{64}", live_stdout.get("sha256", ""))
+        or live_stdout.get("bytes", 0) <= 0
+        or live_stdout.get("bytes", 0) > final_stdout_stat.st_size
+        or live_stdout.get("mtime_ns", 0) < record["stdout_log"]["birth_time_ns"]
+        or live_stdout.get("mtime_ns", 0) > observed_at
+        or type(live_stdout.get("device")) is not int
+        or live_stdout.get("device", 0) <= 0
+    ):
+        raise PipelineError("resume live stdout observation mismatch")
+    if _sha256_file_prefix(
+        stdout_path, live_stdout["bytes"]
+    ) != live_stdout["sha256"]:
+        raise PipelineError("resume live stdout is not a prefix of the final log")
+
+
+def _validate_live_environment_supplement(
+    supplement,
+    observation_path,
+    observation_hash,
+    record,
+    supplement_path,
+    primary_observation,
+):
+    if (
+        not isinstance(supplement, dict)
+        or supplement.get("schema") != 1
+        or supplement.get("kind")
+        != "focus-macos-alias-raw-ninja-live-process-chain-observation-supplement"
+    ):
+        raise PipelineError("resume live environment supplement schema mismatch")
+    primary = supplement.get("primary_observation")
+    observation_stat = os.stat(str(observation_path), follow_symlinks=False)
+    if (
+        not isinstance(primary, dict)
+        or set(primary) != {"path", "bytes", "inode", "sha256"}
+        or Path(primary.get("path", "")).resolve(strict=True)
+        != observation_path.resolve(strict=True)
+        or primary.get("bytes") != observation_stat.st_size
+        or primary.get("inode") != observation_stat.st_ino
+        or primary.get("sha256") != observation_hash
+    ):
+        raise PipelineError("resume environment supplement observation link mismatch")
+    observed_at = supplement.get("observed_at_ns")
+    if (
+        type(observed_at) is not int
+        or observed_at < record["process"]["observed_live_at_ns"]
+        or observed_at > record["completion"]["ended_at_ns"]
+        or supplement_path.stat().st_size <= 0
+    ):
+        raise PipelineError("resume environment supplement time is invalid")
+    processes = supplement.get("processes")
+    if not isinstance(processes, list) or len(processes) != 2:
+        raise PipelineError("resume environment supplement process schema mismatch")
+    by_role = {item.get("role"): item for item in processes if isinstance(item, dict)}
+    if set(by_role) != {"autoninja_python", "pinned_ninja"}:
+        raise PipelineError("resume environment supplement roles mismatch")
+    primary_roles = {
+        item.get("role"): item
+        for item in primary_observation.get("process_group", {}).get("members", ())
+        if isinstance(item, dict)
+    }
+    if not {"depot_python_launcher_shell", "autoninja_python", "pinned_ninja"}.issubset(
+        primary_roles
+    ):
+        raise PipelineError("resume environment supplement primary chain is missing")
+    source = Path(record["logical"]["source"])
+    python_bin = (
+        source.parent
+        / "depot_tools"
+        / "python-bin"
+        / ".."
+        / PACKAGING_PYTHON_RELDIR
+    )
+    expected_path = os.pathsep.join(
+        (
+            str(python_bin),
+            str(python_bin / "Scripts"),
+            record["process"]["environment"]["PATH"],
+        )
+    )
+    expected_pwd = str(source.resolve(strict=True))
+    for role, expected_parent in (
+        (
+            "autoninja_python",
+            primary_roles["depot_python_launcher_shell"].get("pid"),
+        ),
+        ("pinned_ninja", primary_roles["autoninja_python"].get("pid")),
+    ):
+        item = by_role[role]
+        primary_item = primary_roles[role]
+        if (
+            item.get("pid") != primary_item.get("pid")
+            or item.get("pgid") != record["process"]["pgid"]
+            or item.get("ppid") != expected_parent
+            or item.get("PATH") != expected_path
+            or item.get("PWD") != expected_pwd
+        ):
+            raise PipelineError("resume live child environment mismatch")
+
+
+def _validate_live_process_revalidation(
+    revalidation,
+    initial_path,
+    observation_path,
+    supplement_path,
+    record,
+    alias_receipt,
+    primary_observation,
+    environment_supplement,
+):
+    if (
+        not isinstance(revalidation, dict)
+        or revalidation.get("schema") != 1
+        or revalidation.get("kind")
+        != "focus-macos-alias-raw-ninja-live-process-chain-revalidation"
+    ):
+        raise PipelineError("resume process revalidation schema mismatch")
+    started = revalidation.get("capture_started_at_ns")
+    finished = revalidation.get("capture_finished_at_ns")
+    if (
+        type(started) is not int
+        or type(finished) is not int
+        or started < primary_observation.get("observed_at_ns", 0)
+        or started < environment_supplement.get("observed_at_ns", 0)
+        or finished < started
+        or finished > record["completion"]["ended_at_ns"]
+    ):
+        raise PipelineError("resume process revalidation time is invalid")
+    if revalidation.get("volume", {}).get("uuid") != alias_receipt["volume"][
+        "volume_uuid"
+    ]:
+        raise PipelineError("resume process revalidation volume mismatch")
+    start_check = revalidation.get("claimed_start_time_check")
+    if (
+        not isinstance(start_check, dict)
+        or start_check.get("matches") is not True
+        or start_check.get("allowed_tolerance_ns") != 1_000_000_000
+        or start_check.get("initial_record_process_started_at_ns")
+        != record["process"]["started_at_ns"]
+        or abs(
+            start_check.get("group_leader_ps_second_start_ns", 0)
+            - record["process"]["started_at_ns"]
+        )
+        > start_check.get("allowed_tolerance_ns", -1)
+    ):
+        raise PipelineError("resume process start-time revalidation mismatch")
+    links = revalidation.get("linked_evidence")
+    expected_links = {
+        "initial_record": (initial_path, record["initial_record"]["sha256"]),
+        "primary_observation": (
+            observation_path,
+            record["live_process_observation"]["sha256"],
+        ),
+        "environment_supplement": (
+            supplement_path,
+            record["live_process_environment_supplement"]["sha256"],
+        ),
+    }
+    if not isinstance(links, dict) or set(links) != set(expected_links):
+        raise PipelineError("resume process revalidation evidence links mismatch")
+    for name, (path, digest) in expected_links.items():
+        link = links[name]
+        observed = os.stat(str(path), follow_symlinks=False)
+        if (
+            not isinstance(link, dict)
+            or Path(link.get("path", "")).resolve(strict=True)
+            != path.resolve(strict=True)
+            or link.get("bytes") != observed.st_size
+            or link.get("inode") != observed.st_ino
+            or link.get("sha256") != digest
+        ):
+            raise PipelineError(
+                "resume process revalidation {} link mismatch".format(name)
+            )
+    initial_link = links["initial_record"]
+    initial_stat = os.stat(str(initial_path), follow_symlinks=False)
+    initial_birth_ns = int(
+        getattr(initial_stat, "st_birthtime", initial_stat.st_ctime)
+        * 1_000_000_000
+    )
+    if (
+        set(initial_link)
+        != {"path", "birth_time_ns", "bytes", "inode", "mode", "sha256"}
+        or initial_link.get("birth_time_ns") != initial_birth_ns
+        or initial_link.get("mode") != stat.S_IMODE(initial_stat.st_mode)
+        or initial_birth_ns < record["process"]["started_at_ns"]
+        or initial_birth_ns > primary_observation.get("observed_at_ns", 0)
+        or initial_stat.st_mtime_ns > primary_observation.get("observed_at_ns", 0)
+    ):
+        raise PipelineError("resume process initial evidence timing mismatch")
+    primary_members = {
+        item["role"]: {
+            key: item[key]
+            for key in ("role", "pid", "ppid", "pgid", "ps_command", "started_at_local_second")
+        }
+        for item in primary_observation["process_group"]["members"]
+    }
+    spine = revalidation.get("stable_spine")
+    if (
+        not isinstance(spine, list)
+        or {item.get("role") for item in spine if isinstance(item, dict)}
+        != set(primary_members)
+    ):
+        raise PipelineError("resume process stable spine schema mismatch")
+    if {item["role"]: item for item in spine} != primary_members:
+        raise PipelineError("resume process stable spine changed")
+    scripts = revalidation.get("script_identities")
+    expected_scripts = {
+        str(Path(record["process"]["argv"][0]).resolve(strict=True)),
+        str(
+            (
+                Path(record["logical"]["source"]).parent
+                / "depot_tools"
+                / "autoninja.py"
+            ).resolve(strict=True)
+        ),
+    }
+    if not isinstance(scripts, list) or {
+        str(Path(item.get("path", "")).resolve(strict=True)) for item in scripts
+    } != expected_scripts:
+        raise PipelineError("resume process script identities mismatch")
+    for item in scripts:
+        path = Path(item["path"])
+        observed = os.stat(str(path), follow_symlinks=False)
+        if (
+            item.get("bytes") != observed.st_size
+            or item.get("inode") != observed.st_ino
+            or item.get("uid") != observed.st_uid
+            or item.get("gid") != observed.st_gid
+            or item.get("mode") != stat.S_IMODE(observed.st_mode)
+            or item.get("sha256") != sha256_file(path)
+            or type(item.get("device_at_capture")) is not int
+        ):
+            raise PipelineError("resume process script identity changed")
+    stdout = revalidation.get("stdout_log_identity")
+    logical_stdout = Path(record["stdout_log"]["path"])
+    physical_stdout = _physical_execution_path(
+        logical_stdout, alias_receipt, "resume stdout physical path"
+    )
+    if (
+        not isinstance(stdout, dict)
+        or Path(stdout.get("logical_path", "")) != logical_stdout
+        or Path(stdout.get("physical_path", "")) != physical_stdout
+        or physical_stdout.resolve(strict=True) != logical_stdout.resolve(strict=True)
+        or stdout.get("inode") != record["stdout_log"]["inode"]
+        or stdout.get("birth_time_ns") != record["stdout_log"]["birth_time_ns"]
+        or stdout.get("bytes_at_capture_finish", 0) <= 0
+        or stdout.get("bytes_at_capture_finish", 0)
+        < primary_observation.get("stdout_log_live_snapshot", {}).get("bytes", 0)
+        or stdout.get("bytes_at_capture_finish", 0)
+        > record["completion"]["stdout_log"].get("bytes", 0)
+    ):
+        raise PipelineError("resume process stdout revalidation mismatch")
+
+
+def _resume_execution_initial_basename(record_path, architecture):
+    name = Path(record_path).name
+    if architecture == "arm64":
+        pattern = r"build-arm64-resume3-[A-Za-z0-9][A-Za-z0-9._-]*\.execution\.json"
+    elif architecture == "x64":
+        pattern = r"build-x64-resume[1-9][0-9]*-[A-Za-z0-9][A-Za-z0-9._-]*\.execution\.json"
+    else:
+        raise PipelineError("unsupported resume execution architecture")
+    if re.fullmatch(pattern, name) is None:
+        raise PipelineError(
+            "resume execution record basename is not the authorized fresh run"
+        )
+    return name + ".part"
+
+
+def resume_execution_record_contract(
+    record_path,
+    alias_receipt,
+    source,
+    developer_dir,
+    architecture,
+    out,
+    ninja,
+    allow_history_growth=False,
+    authorized_history=None,
+):
+    """Validate the contemporaneous, completed raw Ninja execution record."""
+    record_path = _execution_evidence_path(
+        record_path, alias_receipt, "resume execution record"
+    )
+    expected_initial_basename = _resume_execution_initial_basename(
+        record_path, architecture
+    )
+    logical_workspace = Path(alias_receipt["mappings"]["workspace"]["logical"])
+    if (
+        not record_path.name.endswith(".execution.json")
+        or record_path.name.endswith(".part")
+        or record_path.is_symlink()
+        or not record_path.is_file()
+    ):
+        raise PipelineError("resume execution record must be a final regular JSON file")
+    record_stat = os.stat(str(record_path), follow_symlinks=False)
+    if (
+        record_stat.st_uid != os.getuid()
+        or stat.S_IMODE(record_stat.st_mode) & 0o222
+    ):
+        raise PipelineError("resume execution record ownership or mode is unsafe")
+    expected_volume_uuid = alias_receipt.get("volume", {}).get("volume_uuid")
+    if _volume_identity(record_path)["volume_uuid"] != expected_volume_uuid:
+        raise PipelineError("resume execution record volume changed")
+    record = load_json(record_path, "resume execution record")
+    historical_keys = {
+        "schema",
+        "kind",
+        "architecture",
+        "logical",
+        "process",
+        "identity",
+        "pre_run",
+        "stdout_log",
+        "completion",
+    }
+    final_keys = historical_keys | {
+        "initial_record",
+        "live_process_observation",
+        "live_process_environment_supplement",
+        "live_process_revalidation",
+    }
+    if (
+        set(record) != final_keys
+        or record.get("schema") != 2
+        or record.get("kind") != "focus-macos-alias-raw-ninja-execution"
+    ):
+        raise PipelineError("resume execution record schema mismatch")
+    initial_path, initial_record = _linked_execution_evidence(
+        record.get("initial_record"), alias_receipt, "initial execution record"
+    )
+    if (
+        not initial_path.name.endswith(".execution.json.part")
+        or initial_path.name != expected_initial_basename
+        or set(initial_record) != historical_keys
+        or initial_record.get("schema") != 1
+        or initial_record.get("completion") is not None
+        or initial_record.get("kind") != record.get("kind")
+    ):
+        raise PipelineError("initial execution record schema mismatch")
+    for key in historical_keys - {"schema", "completion"}:
+        if record.get(key) != initial_record.get(key):
+            raise PipelineError("final execution record rewrote historical evidence")
+    observation_path, observation = _linked_execution_evidence(
+        record.get("live_process_observation"),
+        alias_receipt,
+        "live process observation",
+    )
+    supplement_path, supplement = _linked_execution_evidence(
+        record.get("live_process_environment_supplement"),
+        alias_receipt,
+        "live process environment supplement",
+    )
+    revalidation_path, revalidation = _linked_execution_evidence(
+        record.get("live_process_revalidation"),
+        alias_receipt,
+        "live process revalidation",
+    )
+    if record.get("architecture") != architecture:
+        raise PipelineError("resume execution architecture mismatch")
+    expected_logical = {
+        "home": alias_receipt["logical_home"],
+        "workspace": logical_workspace.as_posix(),
+        "source": str(source),
+        "developer_dir": str(developer_dir),
+        "out": str(out),
+    }
+    if record.get("logical") != expected_logical:
+        raise PipelineError("resume execution logical paths mismatch")
+    expected_argv = [
+        str(source.parent / "depot_tools" / "autoninja"),
+        "-j{}".format(BUILD_JOBS),
+        "-C",
+        str(Path(out).relative_to(source)),
+        "chrome",
+        "chrome/installer/mac:copies",
+    ]
+    expected_environment = {
+        "HOME": alias_receipt["logical_home"],
+        "LANG": "C",
+        "LC_ALL": "C",
+        "TZ": "UTC",
+        "DEVELOPER_DIR": str(developer_dir),
+        "PATH": os.pathsep.join(
+            (
+                str(source.parent / "depot_tools"),
+                str(Path(ninja["path"]).parent),
+                SYSTEM_PATH,
+            )
+        ),
+        "DEPOT_TOOLS_UPDATE": "0",
+        "DEPOT_TOOLS_METRICS": "0",
+        "GCLIENT_FILE": str(source.parent / ".gclient"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "NINJA_SUMMARIZE_BUILD": "1",
+    }
+    process = record.get("process")
+    if not isinstance(process, dict) or set(process) != {
+        "pid",
+        "pgid",
+        "started_at_ns",
+        "observed_live_at_ns",
+        "cwd",
+        "argv",
+        "environment",
+    }:
+        raise PipelineError("resume execution process schema mismatch")
+    if (
+        type(process.get("pid")) is not int
+        or process.get("pid", 0) <= 1
+        or process.get("pgid") != process.get("pid")
+        or type(process.get("started_at_ns")) is not int
+        or type(process.get("observed_live_at_ns")) is not int
+        or process.get("started_at_ns", 0) <= 0
+        or process.get("observed_live_at_ns", 0) < process.get("started_at_ns", 0)
+        or process.get("cwd") != str(source)
+        or process.get("argv") != expected_argv
+        or process.get("environment") != expected_environment
+    ):
+        raise PipelineError("resume execution process provenance mismatch")
+    alias_identity = dict(alias_receipt["alias"])
+    alias_identity.pop("root_owned", None)
+    alias_identity.pop("absolute_exact_target", None)
+    alias_identity.pop("target_identity", None)
+    expected_identity = {
+        "alias": alias_identity,
+        "source": _execution_identity_mapping(
+            alias_receipt["mappings"]["source"]
+        ),
+        "developer": _execution_identity_mapping(
+            alias_receipt["mappings"]["developer"]
+        ),
+    }
+    if record.get("identity") != expected_identity:
+        raise PipelineError("resume execution inode identity mismatch")
+    pre = record.get("pre_run")
+    if not isinstance(pre, dict) or set(pre) != {
+        "ninja_log",
+        "ninja_deps",
+        "build_ninja",
+        "toolchain_inventory",
+    }:
+        raise PipelineError("resume execution pre-run schema mismatch")
+    for name, relative in (
+        ("ninja_log", ".ninja_log"),
+        ("ninja_deps", ".ninja_deps"),
+        ("build_ninja", "build.ninja"),
+    ):
+        _validate_recorded_file_snapshot(
+            pre.get(name), Path(out) / relative, "pre-run {}".format(name)
+        )
+    _validate_recorded_toolchain_inventory(pre.get("toolchain_inventory"))
+    stdout_initial = record.get("stdout_log")
+    if not isinstance(stdout_initial, dict) or set(stdout_initial) != {
+        "path",
+        "device",
+        "inode",
+        "birth_time_ns",
+    }:
+        raise PipelineError("resume stdout-log observation schema mismatch")
+    stdout_path = Path(stdout_initial.get("path", ""))
+    _require_real_descendant(logical_workspace, stdout_path, "resume stdout log")
+    if stdout_path.is_symlink() or not stdout_path.is_file():
+        raise PipelineError("resume stdout log is not regular")
+    stdout_stat = os.stat(str(stdout_path), follow_symlinks=False)
+    if (
+        stdout_stat.st_uid != os.getuid()
+        or stdout_stat.st_mode & 0o022
+        or stdout_stat.st_size <= 0
+        or stdout_stat.st_size > MAX_RESUME_STDOUT_BYTES
+    ):
+        raise PipelineError("resume stdout log ownership or mode is unsafe")
+    if _volume_identity(stdout_path)["volume_uuid"] != expected_volume_uuid:
+        raise PipelineError("resume stdout log volume changed")
+    stdout_birth_ns = int(
+        getattr(stdout_stat, "st_birthtime", stdout_stat.st_ctime)
+        * 1_000_000_000
+    )
+    if (
+        stdout_initial.get("path") != str(stdout_path)
+        or type(stdout_initial.get("device")) is not int
+        or stdout_initial.get("device", 0) <= 0
+        or stdout_initial.get("inode") != stdout_stat.st_ino
+        or stdout_initial.get("birth_time_ns") != stdout_birth_ns
+    ):
+        raise PipelineError("resume stdout log inode changed")
+    completion = record.get("completion")
+    if not isinstance(completion, dict) or set(completion) != {
+        "ended_at_ns",
+        "observed_at_ns",
+        "wrapper_exit_code",
+        "pipefail",
+        "pipeline_success_derived",
+        "stdout_log",
+        "post_run",
+        "explicit_gn_gen_command",
+    }:
+        raise PipelineError("resume execution is not finalized")
+    if (
+        completion.get("wrapper_exit_code") != 0
+        or completion.get("pipefail") is not True
+        or completion.get("pipeline_success_derived") is not True
+        or completion.get("explicit_gn_gen_command") is not False
+        or type(completion.get("ended_at_ns")) is not int
+        or type(completion.get("observed_at_ns")) is not int
+        or completion.get("ended_at_ns", 0) < process["started_at_ns"]
+        or completion.get("ended_at_ns", 0) < process["observed_live_at_ns"]
+        or completion.get("observed_at_ns", 0) < completion.get("ended_at_ns", 0)
+    ):
+        raise PipelineError("resume execution did not complete successfully")
+    final_stdout = _regular_file_snapshot(stdout_path)
+    final_stdout.update(
+        {
+            "device": stdout_initial["device"],
+            "inode": stdout_stat.st_ino,
+            "birth_time_ns": stdout_birth_ns,
+        }
+    )
+    live_stdout = observation.get("stdout_log_live_snapshot", {})
+    if (
+        stdout_birth_ns < process["started_at_ns"]
+        or stdout_birth_ns > process["observed_live_at_ns"]
+        or final_stdout["mtime_ns"] < live_stdout.get("mtime_ns", 0)
+        or final_stdout["mtime_ns"] > completion["ended_at_ns"] + 1_000_000_000
+        or final_stdout["mtime_ns"] > completion["observed_at_ns"]
+    ):
+        raise PipelineError("resume stdout log timing is invalid")
+    if completion.get("stdout_log") != final_stdout:
+        raise PipelineError("resume stdout log changed after completion")
+    _validate_live_process_observation(
+        observation,
+        initial_path,
+        record["initial_record"]["sha256"],
+        record,
+        alias_receipt,
+        ninja,
+    )
+    _validate_live_environment_supplement(
+        supplement,
+        observation_path,
+        record["live_process_observation"]["sha256"],
+        record,
+        supplement_path,
+        observation,
+    )
+    _validate_live_process_revalidation(
+        revalidation,
+        initial_path,
+        observation_path,
+        supplement_path,
+        record,
+        alias_receipt,
+        observation,
+        supplement,
+    )
+    post = completion.get("post_run")
+    if not isinstance(post, dict) or set(post) != set(pre):
+        raise PipelineError("resume execution post-run schema mismatch")
+    for name, relative in (
+        ("ninja_log", ".ninja_log"),
+        ("ninja_deps", ".ninja_deps"),
+        ("build_ninja", "build.ninja"),
+    ):
+        _validate_recorded_file_snapshot(
+            post.get(name), Path(out) / relative, "post-run {}".format(name)
+        )
+    _validate_recorded_toolchain_inventory(post.get("toolchain_inventory"))
+    current_post = {
+        "ninja_log": _regular_file_snapshot(Path(out) / ".ninja_log"),
+        "ninja_deps": _regular_file_snapshot(Path(out) / ".ninja_deps"),
+        "build_ninja": _regular_file_snapshot(Path(out) / "build.ninja"),
+        "toolchain_inventory": _toolchain_inventory(out),
+    }
+    if allow_history_growth:
+        if authorized_history is None:
+            raise PipelineError(
+                "resumed Ninja history growth lacks an authorized phase snapshot"
+            )
+        if (
+            post["build_ninja"] != current_post["build_ninja"]
+            or post["toolchain_inventory"]
+            != current_post["toolchain_inventory"]
+        ):
+            raise PipelineError(
+                "resumed Ninja graph changed after recorded completion"
+            )
+        _ninja_history_exact_contract(
+            authorized_history,
+            out,
+            "authorized resumed Ninja phase",
+        )
+    elif post != current_post:
+        raise PipelineError("resumed Ninja graph changed after recorded completion")
+    if pre["build_ninja"] != post["build_ninja"]:
+        raise PipelineError("raw resume unexpectedly regenerated build.ninja")
+    if pre["toolchain_inventory"] != post["toolchain_inventory"]:
+        raise PipelineError("raw resume unexpectedly changed toolchain.ninja")
+    if pre["ninja_log"]["sha256"] == post["ninja_log"]["sha256"]:
+        raise PipelineError("raw resume did not change .ninja_log")
+    if post["ninja_log"]["mtime_ns"] <= pre["ninja_log"]["mtime_ns"]:
+        raise PipelineError("raw resume .ninja_log timestamp regressed")
+    pre_deps = pre["ninja_deps"]
+    post_deps = post["ninja_deps"]
+    if post_deps["mtime_ns"] < pre_deps["mtime_ns"]:
+        raise PipelineError("raw resume .ninja_deps timestamp regressed")
+    if pre_deps["sha256"] == post_deps["sha256"] and pre_deps != post_deps:
+        raise PipelineError("raw resume .ninja_deps metadata changed without bytes")
+    return {
+        "path": str(record_path),
+        "sha256": sha256_file(record_path),
+        "started_at_ns": process["started_at_ns"],
+        "ended_at_ns": completion["ended_at_ns"],
+        "wrapper_exit_code": completion["wrapper_exit_code"],
+        "pipefail": True,
+        "pipeline_success_derived": True,
+        "pre_run": pre,
+        "post_run": post,
+        "stdout_log": final_stdout,
+        "explicit_gn_gen_command": False,
+    }
+
+
+def _count_stream_needles(path, needles, expected_stat):
+    counts = {needle: 0 for needle in needles}
+    digest = hashlib.sha256()
+    overlap = max((len(needle) for needle in needles), default=1) - 1
+    tail = b""
+    descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(descriptor, "rb", closefd=True) as stream:
+        opened = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_dev != expected_stat.st_dev
+            or opened.st_ino != expected_stat.st_ino
+            or opened.st_size != expected_stat.st_size
+        ):
+            raise PipelineError("resumed output changed while opening: {}".format(path))
+        while True:
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            data = tail + chunk
+            stable = len(data) if overlap == 0 else max(0, len(data) - overlap)
+            for needle in needles:
+                start = 0
+                while True:
+                    position = data.find(needle, start)
+                    if position < 0 or position >= stable:
+                        break
+                    counts[needle] += 1
+                    start = position + len(needle)
+            tail = data[stable:]
+        closed_snapshot = os.fstat(stream.fileno())
+        if (
+            closed_snapshot.st_size != opened.st_size
+            or closed_snapshot.st_mtime_ns != opened.st_mtime_ns
+            or closed_snapshot.st_ctime_ns != opened.st_ctime_ns
+        ):
+            raise PipelineError("resumed output changed while scanning: {}".format(path))
+    for needle in needles:
+        start = 0
+        while True:
+            position = tail.find(needle, start)
+            if position < 0:
+                break
+            counts[needle] += 1
+            start = position + len(needle)
+    return counts, digest.hexdigest()
+
+
+def changed_path_scan(root, resume_start_ns, logical_home, physical_home):
+    """Inventory changed nodes and scan the full tree for physical-home leaks."""
+    root = Path(root)
+    if root.is_symlink() or not root.is_dir():
+        raise PipelineError("mixed-path scan root must be a real directory")
+    logical = str(logical_home).encode("utf-8")
+    physical = str(physical_home).encode("utf-8")
+    inventory = hashlib.sha256()
+    files = 0
+    directories = 0
+    symlinks = 0
+    logical_occurrences = 0
+    physical_occurrences = 0
+    logical_files = 0
+    scanned_bytes = 0
+    first_forbidden = None
+    full_files = 0
+    full_symlinks = 0
+    full_scanned_bytes = 0
+    full_logical_occurrences = 0
+    full_physical_occurrences = 0
+    full_inventory = hashlib.sha256()
+    def record_node(path, relative, observed, kind):
+        nonlocal files, directories, symlinks, logical_occurrences
+        nonlocal physical_occurrences, logical_files, scanned_bytes
+        nonlocal first_forbidden
+        nonlocal full_files, full_symlinks, full_scanned_bytes
+        nonlocal full_logical_occurrences, full_physical_occurrences
+        if observed.st_uid != os.getuid():
+            raise PipelineError("resumed output ownership changed: {}".format(path))
+        changed_ns = max(observed.st_mtime_ns, observed.st_ctime_ns)
+        symlink_body = None
+        counts = {logical: 0, physical: 0}
+        body_hash = hashlib.sha256(b"").hexdigest()
+        size = 0
+        if kind == "symlink":
+            symlink_body = os.readlink(str(path))
+            target = Path(symlink_body)
+            if target.is_absolute():
+                raise PipelineError(
+                    "absolute symlink in resumed output: {}".format(path)
+                )
+            lexical_target = Path(
+                os.path.normpath(str(path.parent / target))
+            )
+            try:
+                lexical_target.relative_to(root)
+            except ValueError as exc:
+                raise PipelineError(
+                    "symlink escapes resumed output: {}".format(path)
+                ) from exc
+            body = symlink_body.encode("utf-8")
+            counts = {
+                logical: body.count(logical),
+                physical: body.count(physical),
+            }
+            body_hash = hashlib.sha256(body).hexdigest()
+            size = len(body)
+            full_symlinks += 1
+        elif kind == "file":
+            counts, body_hash = _count_stream_needles(
+                path, (logical, physical), observed
+            )
+            size = observed.st_size
+            full_files += 1
+        relative_bytes = relative.encode("utf-8")
+        counts[logical] += relative_bytes.count(logical)
+        counts[physical] += relative_bytes.count(physical)
+        full_scanned_bytes += size
+        full_logical_occurrences += counts[logical]
+        full_physical_occurrences += counts[physical]
+        if kind != "directory":
+            full_inventory.update(
+                "{}\0{}\0{}\0{}\0{}\n".format(
+                    kind,
+                    relative,
+                    size,
+                    body_hash,
+                    counts[logical],
+                ).encode("utf-8")
+            )
+        if counts[physical] and first_forbidden is None:
+            first_forbidden = relative
+        if changed_ns < resume_start_ns:
+            return
+        if kind == "symlink":
+            symlinks += 1
+        elif kind == "file":
+            files += 1
+        elif kind == "directory":
+            counts = {logical: 0, physical: 0}
+            body_hash = hashlib.sha256(b"").hexdigest()
+            directories += 1
+            size = 0
+        else:
+            raise PipelineError("unknown mixed-path inventory node")
+        scanned_bytes += size
+        logical_occurrences += counts[logical]
+        physical_occurrences += counts[physical]
+        if counts[logical]:
+            logical_files += 1
+        inventory.update(
+            "{}\0{}\0{}\0{}\0{}\0{}\n".format(
+                kind,
+                relative,
+                size,
+                changed_ns,
+                body_hash,
+                counts[logical],
+            ).encode("utf-8")
+        )
+
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        directory = Path(directory)
+        traversable = []
+        for name in sorted(dirnames):
+            path = directory / name
+            relative = path.relative_to(root).as_posix()
+            observed = os.lstat(str(path))
+            if stat.S_ISLNK(observed.st_mode):
+                record_node(path, relative, observed, "symlink")
+            elif stat.S_ISDIR(observed.st_mode):
+                record_node(path, relative, observed, "directory")
+                traversable.append(name)
+            else:
+                raise PipelineError(
+                    "special directory entry in resumed output: {}".format(path)
+                )
+        dirnames[:] = traversable
+        for name in sorted(filenames):
+            path = directory / name
+            relative = path.relative_to(root).as_posix()
+            if relative == SLICE_RECEIPT_NAME:
+                continue
+            observed = os.lstat(str(path))
+            if stat.S_ISLNK(observed.st_mode):
+                record_node(path, relative, observed, "symlink")
+            elif stat.S_ISREG(observed.st_mode):
+                record_node(path, relative, observed, "file")
+            else:
+                raise PipelineError(
+                    "special file changed during raw Ninja resume: {}".format(path)
+                )
+    if full_physical_occurrences:
+        raise PipelineError(
+            "physical home leaked into resumed output: {}".format(first_forbidden)
+        )
+    if files + directories + symlinks <= 0:
+        raise PipelineError("mixed-path scan found no files changed since resume")
+    return {
+        "schema": 1,
+        "root": str(root),
+        "resume_start_ns": resume_start_ns,
+        "changed_regular_files": files,
+        "changed_directories": directories,
+        "changed_symlinks": symlinks,
+        "scanned_bytes": scanned_bytes,
+        "logical_home": str(logical_home),
+        "logical_home_matching_files": logical_files,
+        "logical_home_occurrences": logical_occurrences,
+        "physical_home": str(physical_home),
+        "physical_home_occurrences": full_physical_occurrences,
+        "mixed_paths": False,
+        "inventory_sha256": inventory.hexdigest(),
+        "full_path_scan": {
+            "regular_files": full_files,
+            "symlinks": full_symlinks,
+            "scanned_bytes": full_scanned_bytes,
+            "logical_home_occurrences": full_logical_occurrences,
+            "physical_home_occurrences": full_physical_occurrences,
+            "inventory_sha256": full_inventory.hexdigest(),
+        },
+    }
+
+
+def _collect_bounded_probe_output(process, timeout_seconds=60):
+    """Drain one merged stdout pipe without ever exceeding the hard cap."""
+    if process.stdout is None:
+        raise PipelineError("raw Ninja no-work probe has no stdout pipe")
+    output = bytearray()
+    deadline = time.monotonic() + timeout_seconds
+    selector = selectors.DefaultSelector()
+    descriptor = process.stdout.fileno()
+    os.set_blocking(descriptor, False)
+    selector.register(descriptor, selectors.EVENT_READ)
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PipelineError("raw Ninja no-work probe timed out")
+            events = selector.select(min(remaining, 0.25))
+            if not events and process.poll() is not None:
+                events = [(selector.get_key(descriptor), selectors.EVENT_READ)]
+            for key, _ in events:
+                try:
+                    chunk = os.read(key.fd, 64 * 1024)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(key.fd)
+                    continue
+                if len(output) + len(chunk) > MAX_NO_WORK_OUTPUT_BYTES:
+                    raise PipelineError(
+                        "raw Ninja no-work probe output exceeded 1 MiB"
+                    )
+                output.extend(chunk)
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            raise PipelineError("raw Ninja no-work probe timed out") from exc
+        if _process_group_exists(process.pid):
+            _stop_process(process, force=True)
+            raise PipelineError(
+                "raw Ninja no-work probe left descendant processes"
+            )
+        return bytes(output)
+    except BaseException:
+        _stop_process(process, force=True)
+        raise
+    finally:
+        selector.close()
+        process.stdout.close()
+
+
+def _ninja_no_work_contract(
+    source, developer_dir, out_relative, ninja, alias_context=None
+):
+    command = [
+        ninja["path"],
+        "-n",
+        "-C",
+        out_relative,
+        "chrome",
+        "chrome/installer/mac:copies",
+    ]
+    if alias_context is None and Path(source).resolve(strict=True) != Path(source):
+        alias_context = _recorded_alias_context(source, developer_dir)
+    inherited = None
+    if alias_context is not None:
+        inherited = {"HOME": str(alias_context.logical_home)}
+    environment = safe_environment(
+        source,
+        developer_dir,
+        inherited=inherited,
+        build_ninja=Path(ninja["path"]),
+        alias_context=alias_context,
+    )
+    process = subprocess.Popen(
+        command,
+        cwd=str(source),
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    raw_output = _collect_bounded_probe_output(process)
+    try:
+        output = raw_output.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PipelineError("raw Ninja no-work output is not UTF-8") from exc
+    lines = [line for line in output.splitlines() if line]
+    allowed_lines = (
+        ["ninja: no work to do."],
+        [
+            "ninja: Entering directory `{}'".format(out_relative),
+            "ninja: no work to do.",
+        ],
+    )
+    if (
+        process.returncode
+        or lines not in allowed_lines
+    ):
+        raise PipelineError("raw Ninja resume is not complete:\n{}".format(output.strip()))
+    return {
+        "command": command,
+        "returncode": process.returncode,
+        "output_bytes": len(raw_output),
+        "output_sha256": hashlib.sha256(raw_output).hexdigest(),
+        "bounded_output_limit": MAX_NO_WORK_OUTPUT_BYTES,
+        "no_work": True,
+    }
+
+
+def _live_alias_slice_no_work(
+    source, developer_dir, architecture, authorized_history=None
+):
+    """Re-prove a resumed alias slice only at an executing boundary."""
+    alias_receipt = in_source(source, HOME_ALIAS_RECEIPT, "home-alias receipt")
+    if not alias_receipt.exists() and not alias_receipt.is_symlink():
+        return None
+    if architecture != "x64":
+        raise PipelineError("unsupported downstream alias no-work architecture")
+    out = in_source(
+        source, X64_OUT, "x86_64 output", must_exist=True, directory=True
+    )
+    _, receipt = slice_receipt_contract(
+        source,
+        out,
+        "x64",
+        allow_resumed_history_growth=(authorized_history is not None),
+        authorized_resumed_history=authorized_history,
+    )
+    if receipt.get("schema") != RESUMED_SLICE_RECEIPT_SCHEMA:
+        raise PipelineError("downstream alias x64 receipt is not schema two")
+    history_boundary = (
+        authorized_history
+        if authorized_history is not None
+        else _ninja_history_snapshot(out)
+    )
+    _ninja_history_exact_contract(
+        history_boundary, out, "authorized downstream signing"
+    )
+    report = _ninja_no_work_contract(
+        source,
+        developer_dir,
+        X64_OUT,
+        ninja_contract(source),
+        alias_context=_recorded_alias_context(source, developer_dir),
+    )
+    _ninja_history_exact_contract(
+        history_boundary, out, "post-probe authorized downstream signing"
+    )
+    return report
+
+
+def resumed_slice_plan(source, developer_dir, architecture, resume_record):
+    alias_path, alias_receipt = home_alias_receipt_contract(
+        source, developer_dir
+    )
+    alias_context = _recorded_alias_context(source, developer_dir)
+    acquisition_contract(source)
+    tool_receipt_contract(source, developer_dir)
+    if architecture == "x64":
+        reclaim_contract(source)
+        out_relative = X64_OUT
+        expected_arch = "x86_64"
+        allow_reclaimed_arm = True
+    elif architecture == "arm64":
+        out_relative = ARM_OUT
+        expected_arch = "arm64"
+        allow_reclaimed_arm = False
+    else:
+        raise PipelineError("unsupported resumed slice architecture")
+    preparation_contract(
+        source,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
+    )
+    xcode_path, _ = xcode27_compat_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
+    )
+    seatbelt_path, _ = xcode27_seatbelt_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
+    )
+    screen_ai_path, _ = screen_ai_disabled_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
+    )
+    linkedit_path, linkedit = xcode27_linkedit_strip_receipt_contract(
+        source,
+        developer_dir,
+        required=True,
+        allow_reclaimed_arm=allow_reclaimed_arm,
+        alias_context=alias_context,
+    )
+    _, _, onboarding_alias_root = onboarding_alias_root_receipt_contract(source)
+    out = in_source(
+        source, out_relative, "resumed build output", must_exist=True, directory=True
+    )
+    receipt = out / SLICE_RECEIPT_NAME
+    if receipt.exists() or receipt.is_symlink():
+        raise PipelineError("refusing to overwrite resumed build receipt")
+    args = out / "args.gn"
+    if args.is_symlink() or not args.is_file():
+        raise PipelineError("resumed output is missing args.gn")
+    app = out / APP_NAME
+    report = app_report(app, (expected_arch,))
+    app_tree_sha256 = tree_digest(app)
+    packaging = out / PACKAGING_NAME
+    if packaging.is_symlink() or not packaging.is_dir():
+        raise PipelineError("resumed output is missing the signing package")
+    sign_script = packaging / "sign_chrome.py"
+    if sha256_file(sign_script) != SIGN_CHROME_SHA256:
+        raise PipelineError("resumed sign_chrome.py hash mismatch")
+    ninja = ninja_contract(source)
+    generated_linkedit = generated_linkedit_strip_contract(out, linkedit["tools"])
+    execution = resume_execution_record_contract(
+        resume_record,
+        alias_receipt,
+        source,
+        developer_dir,
+        architecture,
+        out,
+        ninja,
+    )
+    mixed = changed_path_scan(
+        out,
+        execution["started_at_ns"],
+        Path(alias_receipt["logical_home"]),
+        Path(alias_receipt["physical_home"]),
+    )
+    return {
+        "stage": "finalize-resumed-{}".format(architecture),
+        "architecture": architecture,
+        "out": str(out),
+        "receipt": str(receipt),
+        "app": report,
+        "app_tree_sha256": app_tree_sha256,
+        "args_gn_sha256": sha256_file(args),
+        "packaging": str(packaging),
+        "home_alias_compatibility": {
+            "path": str(alias_path),
+            "sha256": sha256_file(alias_path),
+        },
+        "onboarding_alias_root_compatibility": onboarding_alias_root,
+        "resume_execution": execution,
+        "mixed_path_scan": mixed,
+        "no_work_probe_command": [
+            ninja["path"],
+            "-n",
+            "-C",
+            out_relative,
+            "chrome",
+            "chrome/installer/mac:copies",
+        ],
+        "ninja": ninja,
+        "generated_linkedit_strip": generated_linkedit,
+        "xcode27_compatibility_receipt_sha256": sha256_file(xcode_path),
+        "xcode27_seatbelt_compatibility_receipt_sha256": sha256_file(
+            seatbelt_path
+        ),
+        "screen_ai_disabled_compatibility_receipt_sha256": sha256_file(
+            screen_ai_path
+        ),
+        "xcode27_linkedit_strip_compatibility_receipt_sha256": sha256_file(
+            linkedit_path
+        ),
+    }
+
+
+def execute_resumed_slice(
+    source,
+    developer_dir,
+    architecture,
+    resume_record,
+    plan,
+    allow_finalize,
+):
+    if not allow_finalize:
+        raise PipelineError(
+            "resumed slice finalization requires --confirm-resumed-slice"
+        )
+    expected = resumed_slice_plan(
+        source, developer_dir, architecture, resume_record
+    )
+    if plan != expected:
+        raise PipelineError("resumed slice changed before receipt publication")
+    out_relative = ARM_OUT if architecture == "arm64" else X64_OUT
+    no_work = _ninja_no_work_contract(
+        source,
+        developer_dir,
+        out_relative,
+        expected["ninja"],
+        alias_context=_recorded_alias_context(source, developer_dir),
+    )
+    final_expected = resumed_slice_plan(
+        source, developer_dir, architecture, resume_record
+    )
+    if final_expected != expected:
+        raise PipelineError("resumed slice changed during no-work acceptance")
+    receipt = {
+        "schema": RESUMED_SLICE_RECEIPT_SCHEMA,
+        "architecture": architecture,
+        "mach_o_architecture": (
+            "arm64" if architecture == "arm64" else "x86_64"
+        ),
+        "source_root": str(source),
+        "app": expected["app"],
+        "app_tree_sha256": expected["app_tree_sha256"],
+        "args_gn_sha256": expected["args_gn_sha256"],
+        "preparation_receipt_sha256": sha256_file(
+            in_source(
+                source, PREPARATION_RECEIPT, "preparation receipt", must_exist=True
+            )
+        ),
+        "xcode27_compatibility_receipt_sha256": expected[
+            "xcode27_compatibility_receipt_sha256"
+        ],
+        "xcode27_seatbelt_compatibility_receipt_sha256": expected[
+            "xcode27_seatbelt_compatibility_receipt_sha256"
+        ],
+        "screen_ai_disabled_compatibility_receipt_sha256": expected[
+            "screen_ai_disabled_compatibility_receipt_sha256"
+        ],
+        "xcode27_linkedit_strip_compatibility_receipt_sha256": expected[
+            "xcode27_linkedit_strip_compatibility_receipt_sha256"
+        ],
+        "generated_linkedit_strip": expected["generated_linkedit_strip"],
+        "tool_receipt_sha256": sha256_file(source.parent / TOOL_RECEIPT),
+        "ninja": expected["ninja"],
+        "sign_chrome_sha256": SIGN_CHROME_SHA256,
+        "home_alias_compatibility": expected["home_alias_compatibility"],
+        "onboarding_alias_root_compatibility": expected[
+            "onboarding_alias_root_compatibility"
+        ],
+        "resume_execution": expected["resume_execution"],
+        "mixed_path_scan": expected["mixed_path_scan"],
+        "no_work_probe": no_work,
+        "raw_ninja_completed": True,
+        "gn_gen_executed_by_finalizer": False,
+        "build_command_executed_by_finalizer": False,
+        "build_complete": True,
+    }
+    report = atomic_json(Path(expected["receipt"]), receipt)
+    home_alias_receipt_contract(source, developer_dir)
+    slice_receipt_contract(source, Path(expected["out"]), architecture)
+    return report
+
+
 def build_plan(source, developer_dir, architecture):
+    alias_receipt = in_source(source, HOME_ALIAS_RECEIPT, "home-alias receipt")
+    if alias_receipt.exists() or alias_receipt.is_symlink():
+        raise PipelineError(
+            "home-alias compatibility forbids GN regeneration; use a completed "
+            "recorded raw-Ninja execution and finalize-resumed-*"
+        )
     acquisition_contract(source)
     tool_receipt_contract(source, developer_dir)
     if architecture == "x64":
@@ -4687,7 +8662,9 @@ def stage_arm_plan(source):
     tool_receipt_contract(source)
     preparation_contract(source)
     arm_out = in_source(source, ARM_OUT, "arm64 output", must_exist=True, directory=True)
-    build_receipt_path, _ = slice_receipt_contract(source, arm_out, "arm64")
+    build_receipt_path, build_receipt = slice_receipt_contract(
+        source, arm_out, "arm64"
+    )
     app_report(arm_out / APP_NAME, ("arm64",))
     staged = in_source(source, STAGED_ARM_APP, "staged arm64 app")
     receipt = in_source(source, STAGE_RECEIPT, "stage receipt")
@@ -4712,6 +8689,9 @@ def stage_arm_plan(source):
         "receipt": str(receipt),
         "reclaim_receipt": str(reclaim),
         "build_receipt": str(build_receipt_path),
+        "requires_live_no_work": (
+            build_receipt.get("schema") == RESUMED_SLICE_RECEIPT_SCHEMA
+        ),
         "partial_root": str(partial_root),
         "partial_app": str(partial_root / APP_NAME),
         "ditto_command": [
@@ -4725,6 +8705,27 @@ def stage_arm_plan(source):
 def execute_stage_arm(source, plan, allow_reclaim):
     if not allow_reclaim:
         raise PipelineError("stage-arm64 execution requires --allow-reclaim-arm64-out")
+    expected_plan = stage_arm_plan(source)
+    if plan != expected_plan:
+        raise PipelineError("arm64 staging plan changed before execution")
+    build_receipt = load_json(plan["build_receipt"], "arm64 build receipt")
+    no_work = None
+    alias_context = None
+    if plan.get("requires_live_no_work"):
+        if build_receipt.get("schema") != RESUMED_SLICE_RECEIPT_SCHEMA:
+            raise PipelineError("resumed arm64 staging receipt schema changed")
+        tool_receipt = load_json(
+            source.parent / TOOL_RECEIPT, "tool bootstrap receipt"
+        )
+        developer_dir = Path(tool_receipt["developer_dir"])
+        alias_context = _recorded_alias_context(source, developer_dir)
+        no_work = _ninja_no_work_contract(
+            source,
+            developer_dir,
+            ARM_OUT,
+            ninja_contract(source),
+            alias_context=alias_context,
+        )
     require_free(source, SOFT_FLOOR_GIB, "arm64 staging")
     source_app = Path(plan["source_app"])
     staged_app = Path(plan["staged_app"])
@@ -4733,7 +8734,15 @@ def execute_stage_arm(source, plan, allow_reclaim):
     partial_root.mkdir(parents=True, exist_ok=False)
     try:
         tool_receipt = load_json(source.parent / TOOL_RECEIPT, "tool bootstrap receipt")
-        environment = safe_environment(source, Path(tool_receipt["developer_dir"]))
+        inherited = None
+        if alias_context is not None:
+            inherited = {"HOME": str(alias_context.logical_home)}
+        environment = safe_environment(
+            source,
+            Path(tool_receipt["developer_dir"]),
+            inherited=inherited,
+            alias_context=alias_context,
+        )
         run_monitored(
             plan["ditto_command"],
             source,
@@ -4760,12 +8769,11 @@ def execute_stage_arm(source, plan, allow_reclaim):
     if arm_out != expected_out or arm_out.is_symlink() or not arm_out.is_dir():
         raise PipelineError("refusing unsafe arm64 output reclamation")
     out_bytes = physical_size(arm_out)
-    build_receipt = load_json(plan["build_receipt"], "arm64 build receipt")
     arm_args_hash = build_receipt.get("args_gn_sha256")
     if arm_args_hash != sha256_file(arm_out / "args.gn"):
         raise PipelineError("arm64 args.gn changed before reclamation")
     stage_value = {
-        "schema": 1,
+        "schema": 2 if no_work is not None else 1,
         "architecture": "arm64",
         "source_root": str(source),
         "staged_app": str(staged_app),
@@ -4775,6 +8783,7 @@ def execute_stage_arm(source, plan, allow_reclaim):
         "reclaim_requested_bytes": out_bytes,
         "arm_args_gn_sha256": arm_args_hash,
         "build_receipt_sha256": sha256_file(plan["build_receipt"]),
+        "upstream_no_work_probe": no_work,
     }
     stage_report = atomic_json(Path(plan["receipt"]), stage_value)
     # Re-validate all evidence immediately before the only recursive deletion.
@@ -4820,15 +8829,30 @@ def merge_plan(source, developer_dir, dmg_output):
         raise PipelineError("staged arm64 app no longer matches its receipt")
     app_report(arm_app, ("arm64",))
     x64_out = in_source(source, X64_OUT, "x86_64 output", must_exist=True, directory=True)
-    slice_receipt_contract(source, x64_out, "x64")
     x64_app = x64_out / APP_NAME
     app_report(x64_app, ("x86_64",))
     swiftshader_receipt_path, _ = swiftshader_disabled_signing_receipt_contract(
         source, developer_dir, allow_adhoc_runtime_signing=True
     )
-    adhoc_receipt_path, _ = adhoc_runtime_signing_receipt_contract(
+    adhoc_receipt_path, adhoc_receipt = adhoc_runtime_signing_receipt_contract(
         source, developer_dir
     )
+    alias_active = _home_alias_is_active(source)
+    if alias_active:
+        slice_receipt_contract(
+            source,
+            x64_out,
+            "x64",
+            allow_resumed_history_growth=True,
+            authorized_resumed_history=adhoc_receipt["ninja_history_after"],
+        )
+        _ninja_history_exact_contract(
+            adhoc_receipt["ninja_history_after"],
+            x64_out,
+            "merge-authorized ad-hoc signing",
+        )
+    else:
+        slice_receipt_contract(source, x64_out, "x64")
     packaging = x64_out / PACKAGING_NAME
     if packaging.is_symlink() or not packaging.is_dir():
         raise PipelineError("missing x86_64 signing package")
@@ -4913,6 +8937,11 @@ def merge_plan(source, developer_dir, dmg_output):
             "path": str(adhoc_receipt_path),
             "sha256": sha256_file(adhoc_receipt_path),
         },
+        **(
+            {"x64_ninja_history": adhoc_receipt["ninja_history_after"]}
+            if alias_active
+            else {}
+        ),
         "xcode27_linkedit_strip_compatibility": {
             "path": str(linkedit_receipt_path),
             "sha256": sha256_file(linkedit_receipt_path),
@@ -5132,7 +9161,7 @@ def execute_merge(source, developer_dir, plan):
         raise PipelineError(
             "disabled SwiftShader signing provenance changed before merge"
         )
-    adhoc_receipt_path, _ = adhoc_runtime_signing_receipt_contract(
+    adhoc_receipt_path, adhoc_receipt = adhoc_runtime_signing_receipt_contract(
         source, developer_dir
     )
     current_adhoc = {
@@ -5143,6 +9172,19 @@ def execute_merge(source, developer_dir, plan):
         raise PipelineError(
             "ad-hoc runtime signing provenance changed before merge"
         )
+    alias_active = _home_alias_is_active(source)
+    if alias_active and plan.get("x64_ninja_history") != adhoc_receipt.get(
+        "ninja_history_after"
+    ):
+        raise PipelineError("authorized x86_64 Ninja history changed before merge")
+    _live_alias_slice_no_work(
+        source,
+        developer_dir,
+        "x64",
+        authorized_history=(
+            adhoc_receipt.get("ninja_history_after") if alias_active else None
+        ),
+    )
     arm_size = physical_size(plan["arm_app"])
     x64_size = physical_size(plan["x64_app"])
     # Universalization creates one combined app and signing creates another.
@@ -5150,7 +9192,7 @@ def execute_merge(source, developer_dir, plan):
     require_free(source, merge_required, "universal merge")
     unsigned_root = Path(plan["unsigned_root"])
     unsigned_root.mkdir(parents=True)
-    environment = safe_environment(source, developer_dir)
+    environment = _build_child_environment(source, developer_dir)
     for name in ("copy_packaging", "universalize"):
         run_monitored(plan["commands"][name], source, environment)
     unsigned_app = unsigned_root / APP_NAME
@@ -5343,6 +9385,7 @@ def parser():
     root = argparse.ArgumentParser(description=__doc__)
     subparsers = root.add_subparsers(dest="command", required=True)
     for name in (
+        "adopt-home-alias",
         "bootstrap-tools",
         "apply-gn-compat",
         "apply-xcode27-compat",
@@ -5353,8 +9396,10 @@ def parser():
         "apply-swiftshader-disabled-signing-compat",
         "apply-adhoc-runtime-signing-compat",
         "build-arm64",
+        "finalize-resumed-arm64",
         "stage-arm64",
         "build-x64",
+        "finalize-resumed-x64",
         "merge-sign-package",
     ):
         child = subparsers.add_parser(name)
@@ -5367,6 +9412,13 @@ def parser():
             child.add_argument("--allow-reclaim-arm64-out", action="store_true")
         if name == "prepare-xcode27-linkedit-recovery":
             child.add_argument("--allow-recovery-move", action="store_true")
+        if name == "adopt-home-alias":
+            child.add_argument("--logical-home", required=True)
+            child.add_argument("--logical-workspace-root", required=True)
+            child.add_argument("--confirm-home-alias", action="store_true")
+        if name in ("finalize-resumed-arm64", "finalize-resumed-x64"):
+            child.add_argument("--resume-record", required=True)
+            child.add_argument("--confirm-resumed-slice", action="store_true")
         if name == "merge-sign-package":
             child.add_argument("--dmg-output", required=True)
     return root
@@ -5375,12 +9427,64 @@ def parser():
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
-        source = resolve_source(args.source_root)
+        source_input = Path(
+            os.path.abspath(os.path.expanduser(args.source_root))
+        )
+        source_is_alias = source_input.resolve(strict=True) != source_input
+        source = resolve_source(
+            args.source_root,
+            allow_recorded_home_alias=(
+                source_is_alias and args.command != "adopt-home-alias"
+            ),
+            allow_unrecorded_home_alias=(
+                source_is_alias and args.command == "adopt-home-alias"
+            ),
+        )
         developer_dir = None
         if hasattr(args, "developer_dir"):
-            developer_dir = Path(args.developer_dir).expanduser().resolve(strict=True)
-            developer_contract(developer_dir)
-        if args.command == "bootstrap-tools":
+            supplied_developer = Path(
+                os.path.abspath(os.path.expanduser(args.developer_dir))
+            )
+            physical_developer = supplied_developer.resolve(strict=True)
+            developer_contract(physical_developer)
+            developer_dir = (
+                supplied_developer if source_is_alias else physical_developer
+            )
+        if source_is_alias and args.command != "adopt-home-alias":
+            alias_receipt = load_json(
+                source / HOME_ALIAS_RECEIPT, "home-alias receipt"
+            )
+            alias_developer = developer_dir
+            if alias_developer is None:
+                alias_developer = Path(
+                    alias_receipt.get("mappings", {})
+                    .get("developer", {})
+                    .get("logical", "")
+                )
+            home_alias_receipt_contract(source, alias_developer)
+        if args.command == "adopt-home-alias":
+            logical_home = Path(
+                os.path.abspath(os.path.expanduser(args.logical_home))
+            )
+            logical_workspace = Path(
+                os.path.abspath(os.path.expanduser(args.logical_workspace_root))
+            )
+            plan = home_alias_plan(
+                source, developer_dir, logical_home, logical_workspace
+            )
+            result = (
+                execute_home_alias(
+                    source,
+                    developer_dir,
+                    logical_home,
+                    logical_workspace,
+                    plan,
+                    args.confirm_home_alias,
+                )
+                if args.execute
+                else plan
+            )
+        elif args.command == "bootstrap-tools":
             plan = bootstrap_plan(source, developer_dir)
             result = execute_bootstrap(source, developer_dir, plan) if args.execute else plan
         elif args.command == "apply-gn-compat":
@@ -5440,6 +9544,22 @@ def main(argv=None):
         elif args.command == "build-arm64":
             plan = build_plan(source, developer_dir, "arm64")
             result = execute_build(source, developer_dir, plan) if args.execute else plan
+        elif args.command == "finalize-resumed-arm64":
+            plan = resumed_slice_plan(
+                source, developer_dir, "arm64", args.resume_record
+            )
+            result = (
+                execute_resumed_slice(
+                    source,
+                    developer_dir,
+                    "arm64",
+                    args.resume_record,
+                    plan,
+                    args.confirm_resumed_slice,
+                )
+                if args.execute
+                else plan
+            )
         elif args.command == "stage-arm64":
             plan = stage_arm_plan(source)
             result = (
@@ -5450,6 +9570,22 @@ def main(argv=None):
         elif args.command == "build-x64":
             plan = build_plan(source, developer_dir, "x64")
             result = execute_build(source, developer_dir, plan) if args.execute else plan
+        elif args.command == "finalize-resumed-x64":
+            plan = resumed_slice_plan(
+                source, developer_dir, "x64", args.resume_record
+            )
+            result = (
+                execute_resumed_slice(
+                    source,
+                    developer_dir,
+                    "x64",
+                    args.resume_record,
+                    plan,
+                    args.confirm_resumed_slice,
+                )
+                if args.execute
+                else plan
+            )
         else:
             plan = merge_plan(source, developer_dir, args.dmg_output)
             result = execute_merge(source, developer_dir, plan) if args.execute else plan

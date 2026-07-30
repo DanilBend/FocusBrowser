@@ -12,6 +12,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -1601,6 +1602,78 @@ class BuildPipelineTests(unittest.TestCase):
                 build_ninja=self.source / "third_party/ninja/ninja",
             )
 
+    def test_safe_environment_accepts_only_the_revalidated_exact_home_alias(self):
+        physical_home = self.root / "physical-home"
+        physical_workspace = physical_home / "workspace"
+        physical_source = physical_workspace / "checkout/src"
+        physical_developer = physical_home / "Xcode.app/Contents/Developer"
+        physical_repo = physical_workspace / "repo"
+        for path in (physical_source, physical_developer, physical_repo):
+            path.mkdir(parents=True)
+        logical_home = self.root / "logical-home"
+        logical_home.symlink_to(physical_home, target_is_directory=True)
+        logical_workspace = logical_home / "workspace"
+        logical_source = logical_workspace / "checkout/src"
+        logical_developer = logical_home / "Xcode.app/Contents/Developer"
+        logical_repo = logical_workspace / "repo"
+        context = build_pipeline.AliasContext(
+            logical_home=logical_home,
+            physical_home=physical_home,
+            logical_workspace=logical_workspace,
+            physical_workspace=physical_workspace,
+            logical_source=logical_source,
+            physical_source=physical_source,
+            logical_developer=logical_developer,
+            physical_developer=physical_developer,
+            logical_repo=logical_repo,
+            physical_repo=physical_repo,
+            volume_uuid="AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+        )
+        with mock.patch.object(
+            build_pipeline, "_recorded_alias_context", return_value=context
+        ):
+            result = build_pipeline.safe_environment(
+                logical_source,
+                logical_developer,
+                {"HOME": str(logical_home)},
+                alias_context=context,
+            )
+        self.assertEqual(str(logical_home), result["HOME"])
+        self.assertEqual(str(logical_developer), result["DEVELOPER_DIR"])
+
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "explicit validated AliasContext"
+        ):
+            build_pipeline.safe_environment(
+                logical_source,
+                logical_developer,
+                {"HOME": str(logical_home)},
+            )
+        with mock.patch.object(
+            build_pipeline,
+            "_recorded_alias_context",
+            side_effect=build_pipeline.PipelineError("revalidation failed"),
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "revalidation failed"
+        ):
+            build_pipeline.safe_environment(
+                logical_source,
+                logical_developer,
+                {"HOME": str(logical_home)},
+                alias_context=context,
+            )
+        attacker_home = self.root / "attacker-home"
+        attacker_home.symlink_to(physical_home, target_is_directory=True)
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "not the revalidated recorded home alias"
+        ):
+            build_pipeline.safe_environment(
+                logical_source,
+                logical_developer,
+                {"HOME": str(attacker_home)},
+                alias_context=context,
+            )
+
     def test_ninja_contract_binds_hash_arch_version_and_cipd_pin(self):
         with mock.patch.object(
             build_pipeline.platform, "machine", return_value="arm64"
@@ -2007,6 +2080,8 @@ class BuildPipelineTests(unittest.TestCase):
 
         with mock.patch.object(
             build_pipeline, "run_monitored", side_effect=fake_ditto
+        ), mock.patch.object(
+            build_pipeline, "stage_arm_plan", return_value=plan
         ), mock.patch.object(
             build_pipeline, "app_report", return_value={"architectures": ["arm64"]}
         ), mock.patch.object(
@@ -2596,6 +2671,397 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertEqual(fixture["pre"], fixture["source_test"].read_bytes())
         self.assertEqual(fixture["pre"], fixture["packaging_parts"].read_bytes())
         self.assertFalse(Path(fixture["plan"]["receipt"]).exists())
+
+    def test_durable_signing_journal_restores_exact_pre_crash_state(self):
+        alias_receipt = self.source / build_pipeline.HOME_ALIAS_RECEIPT
+        self.write_json(alias_receipt, {"fixture": True})
+        targets = {}
+        for label in ("source", "packaging", "ninja_log", "ninja_deps"):
+            path = self.source / "fixture-signing" / label
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes((label + " original\n").encode("utf-8"))
+            path.chmod(0o640)
+            targets[label] = path
+        original_snapshots = {
+            label: build_pipeline._regular_file_snapshot(path)
+            for label, path in targets.items()
+        }
+        original_modes = {
+            label: stat.S_IMODE(path.stat().st_mode)
+            for label, path in targets.items()
+        }
+        with mock.patch.object(
+            build_pipeline, "_home_alias_is_active", return_value=True
+        ), mock.patch.object(
+            build_pipeline, "_signing_transaction_targets", return_value=targets
+        ):
+            for stage in ("swiftshader", "adhoc"):
+                with self.subTest(stage=stage):
+                    receipt = self.source / "out/fixture-{}-receipt.json".format(
+                        stage
+                    )
+                    transaction = build_pipeline._begin_durable_signing_transaction(
+                        self.source, stage, receipt
+                    )
+                    self.assertIsNotNone(transaction)
+                    transaction = Path(transaction)
+                    journal = transaction / "journal.json"
+                    value = json.loads(journal.read_text(encoding="utf-8"))
+                    self.assertTrue(value["prepared_before_mutation"])
+                    self.assertFalse(
+                        stat.S_IMODE(journal.stat().st_mode) & 0o222
+                    )
+                    self.assertEqual(
+                        targets["source"].stat().st_dev,
+                        transaction.stat().st_dev,
+                    )
+                    for item in value["files"]:
+                        backup = Path(item["backup"])
+                        self.assertFalse(
+                            stat.S_IMODE(backup.stat().st_mode) & 0o222
+                        )
+
+                    targets["source"].write_bytes(b"mutated source\n")
+                    targets["packaging"].unlink()
+                    targets["ninja_log"].write_bytes(b"compacted history\n")
+                    targets["ninja_deps"].chmod(0o600)
+                    recovery = build_pipeline._load_durable_signing_transaction(
+                        self.source, stage, receipt
+                    )
+                    self.assertFalse(recovery["receipt_published"])
+                    build_pipeline._restore_durable_signing_transaction(
+                        self.source, stage, receipt
+                    )
+
+                    self.assertFalse(transaction.exists())
+                    for label, path in targets.items():
+                        self.assertEqual(
+                            original_snapshots[label],
+                            build_pipeline._regular_file_snapshot(path),
+                        )
+                        self.assertEqual(
+                            original_modes[label],
+                            stat.S_IMODE(path.stat().st_mode),
+                        )
+                    build_pipeline._fsync_durable_signing_targets(
+                        self.source, stage
+                    )
+
+                    second = build_pipeline._begin_durable_signing_transaction(
+                        self.source, stage, receipt
+                    )
+                    self.write_json(receipt, {"committed": True})
+                    committed = build_pipeline._load_durable_signing_transaction(
+                        self.source, stage, receipt
+                    )
+                    self.assertTrue(committed["receipt_published"])
+                    self.assertEqual(
+                        receipt.stat().st_ino,
+                        committed["receipt_identity"]["inode"],
+                    )
+                    build_pipeline._discard_durable_signing_transaction(
+                        self.source, stage
+                    )
+                    self.assertFalse(Path(second).exists())
+
+    def test_partial_signing_journal_is_idempotently_classified(self):
+        alias_receipt = self.source / build_pipeline.HOME_ALIAS_RECEIPT
+        self.write_json(alias_receipt, {"fixture": True})
+        targets = {"source": self.source / "partial-target"}
+        targets["source"].write_bytes(b"unchanged\n")
+        receipt = self.source / "out/partial-signing-receipt.json"
+        with mock.patch.object(
+            build_pipeline, "_home_alias_is_active", return_value=True
+        ), mock.patch.object(
+            build_pipeline, "_signing_transaction_targets", return_value=targets
+        ):
+            root = Path(
+                build_pipeline._signing_transaction_path(
+                    self.source, "swiftshader"
+                )
+            )
+            root.mkdir(parents=True)
+            self.assertIsNone(
+                build_pipeline._load_durable_signing_transaction(
+                    self.source, "swiftshader", receipt
+                )
+            )
+            self.assertFalse(root.exists())
+
+            cleanup = build_pipeline._signing_transaction_cleanup_path(
+                self.source, "swiftshader"
+            )
+            root.mkdir(parents=True)
+            (root / "partially-removed-backup").write_bytes(b"stale\n")
+            root_identity = build_pipeline._stable_directory_identity(root)
+            build_pipeline._publish_signing_cleanup_authorization(
+                self.source, "swiftshader", root_identity
+            )
+            os.replace(root, cleanup)
+            self.assertIsNone(
+                build_pipeline._load_durable_signing_transaction(
+                    self.source, "swiftshader", receipt
+                )
+            )
+            self.assertFalse(cleanup.exists())
+
+            root.mkdir(parents=True)
+            self.write_json(receipt, {"committed": True})
+            recovery = build_pipeline._load_durable_signing_transaction(
+                self.source, "swiftshader", receipt
+            )
+            self.assertTrue(recovery["receipt_published"])
+            self.assertTrue(recovery["cleanup_only"])
+            build_pipeline._discard_durable_signing_transaction(
+                self.source, "swiftshader"
+            )
+
+    def test_invalid_published_signing_receipt_rolls_back_before_retry(self):
+        cases = (
+            (
+                "swiftshader",
+                "execute_swiftshader_disabled_signing",
+                "swiftshader_disabled_signing_plan",
+                "swiftshader_disabled_signing_receipt_contract",
+            ),
+            (
+                "adhoc",
+                "execute_adhoc_runtime_signing",
+                "adhoc_runtime_signing_plan",
+                "adhoc_runtime_signing_receipt_contract",
+            ),
+        )
+        for stage, execute_name, plan_name, contract_name in cases:
+            with self.subTest(stage=stage):
+                receipt = self.source / "out/invalid-{}-receipt.json".format(stage)
+                recovery_plan = {
+                    "receipt": str(receipt),
+                    "crash_recovery": {
+                        "receipt_published": True,
+                        "receipt_identity": {"fixture": True},
+                    },
+                }
+                fresh_plan = {"stage": "fresh-{}".format(stage)}
+                original_execute = getattr(build_pipeline, execute_name)
+                with mock.patch.object(
+                    build_pipeline,
+                    plan_name,
+                    side_effect=(recovery_plan, fresh_plan),
+                ), mock.patch.object(
+                    build_pipeline,
+                    contract_name,
+                    side_effect=build_pipeline.PipelineError("invalid receipt"),
+                ), mock.patch.object(
+                    build_pipeline, "_remove_invalid_transaction_receipt"
+                ) as remove, mock.patch.object(
+                    build_pipeline, "_restore_durable_signing_transaction"
+                ) as restore, mock.patch.object(
+                    build_pipeline,
+                    execute_name,
+                    return_value={"applied": True},
+                ) as recursive_execute:
+                    result = original_execute(
+                        self.source, self.developer, recovery_plan
+                    )
+                self.assertTrue(result["invalid_receipt_rolled_back"])
+                remove.assert_called_once_with(receipt, {"fixture": True})
+                restore.assert_called_once_with(self.source, stage, receipt)
+                recursive_execute.assert_called_once_with(
+                    self.source, self.developer, fresh_plan
+                )
+
+    def test_cleanup_authorization_refuses_a_replaced_tombstone(self):
+        self.write_json(
+            self.source / build_pipeline.HOME_ALIAS_RECEIPT,
+            {"fixture": True},
+        )
+        stage = "adhoc"
+        root = build_pipeline._signing_transaction_path(self.source, stage)
+        root.mkdir(parents=True)
+        (root / "authorized-data").write_bytes(b"authorized\n")
+        identity = build_pipeline._stable_directory_identity(root)
+        build_pipeline._publish_signing_cleanup_authorization(
+            self.source, stage, identity
+        )
+        cleanup = build_pipeline._signing_transaction_cleanup_path(
+            self.source, stage
+        )
+        os.replace(root, cleanup)
+        preserved = self.root / "authorized-tombstone-preserved"
+        os.replace(cleanup, preserved)
+        cleanup.mkdir()
+        rival = cleanup / "rival-data"
+        rival.write_bytes(b"must survive\n")
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "tombstone was replaced"
+        ):
+            build_pipeline._cleanup_signing_transaction_tombstone(
+                self.source, stage
+            )
+        self.assertEqual(b"must survive\n", rival.read_bytes())
+        self.assertEqual(
+            b"authorized\n", (preserved / "authorized-data").read_bytes()
+        )
+
+    def test_cleanup_authorization_uses_current_device_after_reboot(self):
+        self.write_json(
+            self.source / build_pipeline.HOME_ALIAS_RECEIPT,
+            {"fixture": True},
+        )
+        stage = "swiftshader"
+        root = build_pipeline._signing_transaction_path(self.source, stage)
+        root.mkdir(parents=True)
+        (root / "journal-fragment").write_bytes(b"private\n")
+        observed = build_pipeline._live_directory_identity(root)
+        durable = {
+            "volume_uuid": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+            "inode": observed["inode"],
+            "uid": observed["uid"],
+            "gid": observed["gid"],
+            "mode": observed["mode"],
+        }
+        build_pipeline._publish_signing_cleanup_authorization(
+            self.source, stage, durable
+        )
+        authorization = json.loads(
+            build_pipeline._signing_transaction_cleanup_marker_path(
+                self.source, stage
+            ).read_text()
+        )
+        self.assertEqual(durable, authorization["root_identity"])
+        self.assertNotIn("device", authorization["root_identity"])
+
+        reboot_device = observed["device"] + 1000
+        reboot_live = {**observed, "device": reboot_device}
+
+        def remove_with_current_device(path, expected, _label):
+            self.assertEqual(reboot_live, expected)
+            shutil.rmtree(path)
+
+        with mock.patch.object(
+            build_pipeline, "_stable_directory_identity", return_value=durable
+        ), mock.patch.object(
+            build_pipeline,
+            "_live_directory_identity",
+            return_value=reboot_live,
+        ), mock.patch.object(
+            build_pipeline,
+            "_remove_directory_inode",
+            side_effect=remove_with_current_device,
+        ):
+            build_pipeline._cleanup_signing_transaction_tombstone(
+                self.source, stage
+            )
+        self.assertFalse(
+            build_pipeline._signing_transaction_cleanup_marker_path(
+                self.source, stage
+            ).exists()
+        )
+
+    def test_cleanup_never_deletes_an_unknown_fixed_temporary(self):
+        stage = "adhoc"
+        marker = build_pipeline._signing_transaction_cleanup_marker_path(
+            self.source, stage
+        )
+        unknown = marker.with_name("." + marker.name + ".tmp")
+        unknown.parent.mkdir(parents=True, exist_ok=True)
+        unknown.write_bytes(b"unrelated evidence\n")
+        unknown.chmod(0o444)
+        build_pipeline._cleanup_signing_transaction_tombstone(
+            self.source, stage
+        )
+        self.assertEqual(b"unrelated evidence\n", unknown.read_bytes())
+
+    def test_failed_execution_receipt_removes_only_its_invalid_inode(self):
+        receipt = self.source / "out/transactional-receipt.json"
+        report = build_pipeline.atomic_json(receipt, {"state": "invalid"})
+
+        def invalid():
+            raise build_pipeline.PipelineError("invalid receipt")
+
+        self.assertTrue(
+            build_pipeline._remove_failed_execution_receipt(
+                receipt,
+                report.publication_identity,
+                invalid,
+                "fixture receipt",
+            )
+        )
+        self.assertFalse(receipt.exists())
+
+        valid_report = build_pipeline.atomic_json(receipt, {"state": "valid"})
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "valid committed receipt"
+        ):
+            build_pipeline._remove_failed_execution_receipt(
+                receipt,
+                valid_report.publication_identity,
+                lambda: True,
+                "fixture receipt",
+            )
+        self.assertEqual({"state": "valid"}, json.loads(receipt.read_text()))
+
+        receipt.unlink()
+        raced_report = build_pipeline.atomic_json(receipt, {"state": "ours"})
+        preserved = receipt.with_name("our-receipt-preserved.json")
+        os.replace(receipt, preserved)
+        self.write_json(receipt, {"state": "rival"})
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "identity changed"
+        ):
+            build_pipeline._remove_failed_execution_receipt(
+                receipt,
+                raced_report.publication_identity,
+                invalid,
+                "fixture receipt",
+            )
+        self.assertEqual({"state": "rival"}, json.loads(receipt.read_text()))
+        self.assertEqual({"state": "ours"}, json.loads(preserved.read_text()))
+
+    def test_durable_fsync_rejects_atomic_target_path_replacement(self):
+        target = self.source / "fsync-target"
+        replacement = self.source / "fsync-replacement"
+        target.write_bytes(b"old inode\n")
+        replacement.write_bytes(b"new inode\n")
+        real_fsync = os.fsync
+        calls = 0
+
+        def replace_on_first_fsync(descriptor):
+            nonlocal calls
+            calls += 1
+            real_fsync(descriptor)
+            if calls == 1:
+                os.replace(replacement, target)
+
+        with mock.patch.object(
+            build_pipeline,
+            "_signing_transaction_targets",
+            return_value={"target": target},
+        ), mock.patch.object(
+            build_pipeline.os, "fsync", side_effect=replace_on_first_fsync
+        ), self.assertRaisesRegex(build_pipeline.PipelineError, "changed"):
+            build_pipeline._fsync_durable_signing_targets(
+                self.source, "swiftshader"
+            )
+        self.assertEqual(b"new inode\n", target.read_bytes())
+
+    def test_invalid_receipt_removal_preserves_a_replacement_inode(self):
+        receipt = self.source / "out/raced-invalid-receipt.json"
+        self.write_json(receipt, {"original": True})
+        identity = build_pipeline._lstat_identity(receipt)
+        preserved = receipt.with_name("original-preserved.json")
+        os.replace(receipt, preserved)
+        self.write_json(receipt, {"rival": True})
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "unsafe"
+        ):
+            build_pipeline._remove_invalid_transaction_receipt(
+                receipt, identity
+            )
+        self.assertEqual({"rival": True}, json.loads(receipt.read_text()))
+        self.assertEqual(
+            {"original": True}, json.loads(preserved.read_text())
+        )
 
     def test_adhoc_runtime_refresh_forces_missing_output_when_source_is_older(self):
         fixture = self.prepare_adhoc_runtime_execute_fixture()
@@ -3505,6 +3971,96 @@ class BuildPipelineTests(unittest.TestCase):
             )
         popen.assert_not_called()
 
+    def test_monitor_kills_descendants_when_the_group_leader_exits(self):
+        identity = self.root / "leader-exit-process-group.txt"
+        script = (
+            "import os,signal,time; "
+            "signal.signal(signal.SIGINT,lambda *_:os._exit(130)); "
+            "child=os.fork(); "
+            "child == 0 and time.sleep(30); "
+            "open({!r},'w').write(str(os.getpgrp())+' '+str(child)); "
+            "os._exit(0)"
+        ).format(str(identity))
+        with mock.patch.object(
+            build_pipeline, "require_free", return_value=100 * build_pipeline.GIB
+        ), mock.patch.object(
+            build_pipeline, "free_bytes", return_value=100 * build_pipeline.GIB
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "descendants remained"
+        ):
+            build_pipeline.run_monitored(
+                ["/usr/bin/python3", "-c", script],
+                self.source,
+                {},
+                poll_seconds=0.01,
+            )
+        self.assertTrue(identity.is_file())
+        pgid = int(identity.read_text(encoding="utf-8").split()[0])
+        self.assertFalse(build_pipeline._process_group_exists(pgid))
+
+    def test_monitor_keyboard_interrupt_stops_the_entire_process_group(self):
+        identity = self.root / "interrupted-process-group.txt"
+        script = (
+            "import os,signal,time; "
+            "signal.signal(signal.SIGINT,lambda *_:os._exit(130)); "
+            "child=os.fork(); "
+            "open({!r},'w').write(str(os.getpgrp())+' '+str(child)); "
+            "time.sleep(30)"
+        ).format(str(identity))
+        real_sleep = time.sleep
+        sleep_calls = 0
+
+        def interrupt_first_poll(seconds):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls == 1:
+                real_sleep(0.15)
+                raise KeyboardInterrupt()
+            real_sleep(min(seconds, 0.01))
+
+        with mock.patch.object(
+            build_pipeline, "require_free", return_value=100 * build_pipeline.GIB
+        ), mock.patch.object(
+            build_pipeline, "free_bytes", return_value=100 * build_pipeline.GIB
+        ), mock.patch.object(
+            build_pipeline.time, "sleep", side_effect=interrupt_first_poll
+        ), self.assertRaises(KeyboardInterrupt):
+            build_pipeline.run_monitored(
+                ["/usr/bin/python3", "-c", script],
+                self.source,
+                {},
+                poll_seconds=0.01,
+            )
+        self.assertTrue(identity.is_file())
+        pgid = int(identity.read_text(encoding="utf-8").split()[0])
+        self.assertFalse(build_pipeline._process_group_exists(pgid))
+
+    def test_bounded_probe_kills_a_descendant_holding_its_stdout_pipe(self):
+        identity = self.root / "probe-process-group.txt"
+        script = (
+            "import os,signal,time; "
+            "signal.signal(signal.SIGINT,lambda *_:os._exit(130)); "
+            "child=os.fork(); "
+            "open({!r},'w').write(str(os.getpgrp())+' '+str(child)); "
+            "os._exit(0) if child else time.sleep(30)"
+        ).format(str(identity))
+        process = subprocess.Popen(
+            ["/usr/bin/python3", "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "timed out"
+        ):
+            build_pipeline._collect_bounded_probe_output(
+                process, timeout_seconds=0.2
+            )
+        self.assertTrue(identity.is_file())
+        pgid = int(identity.read_text(encoding="utf-8").split()[0])
+        self.assertFalse(build_pipeline._process_group_exists(pgid))
+
     def test_reclaim_receipt_is_false_if_arm_output_reappears(self):
         self.prepare_merge_fixture()
         arm_out = self.source / build_pipeline.ARM_OUT
@@ -3555,6 +4111,996 @@ class BuildPipelineTests(unittest.TestCase):
         )
         self.assertTrue(execute.execute)
         self.assertTrue(execute.allow_recovery_move)
+
+    @unittest.skipUnless(
+        sys.platform == "darwin",
+        "requires the real macOS Data volume fixture",
+    )
+    def test_volume_identity_resolves_users_path_to_apfs_data_volume(self):
+        physical_home = Path.home().resolve(strict=True)
+        identity = build_pipeline._volume_identity(physical_home)
+        self.assertEqual("/System/Volumes/Data", identity["mount_point"])
+        self.assertRegex(identity["device_node"], r"^/dev/[A-Za-z0-9._-]+$")
+        self.assertRegex(
+            identity["volume_uuid"],
+            r"^[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}$",
+        )
+        self.assertEqual(
+            os.stat(physical_home).st_dev,
+            os.stat(identity["mount_point"]).st_dev,
+        )
+
+    def test_volume_identity_rejects_malformed_df_and_diskutil_reports(self):
+        valid_df = b"Filesystem 512-blocks Used Available Capacity Mounted on\n/dev/test 1 1 1 1% /\n"
+        valid_plist = {
+            "DeviceNode": "/dev/test",
+            "FilesystemType": "apfs",
+            "MountPoint": str(self.root),
+            "VolumeUUID": "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+        }
+        malformed_df = (
+            b"",
+            b"localized header\n/dev/test 1 1 1 1% /\n",
+            b"Filesystem x\n/dev/test 1\n",
+            b"Filesystem x\n/dev/test 1 1 1 1% /\n/dev/other 1 1 1 1% /x\n",
+            b"Filesystem x\nnot-a-device 1 1 1 1% /\n",
+            b"\xff\n",
+        )
+        for body in malformed_df:
+            with self.subTest(df=body), mock.patch.object(
+                build_pipeline, "_run_bounded_output", return_value=body
+            ), self.assertRaises(build_pipeline.PipelineError):
+                build_pipeline._volume_identity(self.source)
+        invalid_plists = (
+            plistlib.dumps(["not", "a", "dict"]),
+            plistlib.dumps({**valid_plist, "DeviceNode": "/dev/other"}),
+            plistlib.dumps({**valid_plist, "FilesystemType": "hfs"}),
+            plistlib.dumps({**valid_plist, "MountPoint": "relative"}),
+            plistlib.dumps({**valid_plist, "VolumeUUID": "bad"}),
+            b"not a plist",
+        )
+        for body in invalid_plists:
+            with self.subTest(plist=body[:20]), mock.patch.object(
+                build_pipeline,
+                "_run_bounded_output",
+                side_effect=(valid_df, body),
+            ), self.assertRaises(build_pipeline.PipelineError):
+                build_pipeline._volume_identity(self.source)
+
+    def test_volume_identity_rejects_cross_device_and_leaf_symlink(self):
+        valid_df = b"Filesystem 512-blocks Used Available Capacity Mounted on\n/dev/test 1 1 1 1% /\n"
+        valid_plist = plistlib.dumps(
+            {
+                "DeviceNode": "/dev/test",
+                "FilesystemType": "apfs",
+                "MountPoint": str(self.root),
+                "VolumeUUID": "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+            }
+        )
+        before = os.lstat(self.source)
+        wrong_mount = mock.Mock(
+            st_mode=stat.S_IFDIR | 0o755,
+            st_dev=before.st_dev + 1,
+            st_ino=before.st_ino + 1,
+        )
+        with mock.patch.object(
+            build_pipeline, "_run_bounded_output", side_effect=(valid_df, valid_plist)
+        ), mock.patch.object(
+            build_pipeline.os, "lstat", side_effect=(before, wrong_mount, before)
+        ), self.assertRaisesRegex(build_pipeline.PipelineError, "do not match"):
+            build_pipeline._volume_identity(self.source)
+        alias = self.root / "volume-alias"
+        alias.symlink_to(self.source, target_is_directory=True)
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "existing"):
+            build_pipeline._volume_identity(alias)
+
+    def test_bounded_command_rejects_output_cap_and_timeout(self):
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "exceeded"):
+            build_pipeline._run_bounded_output(
+                ["/usr/bin/python3", "-c", "import os; os.write(1, b'x' * 4097)"],
+                4096,
+                5,
+                "bounded fixture",
+            )
+        started = time.monotonic()
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "timed out"):
+            build_pipeline._run_bounded_output(
+                ["/usr/bin/python3", "-c", "import time; time.sleep(30)"],
+                4096,
+                0.2,
+                "timeout fixture",
+            )
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_home_alias_requires_root_owned_direct_users_symlink(self):
+        fake = mock.Mock(
+            st_mode=stat.S_IFLNK | 0o755,
+            st_uid=501,
+            st_gid=20,
+            st_dev=1,
+            st_ino=2,
+        )
+        with mock.patch.object(build_pipeline.os, "lstat", return_value=fake), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "root-owned"
+        ):
+            build_pipeline._home_alias_value(
+                Path("/Users/legacy/work/src"),
+                Path("/Users/legacy/Xcode.app/Contents/Developer"),
+                Path("/Users/legacy"),
+                Path("/Users/legacy/work"),
+            )
+
+    def test_home_alias_rejects_relative_or_swapped_target(self):
+        fake = mock.Mock(
+            st_mode=stat.S_IFLNK | 0o755,
+            st_uid=0,
+            st_gid=80,
+            st_dev=1,
+            st_ino=2,
+        )
+        with mock.patch.object(
+            build_pipeline.os, "lstat", return_value=fake
+        ), mock.patch.object(
+            build_pipeline.os, "readlink", return_value="../attacker"
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "target must be absolute"
+        ):
+            build_pipeline._home_alias_value(
+                Path("/Users/legacy/work/src"),
+                Path("/Users/legacy/Xcode.app/Contents/Developer"),
+                Path("/Users/legacy"),
+                Path("/Users/legacy/work"),
+            )
+
+    def test_home_alias_requires_same_workspace_and_xcode_inode(self):
+        with mock.patch.object(
+            build_pipeline,
+            "_path_identity",
+            side_effect=(
+                {"device": 1, "inode": 10},
+                {"device": 1, "inode": 11},
+            ),
+        ), self.assertRaisesRegex(build_pipeline.PipelineError, "same inode"):
+            build_pipeline._same_inode_mapping(
+                Path("/Users/legacy/work"),
+                Path("/Users/current/work"),
+                "workspace",
+            )
+
+    def test_resolve_source_preserves_only_a_recorded_logical_alias(self):
+        physical = self.root / "physical"
+        physical_source = physical / "src"
+        physical_source.mkdir(parents=True)
+        logical = self.root / "logical"
+        logical.symlink_to(physical, target_is_directory=True)
+        logical_source = logical / "src"
+        with mock.patch.object(
+            build_pipeline.focus_macos,
+            "resolve_source_root",
+            return_value=(physical_source, build_pipeline.focus_macos.PINNED_CHROMIUM_VERSION),
+        ):
+            with self.assertRaisesRegex(
+                build_pipeline.PipelineError, "explicit home-alias"
+            ):
+                build_pipeline.resolve_source(logical_source)
+            with self.assertRaisesRegex(
+                build_pipeline.PipelineError, "receipt is missing"
+            ):
+                build_pipeline.resolve_source(
+                    logical_source, allow_recorded_home_alias=True
+                )
+            receipt = physical_source / build_pipeline.HOME_ALIAS_RECEIPT
+            receipt.parent.mkdir(parents=True)
+            receipt.write_text("{}\n", encoding="utf-8")
+            self.assertEqual(
+                logical_source,
+                build_pipeline.resolve_source(
+                    logical_source, allow_recorded_home_alias=True
+                ),
+            )
+
+    def test_home_alias_receipt_detects_identity_or_legacy_hash_change(self):
+        receipt_path = self.source / build_pipeline.HOME_ALIAS_RECEIPT
+        def mapping(name, inode, device=11):
+            return {
+                "logical": "/Users/legacy/{}".format(name),
+                "physical": "/Users/current/{}".format(name),
+                "identity": {
+                    "volume_uuid": "A" * 8 + "-AAAA-AAAA-AAAA-" + "A" * 12,
+                    "device": device,
+                    "inode": inode,
+                    "uid": os.getuid(),
+                    "gid": os.getgid(),
+                    "mode": 0o755,
+                },
+            }
+
+        value = {
+            "schema": build_pipeline.HOME_ALIAS_RECEIPT_SCHEMA,
+            "logical_home": "/Users/legacy",
+            "physical_home": "/Users/current",
+            "volume": {
+                "filesystem": "apfs",
+                "volume_uuid": "A" * 8 + "-AAAA-AAAA-AAAA-" + "A" * 12,
+            },
+            "alias": {
+                "path": "/Users/legacy",
+                "target": "/Users/current",
+                "device": 11,
+                "inode": 100,
+                "uid": 0,
+                "gid": 80,
+                "mode": 0o755,
+                "root_owned": True,
+                "absolute_exact_target": True,
+                "target_identity": {
+                    "volume_uuid": "A" * 8 + "-AAAA-AAAA-AAAA-" + "A" * 12,
+                    "device": 11,
+                    "inode": 200,
+                    "uid": os.getuid(),
+                    "gid": os.getgid(),
+                    "mode": 0o755,
+                },
+            },
+            "mappings": {
+                "workspace": mapping("work", 201),
+                "source": mapping("work/src", 202),
+                "developer": mapping("Xcode/Developer", 203),
+                "repo": mapping("repo", 204),
+            },
+            "legacy_receipts": {"preparation": {"sha256": "a" * 64}},
+            "legacy_receipts_rewritten": False,
+            "gn_gen_executed": False,
+            "build_executed": False,
+            "signing_executed": False,
+            "packaging_executed": False,
+            "offline": True,
+            "network_operations": 0,
+        }
+        self.write_json(receipt_path, value)
+        renumbered = json.loads(json.dumps(value))
+        renumbered["alias"]["device"] = 99
+        renumbered["alias"]["target_identity"]["device"] = 99
+        for item in renumbered["mappings"].values():
+            item["identity"]["device"] = 99
+        with mock.patch.object(
+            build_pipeline, "_home_alias_value", return_value=renumbered
+        ):
+            path, observed = build_pipeline.home_alias_receipt_contract(
+                self.source, self.developer
+            )
+        self.assertEqual(receipt_path, path)
+        self.assertEqual(value, observed)
+        changed = json.loads(json.dumps(renumbered))
+        changed["mappings"]["source"]["identity"]["inode"] += 1
+        with mock.patch.object(
+            build_pipeline, "_home_alias_value", return_value=changed
+        ), self.assertRaisesRegex(build_pipeline.PipelineError, "chain changed"):
+            build_pipeline.home_alias_receipt_contract(self.source, self.developer)
+
+    def test_changed_path_scan_accepts_logical_alias_and_rejects_physical_leak(self):
+        out = self.root / "scan-out"
+        out.mkdir()
+        logical = Path("/Users/legacy")
+        physical = Path("/Users/current")
+        safe = out / "safe.bin"
+        safe.write_bytes(b"prefix " + str(logical).encode() + b" suffix")
+        report = build_pipeline.changed_path_scan(
+            out, 0, logical, physical
+        )
+        self.assertEqual(1, report["logical_home_occurrences"])
+        self.assertEqual(0, report["physical_home_occurrences"])
+        leaked = out / "leaked.bin"
+        leaked.write_bytes(
+            b"x" * (1024 * 1024 - 5) + str(physical).encode() + b" end"
+        )
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "physical home leaked"
+        ):
+            build_pipeline.changed_path_scan(out, 0, logical, physical)
+
+    def test_changed_path_scan_rejects_physical_symlink_target(self):
+        out = self.root / "scan-symlink"
+        out.mkdir()
+        (out / "escape").symlink_to("/Users/current/private")
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "absolute symlink"
+        ):
+            build_pipeline.changed_path_scan(
+                out, 0, Path("/Users/legacy"), Path("/Users/current")
+            )
+
+    def test_changed_path_scan_checks_old_files_and_rejects_special_nodes(self):
+        out = self.root / "scan-old-leak"
+        out.mkdir()
+        leaked = out / "preexisting.bin"
+        leaked.write_bytes(b"/Users/current/private")
+        old_ns = 1_000_000_000
+        os.utime(leaked, ns=(old_ns, old_ns))
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "physical home leaked"
+        ):
+            build_pipeline.changed_path_scan(
+                out,
+                time.time_ns() + 10_000_000_000,
+                Path("/Users/legacy"),
+                Path("/Users/current"),
+            )
+
+        leaked.unlink()
+        fifo = out / "unsafe.fifo"
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "special file"
+        ):
+            build_pipeline.changed_path_scan(
+                out,
+                0,
+                Path("/Users/legacy"),
+                Path("/Users/current"),
+            )
+
+    def test_execution_evidence_is_workspace_bound_immutable_and_hash_sensitive(self):
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        evidence = self.write_json(workspace / "evidence.json", {"schema": 1})
+        evidence.chmod(0o444)
+        volume_uuid = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"
+        alias = {
+            "volume": {"volume_uuid": volume_uuid},
+            "mappings": {
+                "workspace": {
+                    "logical": str(workspace),
+                    "physical": str(workspace),
+                }
+            },
+        }
+        link = {
+            "path": str(evidence),
+            "sha256": build_pipeline.sha256_file(evidence),
+        }
+        with mock.patch.object(
+            build_pipeline,
+            "_volume_identity",
+            return_value={"volume_uuid": volume_uuid},
+        ):
+            path, value = build_pipeline._linked_execution_evidence(
+                link, alias, "fixture evidence"
+            )
+        self.assertEqual(evidence, path)
+        self.assertEqual({"schema": 1}, value)
+        evidence.chmod(0o644)
+        with mock.patch.object(
+            build_pipeline,
+            "_volume_identity",
+            return_value={"volume_uuid": volume_uuid},
+        ), self.assertRaisesRegex(build_pipeline.PipelineError, "mode is unsafe"):
+            build_pipeline._linked_execution_evidence(
+                link, alias, "fixture evidence"
+            )
+        evidence.write_text('{"schema": 2}\n', encoding="utf-8")
+        evidence.chmod(0o444)
+        with mock.patch.object(
+            build_pipeline,
+            "_volume_identity",
+            return_value={"volume_uuid": volume_uuid},
+        ), self.assertRaisesRegex(build_pipeline.PipelineError, "hash changed"):
+            build_pipeline._linked_execution_evidence(
+                link, alias, "fixture evidence"
+            )
+        outside = self.write_json(self.root / "outside.json", {"schema": 1})
+        outside.chmod(0o444)
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "outside"):
+            build_pipeline._execution_evidence_path(
+                outside, alias, "outside evidence"
+            )
+
+    def test_onboarding_alias_root_receipt_is_a_required_exact_link(self):
+        receipt_path = (
+            self.source / build_pipeline.onboarding_alias_compat.RECEIPT_RELATIVE
+        )
+        workspace = self.root / "physical-workspace"
+        trial_path = (
+            workspace
+            / "work/logs"
+            / build_pipeline.onboarding_alias_compat.TRIAL_REPORT_BASENAME
+        )
+        failure_path = (
+            workspace
+            / "work/logs"
+            / build_pipeline.onboarding_alias_compat.FAILURE_REPORT_BASENAME
+        )
+        receipt = {
+            "trial_evidence": {
+                "trial_report": {"path": str(trial_path)},
+                "failure_report": {"path": str(failure_path)},
+            }
+        }
+        self.write_json(receipt_path, receipt)
+        expected = {
+            "path": str(receipt_path),
+            "bytes": receipt_path.stat().st_size,
+            "sha256": build_pipeline.sha256_file(receipt_path),
+            "value": receipt,
+        }
+        with mock.patch.object(
+            build_pipeline.onboarding_alias_compat,
+            "validate_home_alias_receipt",
+            return_value={
+                "mappings": {"workspace": {"physical": str(workspace)}}
+            },
+        ), mock.patch.object(
+            build_pipeline.onboarding_alias_compat,
+            "receipt_contract",
+            return_value=expected,
+        ) as contract:
+            path, value, link = (
+                build_pipeline.onboarding_alias_root_receipt_contract(
+                    self.source
+                )
+            )
+        self.assertEqual(receipt_path, path)
+        self.assertEqual(receipt, value)
+        self.assertEqual(
+            {
+                "path": str(receipt_path),
+                "bytes": receipt_path.stat().st_size,
+                "sha256": build_pipeline.sha256_file(receipt_path),
+            },
+            link,
+        )
+        contract.assert_called_once_with(
+            self.source,
+            trial_path=trial_path,
+            failure_path=failure_path,
+        )
+
+        bad = dict(expected)
+        bad["sha256"] = "0" * 64
+        with mock.patch.object(
+            build_pipeline.onboarding_alias_compat,
+            "validate_home_alias_receipt",
+            return_value={
+                "mappings": {"workspace": {"physical": str(workspace)}}
+            },
+        ), mock.patch.object(
+            build_pipeline.onboarding_alias_compat,
+            "receipt_contract",
+            return_value=bad,
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "contract mismatch"
+        ):
+            build_pipeline.onboarding_alias_root_receipt_contract(self.source)
+
+    def test_onboarding_alias_root_wrapper_revalidates_real_receipt_contract(self):
+        # Reuse the owning module's full graph/trial/HomeAlias fixture, but do
+        # not mock either receipt validator across this integration boundary.
+        from test_onboarding_alias_compat import OnboardingAliasCompatTests
+
+        fixture = OnboardingAliasCompatTests(
+            methodName="test_execute_pre_to_post_and_verify_immutable_receipt"
+        )
+        fixture.setUp()
+        try:
+            fixture.execute()
+            path, value, link = (
+                build_pipeline.onboarding_alias_root_receipt_contract(
+                    fixture.source
+                )
+            )
+            self.assertEqual(fixture.receipt, path)
+            self.assertEqual(
+                str(fixture.trial_path),
+                value["trial_evidence"]["trial_report"]["path"],
+            )
+            self.assertEqual(
+                str(fixture.failure_path),
+                value["trial_evidence"]["failure_report"]["path"],
+            )
+            self.assertEqual(
+                {
+                    "path": str(fixture.receipt),
+                    "bytes": fixture.receipt.stat().st_size,
+                    "sha256": build_pipeline.sha256_file(fixture.receipt),
+                },
+                link,
+            )
+        finally:
+            fixture.tearDown()
+
+    def test_resume_execution_basename_rejects_failed_arm_resume_two(self):
+        accepted = Path(
+            "build-arm64-resume3-home-alias-20260730T170000MSK.execution.json"
+        )
+        self.assertEqual(
+            accepted.name + ".part",
+            build_pipeline._resume_execution_initial_basename(
+                accepted, "arm64"
+            ),
+        )
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "authorized fresh run"
+        ):
+            build_pipeline._resume_execution_initial_basename(
+                Path(
+                    "build-arm64-resume2-home-alias-20260730T1442MSK.execution.json"
+                ),
+                "arm64",
+            )
+
+    def test_live_process_validator_requires_literal_ps_newline_escape(self):
+        out = self.source / build_pipeline.ARM_OUT
+        out.mkdir(parents=True, exist_ok=True)
+        autoninja_py = self.depot / "autoninja.py"
+        autoninja_py.write_bytes(b"fixture autoninja\n")
+        pinned_python = (
+            self.depot
+            / build_pipeline.PACKAGING_PYTHON_RELDIR
+            / "python3.11"
+        )
+        pinned_python.parent.mkdir(parents=True)
+        pinned_python.write_bytes(b"fixture python\n")
+        stdout = self.root / "resume.stdout.log"
+        stdout.write_bytes(b"completed build output\n")
+        initial = self.root / "resume.execution.json.part"
+        initial.write_bytes(b'{"fixture":true}\n')
+        initial.chmod(0o444)
+        initial_stat = initial.stat()
+        stdout_stat = stdout.stat()
+        observed_at = max(initial_stat.st_mtime_ns, stdout_stat.st_mtime_ns) + 1
+        environment = {
+            "HOME": str(self.root),
+            "LANG": "C",
+            "LC_ALL": "C",
+            "TZ": "UTC",
+            "DEVELOPER_DIR": str(self.developer),
+            "PATH": str(self.depot) + ":" + build_pipeline.SYSTEM_PATH,
+            "DEPOT_TOOLS_UPDATE": "0",
+            "DEPOT_TOOLS_METRICS": "0",
+            "GCLIENT_FILE": str(self.checkout / ".gclient"),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "NINJA_SUMMARIZE_BUILD": "1",
+        }
+        argv = [
+            str(self.depot / "autoninja"),
+            "-j8",
+            "-C",
+            build_pipeline.ARM_OUT,
+            "chrome",
+            "chrome/installer/mac:copies",
+        ]
+        record = {
+            "logical": {"source": str(self.source), "out": str(out)},
+            "process": {
+                "pid": 5000,
+                "pgid": 5000,
+                "argv": argv,
+                "environment": environment,
+                "started_at_ns": observed_at - 1,
+                "observed_live_at_ns": observed_at,
+            },
+            "completion": {"ended_at_ns": observed_at + 1},
+            "stdout_log": {
+                "path": str(stdout),
+                "inode": stdout_stat.st_ino,
+                "birth_time_ns": stdout_stat.st_mtime_ns,
+            },
+        }
+        alias = {
+            "volume": {"volume_uuid": "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"},
+            "mappings": {
+                "workspace": {
+                    "logical": str(self.root),
+                    "physical": str(self.root),
+                }
+            },
+        }
+        ninja = dict(self.ninja_report)
+        ninja["sha256"] = build_pipeline.sha256_file(self.ninja)
+        environment_order = (
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "TZ",
+            "DEVELOPER_DIR",
+            "PATH",
+            "DEPOT_TOOLS_UPDATE",
+            "DEPOT_TOOLS_METRICS",
+            "GCLIENT_FILE",
+            "PYTHONDONTWRITEBYTECODE",
+            "NINJA_SUMMARIZE_BUILD",
+        )
+        environment_command = " ".join(
+            "{}={}".format(name, environment[name]) for name in environment_order
+        )
+        declared_args = " ".join(argv)
+        trailing_args = " ".join(argv[1:])
+        pinned_command = "{} -d stats {}".format(self.ninja, trailing_args)
+        commands = {
+            "pipeline_shell_group_leader": (
+                "/bin/zsh -lc set -o pipefail\\012/usr/bin/env -i {} {} 2>&1 | "
+                "/usr/bin/tee -a {}"
+            ).format(environment_command, declared_args, stdout),
+            "autoninja_shell": "bash {} {}".format(argv[0], trailing_args),
+            "stdout_tee": "/usr/bin/tee -a {}".format(stdout),
+            "depot_python_launcher_shell": "bash {} {} {}".format(
+                self.depot / "python-bin/python3", autoninja_py, trailing_args
+            ),
+            "autoninja_python": "{} {} {}".format(
+                self.depot
+                / "python-bin"
+                / ".."
+                / build_pipeline.PACKAGING_PYTHON_RELDIR
+                / "python3",
+                autoninja_py,
+                trailing_args,
+            ),
+            "pinned_ninja": pinned_command,
+            "ninja_caffeinate": "caffeinate {}".format(pinned_command),
+        }
+        executables = {
+            "pipeline_shell_group_leader": Path("/bin/zsh"),
+            "autoninja_shell": Path("/bin/bash"),
+            "stdout_tee": Path("/usr/bin/tee"),
+            "depot_python_launcher_shell": Path("/bin/bash"),
+            "autoninja_python": pinned_python,
+            "pinned_ninja": self.ninja,
+            "ninja_caffeinate": Path("/usr/bin/caffeinate"),
+        }
+        parents = {
+            "pipeline_shell_group_leader": 99,
+            "autoninja_shell": 5000,
+            "stdout_tee": 5000,
+            "depot_python_launcher_shell": 5001,
+            "autoninja_python": 5003,
+            "pinned_ninja": 5004,
+            "ninja_caffeinate": 5005,
+        }
+        pids = {
+            "pipeline_shell_group_leader": 5000,
+            "autoninja_shell": 5001,
+            "stdout_tee": 5002,
+            "depot_python_launcher_shell": 5003,
+            "autoninja_python": 5004,
+            "pinned_ninja": 5005,
+            "ninja_caffeinate": 5006,
+        }
+        allowlisted = dict(environment)
+        allowlisted.pop("PATH")
+        allowlisted["PWD"] = str(self.source)
+        members = []
+        for role in pids:
+            executable = executables[role]
+            member = {
+                "role": role,
+                "pid": pids[role],
+                "ppid": parents[role],
+                "pgid": 5000,
+                "ps_command": commands[role],
+                "cwd_physical": str(out if role == "pinned_ninja" else self.source),
+                "executable": str(executable),
+                "executable_sha256": build_pipeline.sha256_file(executable),
+                "started_at_local_second": "2026-07-30 14:42:00",
+            }
+            if role == "autoninja_shell":
+                member.update(
+                    {
+                        "script": str(self.depot / "autoninja"),
+                        "script_sha256": build_pipeline.sha256_file(
+                            self.depot / "autoninja"
+                        ),
+                    }
+                )
+            if role in {"autoninja_python", "pinned_ninja"}:
+                member["allowlisted_environment"] = allowlisted
+            if role == "pinned_ninja":
+                member["executable_bytes"] = self.ninja.stat().st_size
+            members.append(member)
+        observation = {
+            "schema": 1,
+            "kind": "focus-macos-alias-raw-ninja-live-process-chain-observation",
+            "observed_at_ns": observed_at,
+            "existing_execution_part": {
+                "path": str(initial),
+                "bytes": initial_stat.st_size,
+                "mtime_ns": initial_stat.st_mtime_ns,
+                "sha256": build_pipeline.sha256_file(initial),
+                "device": initial_stat.st_dev,
+                "inode": initial_stat.st_ino,
+                "uid": initial_stat.st_uid,
+                "gid": initial_stat.st_gid,
+                "mode": stat.S_IMODE(initial_stat.st_mode),
+            },
+            "process_group": {"pgid": 5000, "members": members},
+            "stdout_log_live_snapshot": {
+                "path": str(stdout),
+                "bytes": stdout_stat.st_size,
+                "mtime_ns": stdout_stat.st_mtime_ns,
+                "sha256": build_pipeline.sha256_file(stdout),
+                "device": stdout_stat.st_dev,
+                "inode": stdout_stat.st_ino,
+                "uid": stdout_stat.st_uid,
+                "gid": stdout_stat.st_gid,
+                "mode": stat.S_IMODE(stdout_stat.st_mode),
+            },
+        }
+        build_pipeline._validate_live_process_observation(
+            observation,
+            initial,
+            build_pipeline.sha256_file(initial),
+            record,
+            alias,
+            ninja,
+        )
+        leader = next(
+            member
+            for member in members
+            if member["role"] == "pipeline_shell_group_leader"
+        )
+        self.assertIn("\\012", leader["ps_command"])
+        self.assertNotIn("\n", leader["ps_command"])
+        leader["ps_command"] = leader["ps_command"].replace("\\012", "\n")
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "leader identity mismatch"
+        ):
+            build_pipeline._validate_live_process_observation(
+                observation,
+                initial,
+                build_pipeline.sha256_file(initial),
+                record,
+                alias,
+                ninja,
+            )
+
+    def test_no_work_probe_rejects_pending_or_failed_ninja_graph(self):
+        ninja = dict(self.ninja_report)
+        invalid = (
+            (b"[1/1] pending edge\n", "not complete"),
+            (b"warning\nninja: no work to do.\n", "not complete"),
+            (
+                b"ninja: Entering directory `out/forged'\n"
+                b"ninja: no work to do.\n",
+                "not complete",
+            ),
+            (
+                b"ninja: Entering directory `out/FocusMacArm64'\n"
+                b"ninja: Entering directory `out/FocusMacArm64'\n"
+                b"ninja: no work to do.\n",
+                "not complete",
+            ),
+            (b"\xffninja: no work to do.\n", "not UTF-8"),
+        )
+        for payload, message in invalid:
+            with self.subTest(payload=payload):
+                process = mock.Mock(returncode=0)
+                with mock.patch.object(
+                    build_pipeline, "safe_environment", return_value={}
+                ), mock.patch.object(
+                    build_pipeline.subprocess, "Popen", return_value=process
+                ), mock.patch.object(
+                    build_pipeline,
+                    "_collect_bounded_probe_output",
+                    return_value=payload,
+                ), self.assertRaisesRegex(build_pipeline.PipelineError, message):
+                    build_pipeline._ninja_no_work_contract(
+                        self.source,
+                        self.developer,
+                        build_pipeline.ARM_OUT,
+                        ninja,
+                    )
+        process = mock.Mock(returncode=0)
+        valid = (
+            b"ninja: Entering directory `out/FocusMacArm64'\n"
+            b"ninja: no work to do.\n"
+        )
+        with mock.patch.object(
+            build_pipeline, "safe_environment", return_value={}
+        ), mock.patch.object(
+            build_pipeline.subprocess, "Popen", return_value=process
+        ), mock.patch.object(
+            build_pipeline, "_collect_bounded_probe_output", return_value=valid
+        ):
+            report = build_pipeline._ninja_no_work_contract(
+                self.source, self.developer, build_pipeline.ARM_OUT, ninja
+            )
+        self.assertTrue(report["no_work"])
+
+    def test_downstream_no_work_rechecks_authorized_history_after_probe(self):
+        self.write_json(
+            self.source / build_pipeline.HOME_ALIAS_RECEIPT,
+            {"fixture": True},
+        )
+        out = self.source / build_pipeline.X64_OUT
+        out.mkdir(parents=True, exist_ok=True)
+        authorized = {"ninja_log": {}, "ninja_deps": {}}
+        context = mock.Mock()
+        with mock.patch.object(
+            build_pipeline,
+            "slice_receipt_contract",
+            return_value=(self.root / "slice.json", {"schema": 2}),
+        ), mock.patch.object(
+            build_pipeline, "_ninja_history_exact_contract"
+        ) as history, mock.patch.object(
+            build_pipeline,
+            "_ninja_no_work_contract",
+            return_value={"no_work": True},
+        ), mock.patch.object(
+            build_pipeline, "ninja_contract", return_value=self.ninja_report
+        ), mock.patch.object(
+            build_pipeline, "_recorded_alias_context", return_value=context
+        ):
+            report = build_pipeline._live_alias_slice_no_work(
+                self.source,
+                self.developer,
+                "x64",
+                authorized_history=authorized,
+            )
+        self.assertTrue(report["no_work"])
+        self.assertEqual(2, history.call_count)
+        self.assertEqual(
+            "authorized downstream signing", history.call_args_list[0].args[2]
+        )
+        self.assertEqual(
+            "post-probe authorized downstream signing",
+            history.call_args_list[1].args[2],
+        )
+
+    def test_first_downstream_no_work_freezes_current_history_around_probe(self):
+        self.write_json(
+            self.source / build_pipeline.HOME_ALIAS_RECEIPT,
+            {"fixture": True},
+        )
+        out = self.source / build_pipeline.X64_OUT
+        out.mkdir(parents=True, exist_ok=True)
+        snapshot = {"ninja_log": {"sha256": "a"}, "ninja_deps": {"sha256": "b"}}
+        with mock.patch.object(
+            build_pipeline,
+            "slice_receipt_contract",
+            return_value=(self.root / "slice.json", {"schema": 2}),
+        ), mock.patch.object(
+            build_pipeline, "_ninja_history_snapshot", return_value=snapshot
+        ) as capture_history, mock.patch.object(
+            build_pipeline, "_ninja_history_exact_contract"
+        ) as exact_history, mock.patch.object(
+            build_pipeline,
+            "_ninja_no_work_contract",
+            return_value={"no_work": True},
+        ), mock.patch.object(
+            build_pipeline, "ninja_contract", return_value=self.ninja_report
+        ), mock.patch.object(
+            build_pipeline, "_recorded_alias_context", return_value=mock.Mock()
+        ):
+            report = build_pipeline._live_alias_slice_no_work(
+                self.source, self.developer, "x64"
+            )
+        self.assertTrue(report["no_work"])
+        capture_history.assert_called_once_with(out)
+        self.assertEqual(2, exact_history.call_count)
+        self.assertIs(snapshot, exact_history.call_args_list[0].args[0])
+        self.assertIs(snapshot, exact_history.call_args_list[1].args[0])
+
+    def test_execute_resumed_slice_only_atomically_publishes_schema_two_receipt(self):
+        out = self.source / build_pipeline.ARM_OUT
+        out.mkdir(parents=True, exist_ok=True)
+        receipt_path = out / build_pipeline.SLICE_RECEIPT_NAME
+        alias_path = self.source / build_pipeline.HOME_ALIAS_RECEIPT
+        self.write_json(alias_path, {"fixture": True})
+        plan = {
+            "stage": "finalize-resumed-arm64",
+            "architecture": "arm64",
+            "out": str(out),
+            "receipt": str(receipt_path),
+            "app": {"architectures": ["arm64"]},
+            "app_tree_sha256": "0" * 64,
+            "args_gn_sha256": "a" * 64,
+            "home_alias_compatibility": {
+                "path": str(alias_path),
+                "sha256": build_pipeline.sha256_file(alias_path),
+            },
+            "onboarding_alias_root_compatibility": {
+                "path": str(self.source / ".focus-macos-onboarding-alias-root.json"),
+                "bytes": 1234,
+                "sha256": "9" * 64,
+            },
+            "resume_execution": {
+                "path": str(self.root / "resume.execution.json"),
+                "sha256": "b" * 64,
+            },
+            "mixed_path_scan": {"mixed_paths": False},
+            "no_work_probe_command": ["ninja", "-n"],
+            "ninja": self.ninja_report,
+            "generated_linkedit_strip": {"all_linker_rules_use_selected_strip": True},
+            "xcode27_compatibility_receipt_sha256": "c" * 64,
+            "xcode27_seatbelt_compatibility_receipt_sha256": "d" * 64,
+            "screen_ai_disabled_compatibility_receipt_sha256": "e" * 64,
+            "xcode27_linkedit_strip_compatibility_receipt_sha256": "f" * 64,
+        }
+        no_work = {"no_work": True, "command": ["ninja", "-n"]}
+        with mock.patch.object(
+            build_pipeline, "resumed_slice_plan", return_value=plan
+        ), mock.patch.object(
+            build_pipeline, "_ninja_no_work_contract", return_value=no_work
+        ), mock.patch.object(
+            build_pipeline, "_recorded_alias_context", return_value=mock.Mock()
+        ), mock.patch.object(
+            build_pipeline, "home_alias_receipt_contract"
+        ), mock.patch.object(
+            build_pipeline, "slice_receipt_contract"
+        ):
+            with self.assertRaisesRegex(
+                build_pipeline.PipelineError, "confirm-resumed-slice"
+            ):
+                build_pipeline.execute_resumed_slice(
+                    self.source,
+                    self.developer,
+                    "arm64",
+                    self.root / "resume.execution.json",
+                    plan,
+                    False,
+                )
+            result = build_pipeline.execute_resumed_slice(
+                self.source,
+                self.developer,
+                "arm64",
+                self.root / "resume.execution.json",
+                plan,
+                True,
+            )
+            receipt = json.loads(
+                Path(result["path"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                build_pipeline.RESUMED_SLICE_RECEIPT_SCHEMA,
+                receipt["schema"],
+            )
+            self.assertTrue(receipt["raw_ninja_completed"])
+            self.assertFalse(receipt["gn_gen_executed_by_finalizer"])
+            self.assertFalse(receipt["build_command_executed_by_finalizer"])
+            self.assertEqual(
+                plan["onboarding_alias_root_compatibility"],
+                receipt["onboarding_alias_root_compatibility"],
+            )
+            with self.assertRaisesRegex(
+                build_pipeline.PipelineError, "refusing to replace receipt"
+            ):
+                build_pipeline.execute_resumed_slice(
+                    self.source,
+                    self.developer,
+                    "arm64",
+                    self.root / "resume.execution.json",
+                    plan,
+                    True,
+                )
+
+    def test_home_alias_resume_cli_is_explicit_and_has_no_gn_option(self):
+        adopt = build_pipeline.parser().parse_args(
+            [
+                "adopt-home-alias",
+                "--source-root",
+                "/Users/legacy/work/src",
+                "--developer-dir",
+                "/Users/legacy/Xcode.app/Contents/Developer",
+                "--logical-home",
+                "/Users/legacy",
+                "--logical-workspace-root",
+                "/Users/legacy/work",
+            ]
+        )
+        self.assertFalse(adopt.execute)
+        resume = build_pipeline.parser().parse_args(
+            [
+                "finalize-resumed-x64",
+                "--source-root",
+                "/Users/legacy/work/src",
+                "--developer-dir",
+                "/Users/legacy/Xcode.app/Contents/Developer",
+                "--resume-record",
+                "/Users/legacy/work/logs/x64.execution.json",
+            ]
+        )
+        self.assertEqual("finalize-resumed-x64", resume.command)
+        self.assertFalse(resume.confirm_resumed_slice)
+        self.assertFalse(hasattr(resume, "allow_recovery_move"))
 
 
 if __name__ == "__main__":

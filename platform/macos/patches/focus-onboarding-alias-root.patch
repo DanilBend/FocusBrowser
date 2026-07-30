@@ -1,0 +1,31 @@
+diff --git a/components/focus_onboarding/vite.config.ts b/components/focus_onboarding/vite.config.ts
+--- a/components/focus_onboarding/vite.config.ts
++++ b/components/focus_onboarding/vite.config.ts
+@@ -1,4 +1,5 @@
+ import path from "node:path";
++import { realpathSync } from "node:fs";
+ import { promisify } from "node:util";
+ import { execFile } from "node:child_process";
+ import { defineConfig, PluginOption } from "vite";
+@@ -37,8 +38,21 @@ const grdWatcher: PluginOption = {
+     },
+ };
+ 
++const canonicalBuildRoot: PluginOption = {
++    name: "canonical-build-root",
++    enforce: "pre",
++    apply: "build",
++    configResolved(config) {
++        // The GN command may pass the source through a compatibility symlink.
++        // Rollup canonicalizes HTML inputs, so keep Vite's resolved root on the
++        // same physical path before it derives emitted asset names.
++        config.root = realpathSync(config.root);
++    },
++};
++
+ export default defineConfig({
+     plugins: [
++        canonicalBuildRoot,
+         grdWatcher,
+         svelte(),
+     ],
