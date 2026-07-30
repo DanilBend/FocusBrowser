@@ -28,12 +28,18 @@ After the separate arm64 and x86_64 builds are merged and the complete
    read-only, and revalidates the app and `/Applications` link. The release
    invocation must include `--require-universal`; thin images are only for
    architecture-specific local testing.
-5. Mount the exact placed DMG read-only and repeat both runtime smokes from its
-   app. A failed final check rejects only the unchanged device/inode created by
-   this pipeline, never an unrelated replacement. If neither normal nor forced
-   detach succeeds, retain the exact DMG for manual detach; never unlink the
-   backing file while its detach state is unproven.
-6. Record the app/DMG SHA-256, both runtime reports, and exact Chromium/Focus
+5. Keep the packaged DMG unpublished inside an owner-only `0700` directory,
+   mount that exact candidate read-only, and repeat both runtime smokes from its
+   app. Hash the candidate before and after the mount. Only after acceptance and
+   proven detach may the pipeline hard-link the accepted inode to the absent
+   final path and remove the private link. This is an atomic no-overwrite
+   publication; a racing unrelated file is never replaced or removed.
+6. A failed check removes only the exact candidate inode created by this run
+   and leaves the final path absent. If neither normal nor forced detach can be
+   proven, retain both the private backing candidate and its mount root for
+   manual detach; never unlink a backing file while its detach state is
+   unproven.
+7. Record the app/DMG SHA-256, both runtime reports, and exact Chromium/Focus
    versions.
 
 The DMG container itself does not require an Apple account for local use. An

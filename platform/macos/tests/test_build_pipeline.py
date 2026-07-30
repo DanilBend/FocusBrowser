@@ -7,6 +7,7 @@ import os
 import plistlib
 import re
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -53,6 +54,7 @@ class BuildPipelineTests(unittest.TestCase):
         self.generated_strings = (
             self.source / build_pipeline.prepare_source.ONBOARDING_STRINGS_OUTPUT
         )
+
         self.generated_strings.parent.mkdir(parents=True)
         self.generated_strings.write_bytes(
             (
@@ -142,6 +144,19 @@ class BuildPipelineTests(unittest.TestCase):
         self.write_acquisition_marker()
         self.write_tool_receipt()
         self.write_preparation_receipt()
+
+    @staticmethod
+    def is_package_command(command):
+        return (
+            isinstance(command, list)
+            and len(command) > 1
+            and Path(command[1]).name == "package_local_dmg.py"
+            and "--output" in command
+        )
+
+    @staticmethod
+    def package_command_output(command):
+        return Path(command[command.index("--output") + 1])
 
     def tearDown(self):
         self.onboarding_node_patch.stop()
@@ -2078,7 +2093,12 @@ class BuildPipelineTests(unittest.TestCase):
                 "copy_packaging": ["/usr/bin/ditto", "packaging", "unsigned"],
                 "universalize": [python["path"], "universalize.py"],
                 "sign": [python["path"], "sign_chrome.py"],
-                "package": [python["path"], "package_local_dmg.py"],
+                "package": [
+                    python["path"],
+                    "package_local_dmg.py",
+                    "--output",
+                    str(output),
+                ],
             },
             "arm_app": str(self.root / "arm64/Focus Browser.app"),
             "x64_app": str(self.root / "x64/Focus Browser.app"),
@@ -2748,6 +2768,9 @@ class BuildPipelineTests(unittest.TestCase):
         runtime = plan["runtime_acceptance"]
         self.assertTrue(runtime["signed_app_before_packaging"])
         self.assertTrue(runtime["mounted_final_dmg"])
+        self.assertEqual("0700", runtime["private_candidate_mode"])
+        self.assertTrue(runtime["final_output_absent_until_runtime_passes"])
+        self.assertTrue(runtime["atomic_no_overwrite_publish"])
         self.assertTrue(runtime["native_arm64_required"])
         self.assertTrue(runtime["rosetta_x86_64_required"])
         self.assertEqual(["arm64", "x86_64"], runtime["architectures"])
@@ -2836,11 +2859,33 @@ class BuildPipelineTests(unittest.TestCase):
     def test_merge_runtime_gates_signed_app_before_package_then_mounted_dmg(self):
         fixture = self.prepare_execute_merge_fixture()
         events = []
+        candidates = []
+        candidate_identities = []
 
         def monitored(command, *_args, **_kwargs):
-            if command == fixture["plan"]["commands"]["package"]:
+            if self.is_package_command(command):
                 events.append("package")
-                fixture["output"].write_bytes(b"runtime-gated dmg")
+                candidate = self.package_command_output(command)
+                candidates.append(candidate)
+                self.assertFalse(fixture["output"].exists())
+                self.assertEqual(
+                    0o700, stat.S_IMODE(os.lstat(str(candidate.parent)).st_mode)
+                )
+                candidate.write_bytes(b"runtime-gated dmg")
+                observed = os.lstat(str(candidate))
+                candidate_identities.append((observed.st_dev, observed.st_ino))
+
+        def mounted_runtime(_path):
+            events.append("mounted-runtime")
+            self.assertFalse(fixture["output"].exists())
+            return {
+                "passed": True,
+                "location": "mounted",
+                "size_bytes": candidates[0].stat().st_size,
+                "sha256": build_pipeline.package_local_dmg.sha256_file(
+                    candidates[0]
+                ),
+            }
 
         with self.mocked_merge_dependencies(
             fixture, monitored
@@ -2852,17 +2897,7 @@ class BuildPipelineTests(unittest.TestCase):
                 events.append("signed-runtime")
                 or {"passed": True, "location": "signed"}
             )
-            dependencies["mounted"].side_effect = lambda *_args: (
-                events.append("mounted-runtime")
-                or {
-                    "passed": True,
-                    "location": "mounted",
-                    "size_bytes": fixture["output"].stat().st_size,
-                    "sha256": build_pipeline.package_local_dmg.sha256_file(
-                        fixture["output"]
-                    ),
-                }
-            )
+            dependencies["mounted"].side_effect = mounted_runtime
             report = build_pipeline.execute_merge(
                 self.source, self.developer, fixture["plan"]
             )
@@ -2871,7 +2906,13 @@ class BuildPipelineTests(unittest.TestCase):
             ["matrix", "signed-runtime", "package", "mounted-runtime"],
             events,
         )
+        self.assertEqual(1, len(candidates))
+        self.assertFalse(candidates[0].parent.exists())
         self.assertTrue(fixture["output"].is_file())
+        published = os.lstat(str(fixture["output"]))
+        self.assertEqual(
+            candidate_identities[0], (published.st_dev, published.st_ino)
+        )
         self.assertTrue(report["codesign_matrix"]["passed"])
         self.assertEqual(
             "signed", report["runtime_acceptance"]["signed_app"]["location"]
@@ -2880,6 +2921,11 @@ class BuildPipelineTests(unittest.TestCase):
             "mounted",
             report["runtime_acceptance"]["mounted_final_dmg"]["location"],
         )
+        self.assertTrue(
+            report["runtime_acceptance"]["mounted_final_dmg"][
+                "published_same_inode"
+            ]
+        )
 
     def test_signed_app_runtime_failure_prevents_dmg_packaging(self):
         fixture = self.prepare_execute_merge_fixture()
@@ -2887,8 +2933,10 @@ class BuildPipelineTests(unittest.TestCase):
 
         def monitored(command, *_args, **_kwargs):
             commands.append(command)
-            if command == fixture["plan"]["commands"]["package"]:
-                fixture["output"].write_bytes(b"must not be created")
+            if self.is_package_command(command):
+                self.package_command_output(command).write_bytes(
+                    b"must not be created"
+                )
 
         failure = build_pipeline.runtime_smoke.RuntimeSmokeError(
             "synthetic signed runtime failure"
@@ -2905,15 +2953,18 @@ class BuildPipelineTests(unittest.TestCase):
                 self.source, self.developer, fixture["plan"]
             )
 
-        self.assertNotIn(fixture["plan"]["commands"]["package"], commands)
+        self.assertFalse(any(self.is_package_command(command) for command in commands))
         self.assertFalse(fixture["output"].exists())
 
     def test_mounted_dmg_runtime_failure_unlinks_exact_created_inode(self):
         fixture = self.prepare_execute_merge_fixture()
+        candidates = []
 
         def monitored(command, *_args, **_kwargs):
-            if command == fixture["plan"]["commands"]["package"]:
-                fixture["output"].write_bytes(b"rejected dmg")
+            if self.is_package_command(command):
+                candidate = self.package_command_output(command)
+                candidates.append(candidate)
+                candidate.write_bytes(b"rejected dmg")
 
         failure = build_pipeline.runtime_smoke.RuntimeSmokeError(
             "synthetic mounted runtime failure"
@@ -2931,13 +2982,112 @@ class BuildPipelineTests(unittest.TestCase):
             )
 
         self.assertFalse(fixture["output"].exists())
+        self.assertEqual(1, len(candidates))
+        self.assertFalse(candidates[0].parent.exists())
+
+    def test_package_post_run_failure_cleans_private_candidate(self):
+        fixture = self.prepare_execute_merge_fixture()
+        candidates = []
+
+        def monitored(command, *_args, **_kwargs):
+            if not self.is_package_command(command):
+                return
+            candidate = self.package_command_output(command)
+            candidates.append(candidate)
+            candidate.write_bytes(b"packager completed before monitor failed")
+            raise build_pipeline.PipelineError("synthetic post-run disk gate")
+
+        with self.mocked_merge_dependencies(
+            fixture, monitored
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "synthetic post-run disk gate"
+        ):
+            build_pipeline.execute_merge(
+                self.source, self.developer, fixture["plan"]
+            )
+
+        self.assertFalse(fixture["output"].exists())
+        self.assertEqual(1, len(candidates))
+        self.assertFalse(candidates[0].parent.exists())
+
+    def test_atomic_publish_race_preserves_rival_and_cleans_candidate(self):
+        fixture = self.prepare_execute_merge_fixture()
+        candidates = []
+
+        def monitored(command, *_args, **_kwargs):
+            if self.is_package_command(command):
+                candidate = self.package_command_output(command)
+                candidates.append(candidate)
+                candidate.write_bytes(b"accepted candidate")
+
+        def mounted(path):
+            path = Path(path)
+            fixture["output"].write_bytes(b"unrelated rival")
+            return {
+                "passed": True,
+                "location": "mounted",
+                "size_bytes": path.stat().st_size,
+                "sha256": build_pipeline.package_local_dmg.sha256_file(path),
+            }
+
+        with self.mocked_merge_dependencies(
+            fixture, monitored, mounted_runtime_side_effect=mounted
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "refusing to overwrite"
+        ):
+            build_pipeline.execute_merge(
+                self.source, self.developer, fixture["plan"]
+            )
+
+        self.assertEqual(b"unrelated rival", fixture["output"].read_bytes())
+        self.assertEqual(1, len(candidates))
+        self.assertFalse(candidates[0].parent.exists())
+
+    def test_failure_after_atomic_publish_rolls_back_final_output(self):
+        fixture = self.prepare_execute_merge_fixture()
+        candidates = []
+        real_cleanup = build_pipeline._cleanup_private_dmg_candidate
+        cleanup_calls = 0
+
+        def monitored(command, *_args, **_kwargs):
+            if self.is_package_command(command):
+                candidate = self.package_command_output(command)
+                candidates.append(candidate)
+                candidate.write_bytes(b"accepted candidate")
+
+        def cleanup_then_fail(*args, **kwargs):
+            nonlocal cleanup_calls
+            cleanup_calls += 1
+            real_cleanup(*args, **kwargs)
+            raise build_pipeline.PipelineError("synthetic post-publish failure")
+
+        with self.mocked_merge_dependencies(
+            fixture, monitored
+        ), mock.patch.object(
+            build_pipeline,
+            "_cleanup_private_dmg_candidate",
+            side_effect=cleanup_then_fail,
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "synthetic post-publish failure"
+        ):
+            build_pipeline.execute_merge(
+                self.source, self.developer, fixture["plan"]
+            )
+
+        self.assertEqual(1, cleanup_calls)
+        self.assertFalse(fixture["output"].exists())
+        self.assertEqual(1, len(candidates))
+        self.assertFalse(candidates[0].parent.exists())
 
     def test_mounted_dmg_detach_failure_retains_exact_created_inode(self):
         fixture = self.prepare_execute_merge_fixture()
+        candidates = []
 
         def monitored(command, *_args, **_kwargs):
-            if command == fixture["plan"]["commands"]["package"]:
-                fixture["output"].write_bytes(b"still mounted dmg")
+            if self.is_package_command(command):
+                candidate = self.package_command_output(command)
+                candidates.append(candidate)
+                candidate.write_bytes(b"still mounted dmg")
 
         failure = build_pipeline.runtime_smoke.DmgDetachError(
             "synthetic normal and forced detach failure"
@@ -2948,13 +3098,19 @@ class BuildPipelineTests(unittest.TestCase):
             mounted_runtime_side_effect=failure,
         ), self.assertRaisesRegex(
             build_pipeline.PipelineError,
-            "retained the exact backing DMG",
+            "private backing candidate was retained",
         ):
             build_pipeline.execute_merge(
                 self.source, self.developer, fixture["plan"]
             )
 
-        self.assertEqual(b"still mounted dmg", fixture["output"].read_bytes())
+        self.assertFalse(fixture["output"].exists())
+        self.assertEqual(1, len(candidates))
+        self.assertEqual(b"still mounted dmg", candidates[0].read_bytes())
+        self.assertEqual(
+            0o700, stat.S_IMODE(os.lstat(str(candidates[0].parent)).st_mode)
+        )
+        shutil.rmtree(candidates[0].parent)
 
     def test_rejected_dmg_cleanup_refuses_replaced_inode(self):
         output = self.root / "FocusBrowser-replaced.dmg"
@@ -3051,12 +3207,73 @@ class BuildPipelineTests(unittest.TestCase):
             )
 
         self.assertFalse(fixture["final_root"].exists())
+        self.assertTrue(fixture["partial_root"].is_dir())
+        self.assertTrue(fixture["arm_out"].is_dir())
+        self.assertFalse(fixture["artifact_source"].exists())
+        self.assertEqual(
+            b"concurrent mutation\n",
+            moved_payload.read_bytes(),
+        )
+
+    def test_linkedit_recovery_rolls_back_interrupt_after_artifact_rename(self):
+        fixture = self.prepare_minimal_linkedit_recovery_execute_fixture()
+        untouched_source = self.source / build_pipeline.STAGE_RECEIPT
+        untouched_source.write_bytes(b"untouched receipt evidence\n")
+        fixture["plan"]["artifacts"].append(
+            {
+                "relative_path": build_pipeline.STAGE_RECEIPT,
+                "source": str(untouched_source),
+                "archive_relative_path": (
+                    "artifacts/" + build_pipeline.STAGE_RECEIPT
+                ),
+                "kind": "file",
+                "sha256": build_pipeline.sha256_file(untouched_source),
+                "bytes": untouched_source.stat().st_size,
+            }
+        )
+        real_replace = os.replace
+        interrupted = False
+        artifact = fixture["plan"]["artifacts"][0]
+        archive_destination = (
+            fixture["partial_root"] / artifact["archive_relative_path"]
+        )
+
+        def replace_then_interrupt(source, destination):
+            nonlocal interrupted
+            result = real_replace(source, destination)
+            if (
+                not interrupted
+                and Path(source) == fixture["artifact_source"]
+                and Path(destination) == archive_destination
+            ):
+                interrupted = True
+                raise KeyboardInterrupt("synthetic post-artifact interrupt")
+            return result
+
+        with mock.patch.object(
+            build_pipeline,
+            "linkedit_recovery_plan",
+            return_value=fixture["plan"],
+        ), mock.patch.object(
+            build_pipeline, "require_free", return_value=60 * build_pipeline.GIB
+        ), mock.patch.object(
+            build_pipeline.os, "replace", side_effect=replace_then_interrupt
+        ), self.assertRaisesRegex(
+            KeyboardInterrupt, "synthetic post-artifact interrupt"
+        ):
+            build_pipeline.execute_linkedit_recovery(
+                self.source, self.developer, fixture["plan"], True
+            )
+
+        self.assertTrue(interrupted)
+        self.assertFalse(fixture["final_root"].exists())
         self.assertFalse(fixture["partial_root"].exists())
         self.assertFalse(fixture["arm_out"].exists())
         self.assertEqual(
-            b"concurrent mutation\n",
+            b"legacy invalid evidence\n",
             fixture["payload"].read_bytes(),
         )
+        self.assertEqual(b"untouched receipt evidence\n", untouched_source.read_bytes())
 
     def test_linkedit_recovery_rolls_back_interrupt_after_final_rename(self):
         fixture = self.prepare_minimal_linkedit_recovery_execute_fixture()

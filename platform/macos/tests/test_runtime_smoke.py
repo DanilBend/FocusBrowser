@@ -2,6 +2,7 @@
 
 import os
 import plistlib
+import shutil
 import signal
 import stat
 import subprocess
@@ -198,17 +199,21 @@ class RuntimeSmokeTests(unittest.TestCase):
         def popen(command, **kwargs):
             captured["command"] = list(command)
             captured["kwargs"] = kwargs
-            data_url = command[-1]
-            marker = data_url.split("FOCUSBROWSER_", 1)[1].split("_OK", 1)[0]
-            marker = "FOCUSBROWSER_" + marker + "_OK"
-            kwargs["stdout"].write(
-                ("<main id=\"focus-runtime-smoke\">" + marker + "</main>").encode()
-            )
             return Process()
 
         profile = self.root / "fresh-profile"
         profile.mkdir(mode=0o700)
-        with mock.patch.object(runtime_smoke.subprocess, "Popen", side_effect=popen), mock.patch.object(
+        marker = "FOCUSBROWSER_ARM64_{}_OK".format("AB" * 12)
+        stdout = ("<main id=\"focus-runtime-smoke\">" + marker + "</main>").encode()
+        with mock.patch.object(
+            runtime_smoke.secrets, "token_hex", return_value="ab" * 12
+        ), mock.patch.object(
+            runtime_smoke.subprocess, "Popen", side_effect=popen
+        ), mock.patch.object(
+            runtime_smoke,
+            "_collect_bounded_output",
+            return_value=(stdout, b"", 0),
+        ), mock.patch.object(
             runtime_smoke, "_signal_group", return_value=False
         ):
             report = runtime_smoke._run_browser(
@@ -252,7 +257,15 @@ class RuntimeSmokeTests(unittest.TestCase):
 
         profile = self.root / "timeout-profile"
         profile.mkdir(mode=0o700)
-        with mock.patch.object(runtime_smoke.subprocess, "Popen", return_value=Process()), mock.patch.object(
+        with mock.patch.object(
+            runtime_smoke.subprocess, "Popen", return_value=Process()
+        ), mock.patch.object(
+            runtime_smoke,
+            "_collect_bounded_output",
+            side_effect=runtime_smoke.RuntimeSmokeError(
+                "x86_64 runtime smoke timed out after 5 seconds"
+            ),
+        ), mock.patch.object(
             runtime_smoke, "_signal_group", side_effect=signal_group
         ), self.assertRaisesRegex(runtime_smoke.RuntimeSmokeError, "timed out"):
             runtime_smoke._run_browser(
@@ -266,6 +279,83 @@ class RuntimeSmokeTests(unittest.TestCase):
         self.assertEqual(
             [(34567, signal.SIGINT), (34567, signal.SIGKILL)], signals
         )
+
+    def test_tool_capture_accepts_exact_cap_and_rejects_cap_plus_one(self):
+        with mock.patch.object(runtime_smoke, "MAX_LOG_BYTES", 1024):
+            stdout, stderr = runtime_smoke._run_capture(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os; os.write(1, b'x' * 1024)",
+                ],
+                timeout_seconds=5,
+            )
+            self.assertEqual(1024, len(stdout))
+            self.assertEqual(b"", stderr)
+            with self.assertRaisesRegex(
+                runtime_smoke.RuntimeSmokeError, "stdout exceeded"
+            ):
+                runtime_smoke._run_capture(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import os, time; os.write(1, b'x' * 1025); time.sleep(30)",
+                    ],
+                    timeout_seconds=5,
+                )
+
+    def test_tool_capture_drains_stdout_and_stderr_concurrently(self):
+        amount = 128 * 1024
+        script = (
+            "import os\n"
+            "for fd, value in ((1, b'o'), (2, b'e')):\n"
+            "    remaining = 131072\n"
+            "    while remaining:\n"
+            "        written = os.write(fd, value * min(4096, remaining))\n"
+            "        remaining -= written\n"
+        )
+        with mock.patch.object(runtime_smoke, "MAX_LOG_BYTES", 256 * 1024):
+            stdout, stderr = runtime_smoke._run_capture(
+                [sys.executable, "-c", script], timeout_seconds=5
+            )
+        self.assertEqual(b"o" * amount, stdout)
+        self.assertEqual(b"e" * amount, stderr)
+
+    def test_browser_overflow_is_bounded_and_cleans_process_group(self):
+        real_popen = subprocess.Popen
+        profile = self.root / "overflow-profile"
+        profile.mkdir(mode=0o700)
+        processes = []
+
+        def noisy_process(_command, **kwargs):
+            process = real_popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os, time; os.write(2, b'x' * 1025); time.sleep(30)",
+                ],
+                **kwargs,
+            )
+            processes.append(process)
+            return process
+
+        with mock.patch.object(
+            runtime_smoke, "MAX_LOG_BYTES", 1024
+        ), mock.patch.object(
+            runtime_smoke.subprocess, "Popen", side_effect=noisy_process
+        ), self.assertRaisesRegex(
+            runtime_smoke.RuntimeSmokeError, "stderr exceeded"
+        ):
+            runtime_smoke._run_browser(
+                self.executable,
+                "arm64",
+                profile,
+                self.root,
+                5,
+                {"PATH": runtime_smoke.SYSTEM_PATH},
+            )
+        self.assertEqual(1, len(processes))
+        self.assertIsNotNone(processes[0].poll())
 
     def test_universal_runtime_requires_rosetta_and_fresh_profiles(self):
         profiles = []
@@ -315,18 +405,26 @@ class RuntimeSmokeTests(unittest.TestCase):
         dmg = self.root / "FocusBrowser.dmg"
         dmg.write_bytes(b"mock dmg")
         commands = []
+        mounted = False
+        mountpoint = None
 
         def run(command, *_args, **_kwargs):
+            nonlocal mounted, mountpoint
             commands.append(list(command))
             if command[1] == "attach":
                 mountpoint = Path(command[command.index("-mountpoint") + 1])
                 (mountpoint / runtime_smoke.APP_NAME).mkdir()
                 os.symlink("/Applications", str(mountpoint / "Applications"))
+                mounted = True
+            elif command[1] == "detach":
+                shutil.rmtree(mountpoint / runtime_smoke.APP_NAME)
+                (mountpoint / "Applications").unlink()
+                mounted = False
             return b"", b""
 
         statvfs = SimpleNamespace(f_flag=os.ST_RDONLY)
         with mock.patch.object(runtime_smoke, "_run_capture", side_effect=run), mock.patch.object(
-            runtime_smoke.os.path, "ismount", return_value=True
+            runtime_smoke.os.path, "ismount", side_effect=lambda _path: mounted
         ), mock.patch.object(
             runtime_smoke.os, "statvfs", return_value=statvfs
         ), mock.patch.object(
@@ -345,17 +443,25 @@ class RuntimeSmokeTests(unittest.TestCase):
         dmg = self.root / "FocusBrowser.dmg"
         dmg.write_bytes(b"mock dmg")
         commands = []
+        mounted = False
+        mountpoint = None
 
         def run(command, *_args, **_kwargs):
+            nonlocal mounted, mountpoint
             commands.append(list(command))
             if command[1] == "attach":
                 mountpoint = Path(command[command.index("-mountpoint") + 1])
                 (mountpoint / runtime_smoke.APP_NAME).mkdir()
                 os.symlink("/Applications", str(mountpoint / "Applications"))
+                mounted = True
+            elif command[1] == "detach":
+                shutil.rmtree(mountpoint / runtime_smoke.APP_NAME)
+                (mountpoint / "Applications").unlink()
+                mounted = False
             return b"", b""
 
         with mock.patch.object(runtime_smoke, "_run_capture", side_effect=run), mock.patch.object(
-            runtime_smoke.os.path, "ismount", return_value=True
+            runtime_smoke.os.path, "ismount", side_effect=lambda _path: mounted
         ), mock.patch.object(
             runtime_smoke.os,
             "statvfs",
@@ -367,6 +473,66 @@ class RuntimeSmokeTests(unittest.TestCase):
         ), self.assertRaisesRegex(runtime_smoke.RuntimeSmokeError, "synthetic"):
             runtime_smoke.validate_mounted_dmg_runtime(dmg)
         self.assertEqual("detach", commands[-1][1])
+
+    def test_successful_attach_with_missing_mount_still_attempts_detach(self):
+        dmg = self.root / "FocusBrowser.dmg"
+        dmg.write_bytes(b"mock dmg")
+        commands = []
+        temporary_root = None
+
+        def run(command, *_args, **_kwargs):
+            nonlocal temporary_root
+            commands.append(list(command))
+            if command[1] == "attach":
+                mountpoint = Path(command[command.index("-mountpoint") + 1])
+                temporary_root = mountpoint.parent
+            return b"", b""
+
+        with mock.patch.object(
+            runtime_smoke, "_run_capture", side_effect=run
+        ), mock.patch.object(
+            runtime_smoke.os.path, "ismount", return_value=False
+        ), self.assertRaisesRegex(
+            runtime_smoke.RuntimeSmokeError, "did not mount"
+        ):
+            runtime_smoke.validate_mounted_dmg_runtime(dmg)
+
+        self.assertEqual(["attach", "detach"], [command[1] for command in commands])
+        self.assertIsNotNone(temporary_root)
+        self.assertFalse(temporary_root.exists())
+
+    def test_attach_error_after_mount_still_detaches(self):
+        dmg = self.root / "FocusBrowser.dmg"
+        dmg.write_bytes(b"mock dmg")
+        commands = []
+        mounted = False
+        mountpoint = None
+
+        def run(command, *_args, **_kwargs):
+            nonlocal mounted, mountpoint
+            commands.append(list(command))
+            if command[1] == "attach":
+                mountpoint = Path(command[command.index("-mountpoint") + 1])
+                mounted = True
+                raise runtime_smoke.RuntimeSmokeError(
+                    "synthetic attach error after mount"
+                )
+            mounted = False
+            return b"", b""
+
+        with mock.patch.object(
+            runtime_smoke, "_run_capture", side_effect=run
+        ), mock.patch.object(
+            runtime_smoke.os.path,
+            "ismount",
+            side_effect=lambda _path: mounted,
+        ), self.assertRaisesRegex(
+            runtime_smoke.RuntimeSmokeError, "attach error after mount"
+        ):
+            runtime_smoke.validate_mounted_dmg_runtime(dmg)
+
+        self.assertEqual(["attach", "detach"], [command[1] for command in commands])
+        self.assertFalse(mountpoint.parent.exists())
 
     def test_final_dmg_failed_normal_and_forced_detach_is_typed(self):
         dmg = self.root / "FocusBrowser.dmg"
@@ -393,12 +559,57 @@ class RuntimeSmokeTests(unittest.TestCase):
             "validate_universal_app_runtime",
             return_value={"passed": True},
         ), self.assertRaisesRegex(
-            runtime_smoke.DmgDetachError, "normal detach failed"
-        ):
+            runtime_smoke.DmgDetachError, "could not prove final DMG detached"
+        ) as raised:
             runtime_smoke.validate_mounted_dmg_runtime(dmg)
 
         self.assertEqual("detach", commands[-2][1])
         self.assertEqual(["detach", "-force"], commands[-1][1:3])
+        retained_root = Path(raised.exception.retained_root)
+        self.assertTrue(retained_root.is_dir())
+        self.assertEqual(0o700, stat.S_IMODE(retained_root.stat().st_mode))
+        self.assertTrue(Path(raised.exception.mountpoint).is_dir())
+        shutil.rmtree(retained_root)
+
+    def test_final_dmg_rejects_same_size_in_place_mutation(self):
+        dmg = self.root / "FocusBrowser.dmg"
+        dmg.write_bytes(b"mock dmg")
+        mounted = False
+        mountpoint = None
+
+        def run(command, *_args, **_kwargs):
+            nonlocal mounted, mountpoint
+            if command[1] == "attach":
+                mountpoint = Path(command[command.index("-mountpoint") + 1])
+                (mountpoint / runtime_smoke.APP_NAME).mkdir()
+                os.symlink("/Applications", str(mountpoint / "Applications"))
+                mounted = True
+            elif command[1] == "detach":
+                shutil.rmtree(mountpoint / runtime_smoke.APP_NAME)
+                (mountpoint / "Applications").unlink()
+                mounted = False
+            return b"", b""
+
+        def mutate(_app, **_kwargs):
+            dmg.write_bytes(b"evil dmg")
+            return {"passed": True}
+
+        with mock.patch.object(
+            runtime_smoke, "_run_capture", side_effect=run
+        ), mock.patch.object(
+            runtime_smoke.os.path, "ismount", side_effect=lambda _path: mounted
+        ), mock.patch.object(
+            runtime_smoke.os,
+            "statvfs",
+            return_value=SimpleNamespace(f_flag=os.ST_RDONLY),
+        ), mock.patch.object(
+            runtime_smoke,
+            "validate_universal_app_runtime",
+            side_effect=mutate,
+        ), self.assertRaisesRegex(
+            runtime_smoke.RuntimeSmokeError, "changed"
+        ):
+            runtime_smoke.validate_mounted_dmg_runtime(dmg)
 
 
 if __name__ == "__main__":

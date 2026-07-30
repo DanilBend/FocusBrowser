@@ -7,6 +7,7 @@ import platform
 import plistlib
 import re
 import secrets
+import selectors
 import signal
 import stat
 import subprocess
@@ -74,6 +75,20 @@ class RuntimeSmokeError(RuntimeError):
 class DmgDetachError(RuntimeSmokeError):
     """Raised when a mounted final DMG cannot be proven detached."""
 
+    def __init__(self, message, mountpoint=None, retained_root=None):
+        self.mountpoint = str(mountpoint) if mountpoint is not None else None
+        self.retained_root = (
+            str(retained_root) if retained_root is not None else None
+        )
+        details = []
+        if self.mountpoint is not None:
+            details.append("retained mountpoint={}".format(self.mountpoint))
+        if self.retained_root is not None:
+            details.append("retained root={}".format(self.retained_root))
+        if details:
+            message = "{}; {}".format(message, "; ".join(details))
+        super().__init__(message)
+
 
 def _require_command(command):
     if (
@@ -84,35 +99,114 @@ def _require_command(command):
         raise RuntimeSmokeError("command must be a non-empty argv list")
 
 
-def _run_capture(command, timeout_seconds=TOOL_TIMEOUT_SECONDS, environment=None):
-    """Run one bounded tool invocation and return its stdout and stderr bytes."""
+def _collect_bounded_output(process, timeout_seconds, label):
+    """Drain both child pipes without ever retaining more than the hard cap."""
+    deadline = time.monotonic() + timeout_seconds
+    values = {"stdout": bytearray(), "stderr": bytearray()}
+    selector = selectors.DefaultSelector()
+    try:
+        for stream_name in ("stdout", "stderr"):
+            stream = getattr(process, stream_name, None)
+            if stream is None:
+                raise RuntimeSmokeError("{} has no {} pipe".format(label, stream_name))
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, stream_name)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeSmokeError(
+                    "{} timed out after {} seconds".format(label, timeout_seconds)
+                )
+            events = selector.select(min(remaining, 0.1))
+            for key, _ in events:
+                stream_name = key.data
+                value = values[stream_name]
+                maximum_read = min(64 * 1024, MAX_LOG_BYTES + 1 - len(value))
+                try:
+                    chunk = os.read(key.fileobj.fileno(), max(1, maximum_read))
+                except (BlockingIOError, InterruptedError):
+                    continue
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                value.extend(chunk)
+                if len(value) > MAX_LOG_BYTES:
+                    raise RuntimeSmokeError(
+                        "{} {} exceeded the bounded log limit".format(
+                            label, stream_name
+                        )
+                    )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeSmokeError(
+                "{} timed out after {} seconds".format(label, timeout_seconds)
+            )
+        try:
+            returncode = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeSmokeError(
+                "{} timed out after {} seconds".format(label, timeout_seconds)
+            ) from exc
+    finally:
+        selector.close()
+        for stream_name in ("stdout", "stderr"):
+            stream = getattr(process, stream_name, None)
+            if stream is not None:
+                stream.close()
+    return bytes(values["stdout"]), bytes(values["stderr"]), returncode
+
+
+def _execute_bounded(command, timeout_seconds, environment, label):
+    """Launch a new process group and preserve the primary bounded-I/O error."""
     _require_command(command)
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             command,
-            check=False,
             shell=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=environment,
-            timeout=timeout_seconds,
+            bufsize=0,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeSmokeError(
-            "command timed out after {} seconds: {}".format(
-                timeout_seconds, " ".join(command)
-            )
-        ) from exc
-    stdout = result.stdout or b""
-    stderr = result.stderr or b""
-    if len(stdout) > MAX_LOG_BYTES or len(stderr) > MAX_LOG_BYTES:
-        raise RuntimeSmokeError("command output exceeded the bounded log limit")
-    if result.returncode:
+    except OSError as exc:
+        raise RuntimeSmokeError("failed to launch {}: {}".format(label, exc)) from exc
+    primary_error = None
+    result = None
+    try:
+        result = _collect_bounded_output(process, timeout_seconds, label)
+    except BaseException as exc:
+        primary_error = exc
+    try:
+        _clean_process_group(process)
+    except BaseException as cleanup_error:
+        if primary_error is not None:
+            raise RuntimeSmokeError(
+                "{}; process-group cleanup also failed: {!r}".format(
+                    primary_error, cleanup_error
+                )
+            ) from primary_error
+        raise
+    if primary_error is not None:
+        raise primary_error
+    return result
+
+
+def _run_capture(command, timeout_seconds=TOOL_TIMEOUT_SECONDS, environment=None):
+    """Run one tool with hard in-flight stdout/stderr and time bounds."""
+    _require_command(command)
+    stdout, stderr, returncode = _execute_bounded(
+        command,
+        timeout_seconds,
+        environment,
+        "command {}".format(" ".join(command)),
+    )
+    if returncode:
         detail = (stderr or stdout)[-4096:].decode("utf-8", errors="replace").strip()
         raise RuntimeSmokeError(
             "command failed ({}): {}\n{}".format(
-                result.returncode, " ".join(command), detail or "no output"
+                returncode, " ".join(command), detail or "no output"
             )
         )
     return stdout, stderr
@@ -420,13 +514,6 @@ def _clean_process_group(process):
             raise RuntimeSmokeError("runtime process group did not terminate") from exc
 
 
-def _read_bounded(path, label):
-    size = path.stat().st_size
-    if size > MAX_LOG_BYTES:
-        raise RuntimeSmokeError("{} exceeded the bounded log limit".format(label))
-    return path.read_bytes()
-
-
 def _run_browser(executable, architecture, profile, root, timeout_seconds, environment):
     marker = "FOCUSBROWSER_{}_{}_OK".format(
         architecture.upper(), secrets.token_hex(12).upper()
@@ -445,39 +532,15 @@ def _run_browser(executable, architecture, profile, root, timeout_seconds, envir
             data_url,
         ]
     )
-    stdout_path = root / (architecture + ".stdout")
-    stderr_path = root / (architecture + ".stderr")
+    del root  # Output is drained through bounded pipes, never unbounded files.
     started = time.monotonic()
-    timed_out = False
-    returncode = None
-    process = None
-    with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
-        try:
-            process = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout,
-                stderr=stderr,
-                env=environment,
-                shell=False,
-                start_new_session=True,
-            )
-            try:
-                returncode = process.wait(timeout=timeout_seconds)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-        finally:
-            if process is not None:
-                _clean_process_group(process)
+    stdout_value, stderr_value, returncode = _execute_bounded(
+        command,
+        timeout_seconds,
+        environment,
+        "{} runtime smoke".format(architecture),
+    )
     duration = time.monotonic() - started
-    stdout_value = _read_bounded(stdout_path, "runtime stdout")
-    stderr_value = _read_bounded(stderr_path, "runtime stderr")
-    if timed_out:
-        raise RuntimeSmokeError(
-            "{} runtime smoke timed out after {} seconds".format(
-                architecture, timeout_seconds
-            )
-        )
     if returncode != 0:
         detail = stderr_value[-4096:].decode("utf-8", errors="replace").strip()
         raise RuntimeSmokeError(
@@ -550,8 +613,89 @@ def validate_universal_app_runtime(app_value, timeout_seconds=DEFAULT_TIMEOUT_SE
     }
 
 
+def _detach_mounted_final_dmg(mountpoint, retained_root):
+    """Try normal then forced detach and require an unmounted-state probe."""
+    attempts = []
+    for forced in (False, True):
+        command = [HDIUTIL, "detach"]
+        if forced:
+            command.append("-force")
+        command.append(str(mountpoint))
+        command_error = None
+        try:
+            _run_capture(command)
+        except BaseException as exc:
+            command_error = exc
+        try:
+            mounted = os.path.ismount(str(mountpoint))
+        except BaseException as probe_error:
+            attempts.append(
+                "{} detach={!r}, mount probe={!r}".format(
+                    "forced" if forced else "normal",
+                    command_error,
+                    probe_error,
+                )
+            )
+            continue
+        attempts.append(
+            "{} detach={!r}, still_mounted={}".format(
+                "forced" if forced else "normal", command_error, mounted
+            )
+        )
+        if not mounted:
+            return {
+                "forced": forced,
+                "command_succeeded": command_error is None,
+                "mountpoint_unmounted": True,
+            }
+    raise DmgDetachError(
+        "could not prove final DMG detached ({})".format("; ".join(attempts)),
+        mountpoint=mountpoint,
+        retained_root=retained_root,
+    )
+
+
+def _real_directory_identity(path, label):
+    observed = os.lstat(str(path))
+    if not stat.S_ISDIR(observed.st_mode) or stat.S_ISLNK(observed.st_mode):
+        raise RuntimeSmokeError("{} is not a real directory".format(label))
+    return observed.st_dev, observed.st_ino
+
+
+def _remove_empty_detached_mount_root(
+    temporary_root, root_identity, mountpoint, mountpoint_identity
+):
+    """Remove only the two exact empty directories created for this mount."""
+    if mountpoint_identity is not None:
+        if _real_directory_identity(mountpoint, "detached DMG mountpoint") != (
+            mountpoint_identity
+        ):
+            raise RuntimeSmokeError("detached DMG mountpoint identity changed")
+        try:
+            os.rmdir(str(mountpoint))
+        except OSError as exc:
+            raise RuntimeSmokeError(
+                "detached DMG mountpoint is not safely empty; retained at {}".format(
+                    mountpoint
+                )
+            ) from exc
+    if (
+        _real_directory_identity(temporary_root, "DMG temporary root")
+        != root_identity
+    ):
+        raise RuntimeSmokeError("DMG temporary root identity changed")
+    try:
+        os.rmdir(str(temporary_root))
+    except OSError as exc:
+        raise RuntimeSmokeError(
+            "DMG temporary root is not safely empty; retained at {}".format(
+                temporary_root
+            )
+        ) from exc
+
+
 def validate_mounted_dmg_runtime(dmg_value, timeout_seconds=DEFAULT_TIMEOUT_SECONDS):
-    """Mount the exact final DMG read-only and repeat both runtime launches."""
+    """Mount the exact candidate/final DMG and repeat both runtime launches."""
     candidate = Path(dmg_value).expanduser()
     if candidate.is_symlink():
         raise RuntimeSmokeError("runtime DMG path must not be a symlink")
@@ -564,13 +708,23 @@ def validate_mounted_dmg_runtime(dmg_value, timeout_seconds=DEFAULT_TIMEOUT_SECO
     before = os.lstat(str(dmg))
     if not stat.S_ISREG(before.st_mode) or before.st_size <= 0:
         raise RuntimeSmokeError("runtime DMG is empty or not regular")
-    attached = False
+    before_digest = _sha256_file(dmg)
+    ever_attached = False
+    attach_attempted = False
+    detach_proven = False
     primary_error = None
     detach_error = None
     runtime_report = None
-    with tempfile.TemporaryDirectory(prefix="focus-runtime-dmg-") as temporary:
-        mountpoint = Path(temporary) / "mounted"
+    temporary_root = Path(tempfile.mkdtemp(prefix="focus-runtime-dmg-")).resolve()
+    root_identity = _real_directory_identity(temporary_root, "DMG temporary root")
+    mountpoint = temporary_root / "mounted"
+    mountpoint_identity = None
+    try:
         mountpoint.mkdir()
+        mountpoint_identity = _real_directory_identity(
+            mountpoint, "DMG mountpoint"
+        )
+        attach_attempted = True
         try:
             _run_capture(
                 [
@@ -584,13 +738,16 @@ def validate_mounted_dmg_runtime(dmg_value, timeout_seconds=DEFAULT_TIMEOUT_SECO
                     str(dmg),
                 ]
             )
-            attached = True
+            ever_attached = True
             if not os.path.ismount(str(mountpoint)):
                 raise RuntimeSmokeError("hdiutil did not mount the final DMG")
             if not (os.statvfs(str(mountpoint)).f_flag & os.ST_RDONLY):
                 raise RuntimeSmokeError("final DMG did not mount read-only")
             applications = mountpoint / "Applications"
-            if not applications.is_symlink() or os.readlink(str(applications)) != "/Applications":
+            if (
+                not applications.is_symlink()
+                or os.readlink(str(applications)) != "/Applications"
+            ):
                 raise RuntimeSmokeError("mounted final DMG has an invalid Applications link")
             runtime_report = validate_universal_app_runtime(
                 mountpoint / APP_NAME, timeout_seconds=timeout_seconds
@@ -598,36 +755,83 @@ def validate_mounted_dmg_runtime(dmg_value, timeout_seconds=DEFAULT_TIMEOUT_SECO
         except BaseException as exc:  # Detach remains mandatory on every failure.
             primary_error = exc
         finally:
-            if attached or os.path.ismount(str(mountpoint)):
+            if attach_attempted:
                 try:
-                    _run_capture([HDIUTIL, "detach", str(mountpoint)])
-                except BaseException as first_detach_error:
-                    try:
-                        _run_capture([HDIUTIL, "detach", "-force", str(mountpoint)])
-                    except BaseException as force_detach_error:
-                        detach_error = DmgDetachError(
-                            "normal detach failed ({!r}); force detach failed ({!r})".format(
-                                first_detach_error, force_detach_error
+                    mounted = os.path.ismount(str(mountpoint))
+                except BaseException as probe_error:
+                    detach_error = DmgDetachError(
+                        "could not determine final DMG mount state: {!r}".format(
+                            probe_error
+                        ),
+                        mountpoint=mountpoint,
+                        retained_root=temporary_root,
+                    )
+                else:
+                    if ever_attached or mounted:
+                        try:
+                            _detach_mounted_final_dmg(
+                                mountpoint, temporary_root
                             )
-                        )
+                            detach_proven = True
+                        except DmgDetachError as exc:
+                            detach_error = exc
+                    else:
+                        detach_proven = True
+            else:
+                detach_proven = True
+    except BaseException as exc:
+        if primary_error is None:
+            primary_error = exc
+        if not attach_attempted:
+            detach_proven = True
     if primary_error is not None:
         if detach_error is not None:
             raise DmgDetachError(
                 "{}; additionally failed to detach final DMG: {}".format(
                     primary_error, detach_error
-                )
+                ),
+                mountpoint=detach_error.mountpoint or mountpoint,
+                retained_root=detach_error.retained_root or temporary_root,
             ) from primary_error
-        raise primary_error
     if detach_error is not None:
         raise detach_error
+    if not detach_proven:
+        raise DmgDetachError(
+            "final DMG detach state is unproven",
+            mountpoint=mountpoint,
+            retained_root=temporary_root,
+        )
+    try:
+        _remove_empty_detached_mount_root(
+            temporary_root,
+            root_identity,
+            mountpoint,
+            mountpoint_identity,
+        )
+    except BaseException as cleanup_error:
+        if primary_error is not None:
+            raise RuntimeSmokeError(
+                "{}; detached mountpoint cleanup failed: {!r}".format(
+                    primary_error, cleanup_error
+                )
+            ) from primary_error
+        raise
+    if primary_error is not None:
+        raise primary_error
     digest = _sha256_file(dmg)
     after = os.lstat(str(dmg))
-    if (after.st_dev, after.st_ino, after.st_size) != (
-        before.st_dev,
-        before.st_ino,
-        before.st_size,
-    ) or not stat.S_ISREG(after.st_mode):
+    if (
+        (after.st_dev, after.st_ino, after.st_size)
+        != (before.st_dev, before.st_ino, before.st_size)
+        or (after.st_mtime_ns, after.st_ctime_ns)
+        != (before.st_mtime_ns, before.st_ctime_ns)
+        or not stat.S_ISREG(after.st_mode)
+    ):
         raise RuntimeSmokeError("final DMG changed during mounted runtime acceptance")
+    if digest != before_digest:
+        raise RuntimeSmokeError(
+            "final DMG content changed during mounted runtime acceptance"
+        )
     return {
         "dmg": str(dmg),
         "size_bytes": before.st_size,

@@ -264,15 +264,22 @@ unrelaxed.
 Before packaging, the signed app must launch natively as arm64 and through a
 mandatory Rosetta x86_64 probe. Each launch uses a distinct new profile,
 `--incognito`, a nonce-bearing offline `data:text/html` marker, network-
-disabling switches, a 60-second timeout, and an isolated process group that is
-interrupted and killed during bounded cleanup. Only then does the monitored
-DMG packager run. The exact final DMG is mounted read-only and the same two
-runtime smokes are repeated from the mounted app. If this final acceptance
-fails after the image is detached, the pipeline removes only the just-created
-regular DMG with the same device/inode; it refuses to remove a replaced path.
-If both normal and forced detach fail, the exact backing DMG is retained for
-manual detach instead of unlinking a possibly mounted image. Both runtime
-reports are included in the final JSON. The source and DMG filesystems are watched
+disabling switches, a 60-second timeout, and an isolated process group whose
+stdout and stderr are drained concurrently under hard in-flight limits before
+the whole group is interrupted and killed during bounded cleanup. Only then
+does the monitored DMG packager run into a same-filesystem owner-only `0700`
+candidate directory; the requested final path remains absent. The candidate is
+hashed, mounted read-only, and the same two runtime smokes are repeated from the
+mounted app. After a second hash and proven detach, the pipeline uses an atomic
+no-overwrite hard link to publish that exact accepted inode, then removes the
+private link and directory. Any later failure rolls back only that exact
+published inode; a racing unrelated path is never overwritten or removed.
+
+If both normal and forced detach fail, the private backing candidate and exact
+mount root are retained for manual detach instead of unlinking a possibly
+mounted image. All other packaging, runtime, or post-run failures safely remove
+the exact candidate and leave the final path absent. Both runtime reports are
+included in the final JSON. The source and candidate filesystems are watched
 throughout packaging. The LINKEDIT gate is repeated after universalization and
 after signing, once per slice of every Mach-O file.
 

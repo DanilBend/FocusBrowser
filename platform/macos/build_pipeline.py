@@ -43,6 +43,7 @@ HARD_FLOOR_GIB = 30
 BOOTSTRAP_POST_GIB = 70
 BUILD_JOBS = 8
 POLL_SECONDS = 2.0
+DMG_RUNTIME_CANDIDATE_PREFIX = ".focusbrowser-runtime-candidate-"
 
 APP_NAME = "Focus Browser.app"
 PACKAGING_NAME = "Focus Browser Packaging"
@@ -4126,6 +4127,57 @@ def _verify_linkedit_recovery_moved_artifact(root, artifact):
     }
 
 
+def _linkedit_recovery_rollback_states(source, partial_root, artifacts):
+    """Validate every exact source/archive pair before rollback mutation."""
+    states = []
+    for artifact in artifacts:
+        source_path = Path(artifact["source"])
+        expected_source = in_source(
+            source,
+            artifact["relative_path"],
+            "LINKEDIT recovery rollback source",
+        )
+        if source_path != expected_source:
+            raise PipelineError("LINKEDIT recovery rollback source changed")
+        destination = Path(partial_root) / artifact["archive_relative_path"]
+        source_exists = os.path.lexists(str(source_path))
+        destination_exists = os.path.lexists(str(destination))
+        if source_exists == destination_exists:
+            raise PipelineError(
+                "LINKEDIT recovery artifact must exist at exactly one location: {}".format(
+                    artifact["relative_path"]
+                )
+            )
+        if source_exists:
+            observed = _linkedit_recovery_artifact(
+                source,
+                artifact["relative_path"],
+                {
+                    "kind": artifact["kind"],
+                    "sha256": artifact["sha256"],
+                },
+            )
+            if observed["bytes"] != artifact["bytes"]:
+                raise PipelineError(
+                    "LINKEDIT recovery source size changed during rollback: {}".format(
+                        artifact["relative_path"]
+                    )
+                )
+            location = "source"
+        else:
+            _verify_linkedit_recovery_moved_artifact(partial_root, artifact)
+            location = "archive"
+        states.append(
+            {
+                "artifact": artifact,
+                "source": source_path,
+                "destination": destination,
+                "location": location,
+            }
+        )
+    return states
+
+
 def execute_linkedit_recovery(source, developer_dir, plan, allow_recovery_move):
     """Archive exact invalid evidence and prepare clean/relinkable outputs."""
     if not allow_recovery_move:
@@ -4140,7 +4192,6 @@ def execute_linkedit_recovery(source, developer_dir, plan, allow_recovery_move):
     final_root = Path(expected["recovery_root"])
     arm_args = Path(expected["restore_arm_args"]["path"])
     arm_out = arm_args.parent
-    moved = []
     manifest_sha256 = None
     moved_verification = None
     try:
@@ -4150,7 +4201,6 @@ def execute_linkedit_recovery(source, developer_dir, plan, allow_recovery_move):
             destination = partial_root / artifact["archive_relative_path"]
             destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(str(source_path), str(destination))
-            moved.append((source_path, destination))
         staged_arm_parent = in_source(
             source,
             str(Path(STAGED_ARM_APP).parent),
@@ -4217,17 +4267,46 @@ def execute_linkedit_recovery(source, developer_dir, plan, allow_recovery_move):
                         final_root, artifact
                     )
                 os.replace(str(final_root), str(partial_root))
+            rollback_states = _linkedit_recovery_rollback_states(
+                source, partial_root, expected["artifacts"]
+            )
             if arm_args.is_file() and not arm_args.is_symlink():
                 if sha256_file(arm_args) != expected["restore_arm_args"]["sha256"]:
                     raise PipelineError("unsafe recovered arm64 args during rollback")
                 arm_args.unlink()
             if arm_out.is_dir() and not arm_out.is_symlink():
                 arm_out.rmdir()
-            for source_path, destination in reversed(moved):
-                if os.path.lexists(str(source_path)):
-                    raise PipelineError("recovery rollback destination reappeared")
+            for state in reversed(rollback_states):
+                if state["location"] != "archive":
+                    continue
+                source_path = state["source"]
+                destination = state["destination"]
                 source_path.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(str(destination), str(source_path))
+            # Reconcile the complete fixed inventory, including an artifact whose
+            # rename completed immediately before an asynchronous interruption.
+            for artifact in expected["artifacts"]:
+                source_report = _linkedit_recovery_artifact(
+                    source,
+                    artifact["relative_path"],
+                    {
+                        "kind": artifact["kind"],
+                        "sha256": artifact["sha256"],
+                    },
+                )
+                if source_report["bytes"] != artifact["bytes"]:
+                    raise PipelineError(
+                        "LINKEDIT recovery source size changed after rollback: {}".format(
+                            artifact["relative_path"]
+                        )
+                    )
+                destination = partial_root / artifact["archive_relative_path"]
+                if os.path.lexists(str(destination)):
+                    raise PipelineError(
+                        "LINKEDIT recovery archive survived rollback: {}".format(
+                            artifact["relative_path"]
+                        )
+                    )
             if partial_root.is_dir() and not partial_root.is_symlink():
                 shutil.rmtree(str(partial_root))
         except BaseException as rollback_error:
@@ -4841,6 +4920,9 @@ def merge_plan(source, developer_dir, dmg_output):
         "runtime_acceptance": {
             "signed_app_before_packaging": True,
             "mounted_final_dmg": True,
+            "private_candidate_mode": "0700",
+            "final_output_absent_until_runtime_passes": True,
+            "atomic_no_overwrite_publish": True,
             "architectures": ["arm64", "x86_64"],
             "native_arm64_required": True,
             "rosetta_x86_64_required": True,
@@ -4872,6 +4954,140 @@ def _unlink_created_dmg(output, identity):
     return True
 
 
+def _private_candidate_root_identity(root):
+    """Require the exact private directory used for one unpublished DMG."""
+    root = Path(root)
+    observed = os.lstat(str(root))
+    if (
+        not stat.S_ISDIR(observed.st_mode)
+        or stat.S_ISLNK(observed.st_mode)
+        or stat.S_IMODE(observed.st_mode) != 0o700
+        or observed.st_uid != os.geteuid()
+    ):
+        raise PipelineError("DMG runtime candidate root is not private")
+    return observed.st_dev, observed.st_ino
+
+
+def _create_private_dmg_candidate(output):
+    """Create an owner-only same-filesystem root for an unpublished DMG."""
+    output = Path(output)
+    if os.path.lexists(str(output)):
+        raise PipelineError("DMG output appeared before candidate packaging")
+    temporary_root = Path(
+        tempfile.mkdtemp(
+            dir=str(output.parent),
+            prefix=DMG_RUNTIME_CANDIDATE_PREFIX,
+        )
+    )
+    try:
+        os.chmod(str(temporary_root), 0o700)
+        identity = _private_candidate_root_identity(temporary_root)
+    except BaseException:
+        try:
+            temporary_root.rmdir()
+        except OSError:
+            pass
+        raise
+    candidate = temporary_root / output.name
+    if os.path.lexists(str(candidate)):
+        raise PipelineError("private DMG candidate unexpectedly exists")
+    return temporary_root, identity, candidate
+
+
+def _candidate_package_command(command, planned_output, candidate):
+    """Retarget only the planned package output to the private candidate."""
+    command = list(command)
+    indexes = [index for index, value in enumerate(command) if value == "--output"]
+    if len(indexes) != 1 or indexes[0] + 1 >= len(command):
+        raise PipelineError("DMG package command must have one --output value")
+    output_index = indexes[0] + 1
+    if command[output_index] != str(planned_output):
+        raise PipelineError("DMG package command output changed before execution")
+    command[output_index] = str(candidate)
+    return command
+
+
+def _cleanup_private_dmg_candidate(
+    temporary_root, root_identity, candidate, candidate_identity=None
+):
+    """Unlink only the expected candidate, then remove its exact empty root."""
+    temporary_root = Path(temporary_root)
+    candidate = Path(candidate)
+    if candidate.parent != temporary_root:
+        raise PipelineError("DMG runtime candidate escaped its private root")
+    if _private_candidate_root_identity(temporary_root) != tuple(root_identity):
+        raise PipelineError("DMG runtime candidate root identity changed")
+    if os.path.lexists(str(candidate)):
+        observed = os.lstat(str(candidate))
+        if not stat.S_ISREG(observed.st_mode):
+            raise PipelineError("refusing to remove unsafe DMG runtime candidate")
+        if candidate_identity is not None and (
+            observed.st_dev,
+            observed.st_ino,
+        ) != tuple(candidate_identity):
+            raise PipelineError("DMG runtime candidate identity changed")
+        candidate.unlink()
+    try:
+        temporary_root.rmdir()
+    except OSError as exc:
+        raise PipelineError(
+            "private DMG runtime candidate root is not safely empty; retained at {}".format(
+                temporary_root
+            )
+        ) from exc
+
+
+def _publish_accepted_dmg(candidate, candidate_identity, output, size, digest):
+    """No-overwrite publish the exact runtime-accepted inode."""
+    candidate = Path(candidate)
+    output = Path(output)
+    observed = os.lstat(str(candidate))
+    if (
+        not stat.S_ISREG(observed.st_mode)
+        or (observed.st_dev, observed.st_ino) != tuple(candidate_identity)
+        or observed.st_size != size
+        or package_local_dmg.sha256_file(candidate) != digest
+    ):
+        raise PipelineError("DMG runtime candidate changed before publication")
+    if os.path.lexists(str(output)):
+        raise PipelineError("refusing to overwrite DMG output created during acceptance")
+    placed = False
+    try:
+        try:
+            os.link(str(candidate), str(output), follow_symlinks=False)
+        except FileExistsError as exc:
+            raise PipelineError(
+                "refusing to overwrite DMG output created during acceptance"
+            ) from exc
+        except OSError as exc:
+            raise PipelineError(
+                "failed to atomically publish accepted DMG: {}".format(exc)
+            ) from exc
+        placed = True
+        published = os.lstat(str(output))
+        if (
+            not stat.S_ISREG(published.st_mode)
+            or (published.st_dev, published.st_ino) != tuple(candidate_identity)
+            or published.st_size != size
+            or package_local_dmg.sha256_file(output) != digest
+        ):
+            raise PipelineError("published DMG does not match accepted candidate")
+        candidate.unlink()
+        return published
+    except BaseException as original_error:
+        if placed:
+            try:
+                _unlink_created_dmg(output, candidate_identity)
+            except BaseException as cleanup_error:
+                raise PipelineError(
+                    "accepted DMG publication failed and output rollback also failed: "
+                    "original={!r}; rollback={!r}".format(
+                        original_error, cleanup_error
+                    )
+                ) from original_error
+        raise
+
+
 def execute_merge(source, developer_dir, plan):
     current_python = packaging_python_contract(source)
     if plan.get("packaging_python") != current_python:
@@ -4884,6 +5100,13 @@ def execute_merge(source, developer_dir, plan):
             or command[0] != current_python["path"]
         ):
             raise PipelineError("merge command does not use pinned packaging Python")
+    planned_output = plan.get("dmg_output")
+    if not isinstance(planned_output, str) or not planned_output:
+        raise PipelineError("merge plan is missing its DMG output")
+    output = resolve_absent_dmg(planned_output)
+    if str(output) != planned_output:
+        raise PipelineError("planned DMG output changed before merge execution")
+    _candidate_package_command(plan["commands"]["package"], output, output)
     linkedit_receipt_path, _ = xcode27_linkedit_strip_receipt_contract(
         source,
         developer_dir,
@@ -4978,54 +5201,107 @@ def execute_merge(source, developer_dir, plan):
     if tree_digest(signed_app) != signed_app_digest:
         raise PipelineError("signed app changed during runtime acceptance")
     universal_size = physical_size(signed_app)
-    output = Path(plan["dmg_output"])
     package_required = SOFT_FLOOR_GIB + 5 + (3 * universal_size) / GIB
     require_free(source, package_required, "DMG packaging source")
     require_free(output.parent, package_required, "DMG packaging output")
     if packaging_python_contract(source) != current_python:
         raise PipelineError("packaging Python changed before DMG packaging")
-    run_monitored(
-        plan["commands"]["package"],
-        source,
-        environment,
-        watched_paths=(source, output.parent),
+    temporary_root, root_identity, candidate = _create_private_dmg_candidate(
+        output
     )
-    if output.is_symlink() or not output.is_file() or output.stat().st_size <= 0:
-        raise PipelineError("DMG packager did not create the expected regular output")
-    output_stat = os.lstat(str(output))
-    if not stat.S_ISREG(output_stat.st_mode):
-        raise PipelineError("DMG packager output is no longer regular")
-    output_identity = (output_stat.st_dev, output_stat.st_ino)
+    candidate_identity = None
+    published_identity = None
     try:
-        mounted_runtime = runtime_smoke.validate_mounted_dmg_runtime(output)
+        package_command = _candidate_package_command(
+            plan["commands"]["package"], output, candidate
+        )
+        run_monitored(
+            package_command,
+            source,
+            environment,
+            watched_paths=(source, temporary_root),
+        )
+        if (
+            candidate.is_symlink()
+            or not candidate.is_file()
+            or candidate.stat().st_size <= 0
+        ):
+            raise PipelineError(
+                "DMG packager did not create the expected private candidate"
+            )
+        candidate_stat = os.lstat(str(candidate))
+        if not stat.S_ISREG(candidate_stat.st_mode):
+            raise PipelineError("DMG packager candidate is no longer regular")
+        candidate_identity = (candidate_stat.st_dev, candidate_stat.st_ino)
+        mounted_runtime = runtime_smoke.validate_mounted_dmg_runtime(candidate)
         app_identity = package_local_dmg.validate_app(signed_app)
         if app_identity["architectures"] != ["arm64", "x86_64"]:
             raise PipelineError("packaged app is no longer universal")
-        accepted_stat = os.lstat(str(output))
+        accepted_stat = os.lstat(str(candidate))
         if (
             not stat.S_ISREG(accepted_stat.st_mode)
-            or (accepted_stat.st_dev, accepted_stat.st_ino) != output_identity
+            or (accepted_stat.st_dev, accepted_stat.st_ino) != candidate_identity
             or accepted_stat.st_size != mounted_runtime["size_bytes"]
         ):
-            raise PipelineError("final DMG changed after mounted runtime acceptance")
-        output_digest = package_local_dmg.sha256_file(output)
+            raise PipelineError("DMG candidate changed after mounted runtime acceptance")
+        output_digest = package_local_dmg.sha256_file(candidate)
         if output_digest != mounted_runtime["sha256"]:
-            raise PipelineError("final DMG hash changed after runtime acceptance")
+            raise PipelineError("DMG candidate hash changed after runtime acceptance")
+        published_stat = _publish_accepted_dmg(
+            candidate,
+            candidate_identity,
+            output,
+            accepted_stat.st_size,
+            output_digest,
+        )
+        published_identity = (published_stat.st_dev, published_stat.st_ino)
+        _cleanup_private_dmg_candidate(
+            temporary_root,
+            root_identity,
+            candidate,
+            candidate_identity,
+        )
+        final_stat = os.lstat(str(output))
+        if (
+            not stat.S_ISREG(final_stat.st_mode)
+            or (final_stat.st_dev, final_stat.st_ino) != published_identity
+            or final_stat.st_size != accepted_stat.st_size
+            or package_local_dmg.sha256_file(output) != output_digest
+        ):
+            raise PipelineError("published DMG changed after atomic placement")
+        mounted_runtime = dict(mounted_runtime)
+        mounted_runtime["published_dmg"] = str(output)
+        mounted_runtime["published_same_inode"] = True
     except BaseException as original_error:
         if isinstance(original_error, runtime_smoke.DmgDetachError):
             raise PipelineError(
-                "final DMG acceptance could not prove that the image detached; "
-                "retained the exact backing DMG for manual detach at {}: {!r}".format(
-                    output, original_error
+                "DMG acceptance could not prove that the image detached; the final "
+                "output was not published and the private backing candidate was "
+                "retained for manual detach at {}: {!r}".format(
+                    candidate, original_error
                 )
             ) from original_error
+        cleanup_errors = []
+        if published_identity is not None:
+            try:
+                _unlink_created_dmg(output, published_identity)
+            except BaseException as cleanup_error:
+                cleanup_errors.append("published output={!r}".format(cleanup_error))
         try:
-            _unlink_created_dmg(output, output_identity)
+            if os.path.lexists(str(temporary_root)):
+                _cleanup_private_dmg_candidate(
+                    temporary_root,
+                    root_identity,
+                    candidate,
+                    candidate_identity,
+                )
         except BaseException as cleanup_error:
+            cleanup_errors.append("private candidate={!r}".format(cleanup_error))
+        if cleanup_errors:
             raise PipelineError(
-                "final DMG acceptance failed and safe output cleanup also failed: "
-                "original={!r}; cleanup={!r}".format(
-                    original_error, cleanup_error
+                "DMG acceptance failed and safe cleanup also failed: "
+                "original={!r}; cleanup={}".format(
+                    original_error, "; ".join(cleanup_errors)
                 )
             ) from original_error
         raise
@@ -5037,7 +5313,7 @@ def execute_merge(source, developer_dir, plan):
         "architectures": app_identity["architectures"],
         "require_universal": True,
         "format": "UDZO",
-        "size_bytes": accepted_stat.st_size,
+        "size_bytes": final_stat.st_size,
         "sha256": output_digest,
         "signature": (
             "ad-hoc; exact nested policy, signed-app runtime, and mounted-DMG "

@@ -36,8 +36,9 @@ the exact same patched Chromium 150.0.7871.128 tree twice:
 5. verify the complete bundle and signing matrix, then require a native arm64
    and Rosetta x86_64 offline-Incognito smoke before packaging;
 6. create one drag-and-drop DMG from the accepted universal app with
-   `package_local_dmg.py --require-universal`, mount the final image read-only,
-   and repeat both runtime smokes from the mounted app.
+   `package_local_dmg.py --require-universal` in a private candidate directory,
+   mount and runtime-test that exact candidate read-only, then atomically
+   publish the accepted inode to the still-absent final path.
 
 Do not replace Chromium's universalizer with a recursive hand-written `lipo`
 loop. It handles parallel bundle trees, property-list differences, symlinks,
