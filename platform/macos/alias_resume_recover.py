@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Recover one completed x64 resume3 final record from immutable evidence.
+"""Recover one completed x64 resume final record from immutable evidence.
 
 This is intentionally separate from ``alias_resume_runner.py``: a completed
 run binds that runner's on-disk hash, so recovery must not rewrite it.  The
@@ -25,7 +25,9 @@ import build_pipeline  # pylint: disable=wrong-import-position
 
 
 MAX_JSON_BYTES = build_pipeline.MAX_RECEIPT_BYTES
-RUN_PATTERN = re.compile(r"build-x64-resume3-[A-Za-z0-9][A-Za-z0-9._-]*")
+RUN_PATTERN = re.compile(
+    r"build-x64-resume[1-9][0-9]*-[A-Za-z0-9][A-Za-z0-9._-]*"
+)
 SUFFIXES = {
     "pre": ".pre-launch.json",
     "primary": ".live-process-observation.json",
@@ -186,6 +188,13 @@ def recovery_record_from_values(stem, paths, evidence, observed_at_ns):
         "runner": pre["runner"],
         "fresh_x64_preparation": pre["fresh_x64_preparation"],
     }
+    if "prior_external_interruption" in pre and "prior_memory_abort" not in pre:
+        raise RecoveryError(
+            "external-interruption recovery is missing the memory-abort chain"
+        )
+    for name in ("prior_memory_abort", "prior_external_interruption"):
+        if name in pre:
+            record[name] = pre[name]
     return record
 
 

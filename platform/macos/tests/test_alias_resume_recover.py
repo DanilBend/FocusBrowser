@@ -97,6 +97,49 @@ class AliasResumeRecoverTests(unittest.TestCase):
             record["fresh_x64_preparation"],
         )
 
+    def test_derives_resume5_chain_only_from_pre_launch_evidence(self):
+        _stem, _paths, evidence = self.fixture()
+        stem = "build-x64-resume5-detached-fixture"
+        paths = recover._evidence_paths(Path("/logical/work/logs"), stem)
+        for item in evidence.values():
+            item["value"]["run_id"] = stem
+        evidence["status"]["value"]["stdout_log"]["path"] = str(paths["stdout"])
+        evidence["pre"]["value"]["prior_memory_abort"] = {
+            "exit_status": {"path": "/memory-abort.json", "bytes": 1, "sha256": "c" * 64},
+            "contract_sha256": "c" * 64,
+        }
+        evidence["pre"]["value"]["prior_external_interruption"] = {
+            "exit_status": {"path": "/interruption.json", "bytes": 1, "sha256": "d" * 64},
+            "contract_sha256": "d" * 64,
+        }
+        record = recover.recovery_record_from_values(
+            stem, paths, evidence, observed_at_ns=250
+        )
+        self.assertEqual(
+            evidence["pre"]["value"]["prior_memory_abort"],
+            record["prior_memory_abort"],
+        )
+        self.assertEqual(
+            evidence["pre"]["value"]["prior_external_interruption"],
+            record["prior_external_interruption"],
+        )
+
+    def test_rejects_resume5_chain_without_memory_abort(self):
+        _stem, _paths, evidence = self.fixture()
+        stem = "build-x64-resume5-detached-fixture"
+        paths = recover._evidence_paths(Path("/logical/work/logs"), stem)
+        for item in evidence.values():
+            item["value"]["run_id"] = stem
+        evidence["status"]["value"]["stdout_log"]["path"] = str(paths["stdout"])
+        evidence["pre"]["value"]["prior_external_interruption"] = {
+            "exit_status": {"path": "/interruption.json", "bytes": 1, "sha256": "d" * 64},
+            "contract_sha256": "d" * 64,
+        }
+        with self.assertRaisesRegex(recover.RecoveryError, "memory-abort chain"):
+            recover.recovery_record_from_values(
+                stem, paths, evidence, observed_at_ns=250
+            )
+
     def test_rejects_non_success_or_ambiguous_leader(self):
         stem, paths, evidence = self.fixture()
         failed = copy.deepcopy(evidence)

@@ -50,6 +50,21 @@ FULL_RUNTIME_FLAGS = frozenset(
 )
 DATA_ONLY_FLAGS = frozenset(("adhoc",))
 
+PROHIBITED_APPLICATION_UPDATE_PLIST_PREFIXES = ("KS", "SU")
+PROHIBITED_APPLICATION_UPDATE_ARTIFACT_NAMES = frozenset(
+    {
+        "autoupdate.app",
+        "googleupdater.app",
+        "googlesoftwareupdate.bundle",
+        "googlesoftwareupdateagent",
+        "googlesoftwareupdateagent.app",
+        "keystone.bundle",
+        "ksadmin",
+        "ksinstall",
+        "sparkle.framework",
+    }
+)
+
 RUNTIME_ARGUMENTS = (
     "--headless",
     "--incognito",
@@ -220,6 +235,45 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
+def _validate_manual_update_only_bundle(app, info):
+    """Reject application-level updater metadata and bundled updater tools."""
+    prohibited_keys = sorted(
+        key
+        for key in info
+        if isinstance(key, str)
+        and key.startswith(PROHIBITED_APPLICATION_UPDATE_PLIST_PREFIXES)
+    )
+    if prohibited_keys:
+        raise RuntimeSmokeError(
+            "manual-update-only app contains prohibited Info.plist keys: {}".format(
+                ", ".join(prohibited_keys)
+            )
+        )
+
+    def fail_walk(error):
+        raise RuntimeSmokeError(
+            "cannot inspect manual-update-only app bundle: {}".format(error)
+        ) from error
+
+    for root, directories, files in os.walk(
+        str(app), topdown=True, onerror=fail_walk, followlinks=False
+    ):
+        directories.sort()
+        files.sort()
+        for name in directories + files:
+            folded = name.casefold()
+            if (
+                folded in PROHIBITED_APPLICATION_UPDATE_ARTIFACT_NAMES
+                or folded.endswith("updaterprivilegedhelper")
+            ):
+                path = Path(root) / name
+                raise RuntimeSmokeError(
+                    "manual-update-only app contains prohibited updater artifact: {}".format(
+                        path.relative_to(app).as_posix()
+                    )
+                )
+
+
 def _read_app(app_value):
     candidate = Path(app_value).expanduser()
     if candidate.name != APP_NAME:
@@ -242,6 +296,7 @@ def _read_app(app_value):
         raise RuntimeSmokeError("app Info.plist is invalid") from exc
     if not isinstance(info, dict) or info.get("CFBundleIdentifier") != BUNDLE_ID:
         raise RuntimeSmokeError("unexpected app bundle identifier")
+    _validate_manual_update_only_bundle(app, info)
     executable_name = info.get("CFBundleExecutable")
     if (
         not isinstance(executable_name, str)
@@ -326,14 +381,15 @@ def _signing_inventory(app):
     if launch_services.exists():
         if launch_services.is_symlink() or not launch_services.is_dir():
             raise RuntimeSmokeError("unsafe LaunchServices directory")
-        privileged = sorted(launch_services.glob("*UpdaterPrivilegedHelper"))
-        if len(privileged) > 1:
-            raise RuntimeSmokeError("multiple updater privileged helpers found")
+        privileged = sorted(
+            child
+            for child in launch_services.iterdir()
+            if child.name.casefold().endswith("updaterprivilegedhelper")
+        )
         if privileged:
-            helper = privileged[0]
-            if helper.is_symlink() or not helper.is_file():
-                raise RuntimeSmokeError("updater privileged helper is not regular")
-            protected["privileged-helper"] = helper
+            raise RuntimeSmokeError(
+                "manual-update-only app contains an updater privileged helper"
+            )
     return loaders, protected
 
 
@@ -417,9 +473,7 @@ def validate_adhoc_signing_matrix(app_value):
     for label, path in protected.items():
         relative = path.relative_to(app).as_posix()
         expected_flags = (
-            FULL_RUNTIME_FLAGS
-            if label in ("crashpad", "privileged-helper")
-            else DATA_ONLY_FLAGS
+            FULL_RUNTIME_FLAGS if label == "crashpad" else DATA_ONLY_FLAGS
         )
         product = {"relative_path": relative, "architectures": {}}
         for architecture in ARCHITECTURES:

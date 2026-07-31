@@ -2327,6 +2327,83 @@ class BuildPipelineTests(unittest.TestCase):
             "digest": digest,
         }
 
+    def prepare_permission_bridge_fixture(self):
+        arm = self.root / "permission-arm64" / build_pipeline.APP_NAME
+        x64 = self.root / "permission-x64" / build_pipeline.APP_NAME
+        for app, directory_mode, data_mode, executable_mode in (
+            (arm, 0o755, 0o644, 0o755),
+            (x64, 0o700, 0o600, 0o700),
+        ):
+            resources = app / "Contents/Resources"
+            resources.mkdir(parents=True)
+            for directory in (app, app / "Contents", resources):
+                directory.chmod(directory_mode)
+            (resources / "shared.dat").write_bytes(b"shared payload")
+            (resources / "shared.dat").chmod(data_mode)
+            executable = app / "Contents/browser"
+            executable.write_bytes(b"executable payload")
+            executable.chmod(executable_mode)
+            link = app / "CurrentResources"
+            link.symlink_to("Contents/Resources")
+            os.lchmod(link, directory_mode)
+        (arm / "Contents/Resources/arm64.bin").write_bytes(b"arm64 only")
+        (arm / "Contents/Resources/arm64.bin").chmod(0o644)
+        (x64 / "Contents/Resources/x86_64.bin").write_bytes(b"x64 only")
+        (x64 / "Contents/Resources/x86_64.bin").chmod(0o600)
+        subprocess.run(
+            [
+                "/usr/bin/xattr",
+                "-w",
+                "com.focusbrowser.permission-test",
+                "fixture provenance",
+                str(x64 / "Contents/Resources/shared.dat"),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        universalizer = self.source / build_pipeline.focus_macos.CHROMIUM_UNIVERSALIZER
+        universalizer.parent.mkdir(parents=True, exist_ok=True)
+        universalizer.write_bytes(b"pinned universalizer fixture\n")
+        unsigned = self.source / build_pipeline.UNSIGNED_ROOT
+        arm_snapshot = build_pipeline._merge_permission_snapshot(arm)
+        x64_snapshot = build_pipeline._merge_permission_snapshot(x64)
+        targets = build_pipeline._x64_permission_target_modes(
+            arm_snapshot, x64_snapshot
+        )
+        plan = {
+            "arm_app": str(arm),
+            "x64_app": str(x64),
+            "unsigned_root": str(unsigned),
+            "commands": {
+                "universalize": [
+                    str(self.root / "python3"),
+                    str(universalizer),
+                    str(x64),
+                    str(arm),
+                    str(unsigned / build_pipeline.APP_NAME),
+                ]
+            },
+            "permission_bridge": {
+                "schema": build_pipeline.MERGE_PERMISSION_BRIDGE_SCHEMA,
+                "strategy": "private-x64-copy-arm64-mode-source-of-truth",
+                "temporary_parent": str(self.source / "out"),
+                "canonical_modes": {
+                    key: "{:04o}".format(value)
+                    for key, value in (
+                        build_pipeline.MERGE_PERMISSION_CANONICAL_MODES.items()
+                    )
+                },
+                "expected_x64_mode_changes": sum(
+                    x64_snapshot["entries"][relative]["mode"] != mode
+                    for relative, mode in targets.items()
+                ),
+                "arm64": build_pipeline._merge_permission_binding(arm_snapshot),
+                "x64": build_pipeline._merge_permission_binding(x64_snapshot),
+            },
+        }
+        return plan, arm, x64, universalizer
+
     @contextmanager
     def mocked_merge_dependencies(
         self,
@@ -2349,6 +2426,10 @@ class BuildPipelineTests(unittest.TestCase):
             if path.name in generated_hashes:
                 return generated_hashes[path.name]
             return fixture["digest"]
+
+        @contextmanager
+        def normalized_inputs(_source, plan, _environment):
+            yield plan["commands"]["universalize"]
 
         with ExitStack() as stack:
             stack.enter_context(
@@ -2412,6 +2493,13 @@ class BuildPipelineTests(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch.object(build_pipeline, "tree_digest", return_value="b" * 64)
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    build_pipeline,
+                    "permission_normalized_merge_inputs",
+                    side_effect=normalized_inputs,
+                )
             )
             stack.enter_context(
                 mock.patch.object(
@@ -3374,6 +3462,152 @@ class BuildPipelineTests(unittest.TestCase):
         joined = " ".join(sign).lower()
         self.assertNotIn("developer id", joined)
         self.assertNotIn("notarytool", joined)
+
+        bridge = plan["permission_bridge"]
+        self.assertEqual(1, bridge["schema"])
+        self.assertEqual(
+            "private-x64-copy-arm64-mode-source-of-truth",
+            bridge["strategy"],
+        )
+        self.assertEqual(str(self.source / "out"), bridge["temporary_parent"])
+        self.assertEqual(str(x64_out / build_pipeline.APP_NAME), bridge["x64"]["path"])
+        self.assertEqual(
+            str(self.source / build_pipeline.STAGED_ARM_APP),
+            bridge["arm64"]["path"],
+        )
+
+    def test_permission_bridge_normalizes_private_x64_copy_only(self):
+        plan, arm, x64, universalizer = self.prepare_permission_bridge_fixture()
+        arm_before = build_pipeline._merge_permission_snapshot(arm)
+        x64_before = build_pipeline._merge_permission_snapshot(x64)
+        self.assertEqual(
+            arm_before["tree_sha256"], build_pipeline.tree_digest(arm)
+        )
+        self.assertEqual(
+            x64_before["tree_sha256"], build_pipeline.tree_digest(x64)
+        )
+        pinned = build_pipeline.sha256_file(universalizer)
+        with mock.patch.object(
+            build_pipeline.focus_macos,
+            "PINNED_CHROMIUM_UNIVERSALIZER_SHA256",
+            pinned,
+        ):
+            with build_pipeline.permission_normalized_merge_inputs(
+                self.source, plan, {}
+            ) as command:
+                x64_copy = Path(command[-3])
+                temporary_root = x64_copy.parent.parent
+                self.assertEqual(str(arm), command[-2])
+                self.assertNotEqual(str(x64), command[-3])
+                self.assertEqual(
+                    0o700,
+                    stat.S_IMODE(os.lstat(str(temporary_root)).st_mode),
+                )
+                self.assertFalse((temporary_root / "arm64").exists())
+                expected_modes = {
+                    ".": 0o755,
+                    "Contents": 0o755,
+                    "Contents/Resources": 0o755,
+                    "Contents/Resources/shared.dat": 0o644,
+                    "Contents/Resources/x86_64.bin": 0o644,
+                    "Contents/browser": 0o755,
+                    "CurrentResources": 0o755,
+                }
+                for relative, expected in expected_modes.items():
+                    path = x64_copy if relative == "." else x64_copy / relative
+                    self.assertEqual(
+                        expected,
+                        stat.S_IMODE(os.lstat(str(path)).st_mode),
+                        relative,
+                    )
+                self.assertTrue((x64_copy / "CurrentResources").is_symlink())
+                self.assertEqual(
+                    "Contents/Resources",
+                    os.readlink(str(x64_copy / "CurrentResources")),
+                )
+                self.assertEqual(
+                    x64_before["payload_sha256"],
+                    build_pipeline._merge_permission_snapshot(x64_copy)[
+                        "payload_sha256"
+                    ],
+                )
+                copied_xattrs = dict(
+                    build_pipeline._merge_permission_snapshot(x64_copy)[
+                        "entries"
+                    ]["Contents/Resources/shared.dat"]["xattrs"]
+                )
+                self.assertEqual(
+                    b"fixture provenance",
+                    copied_xattrs[b"com.focusbrowser.permission-test"],
+                )
+            self.assertFalse(temporary_root.exists())
+        self.assertEqual(
+            build_pipeline._merge_permission_binding(arm_before),
+            build_pipeline._merge_permission_binding(
+                build_pipeline._merge_permission_snapshot(arm)
+            ),
+        )
+        self.assertEqual(
+            build_pipeline._merge_permission_binding(x64_before),
+            build_pipeline._merge_permission_binding(
+                build_pipeline._merge_permission_snapshot(x64)
+            ),
+        )
+        self.assertEqual(0o600, stat.S_IMODE((x64 / "Contents/Resources/shared.dat").stat().st_mode))
+        self.assertEqual(0o700, stat.S_IMODE((x64 / "Contents/browser").stat().st_mode))
+
+    def test_permission_bridge_cleans_private_copy_when_universalizer_fails(self):
+        plan, _arm, _x64, universalizer = self.prepare_permission_bridge_fixture()
+        pinned = build_pipeline.sha256_file(universalizer)
+        with mock.patch.object(
+            build_pipeline.focus_macos,
+            "PINNED_CHROMIUM_UNIVERSALIZER_SHA256",
+            pinned,
+        ), self.assertRaisesRegex(RuntimeError, "synthetic universalizer failure"):
+            with build_pipeline.permission_normalized_merge_inputs(
+                self.source, plan, {}
+            ):
+                raise RuntimeError("synthetic universalizer failure")
+        self.assertEqual(
+            [],
+            list((self.source / "out").glob(
+                build_pipeline.MERGE_PERMISSION_BRIDGE_PREFIX + "*"
+            )),
+        )
+
+    def test_permission_bridge_rejects_unsafe_or_mismatched_modes(self):
+        plan, arm, x64, universalizer = self.prepare_permission_bridge_fixture()
+        unsafe = x64 / "Contents/Resources/shared.dat"
+        unsafe.chmod(0o666)
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "unsafe merge permission input mode"
+        ):
+            build_pipeline._merge_permission_snapshot(x64)
+        unsafe.chmod(0o700)
+        x64_snapshot = build_pipeline._merge_permission_snapshot(x64)
+        plan["permission_bridge"]["x64"] = (
+            build_pipeline._merge_permission_binding(x64_snapshot)
+        )
+        pinned = build_pipeline.sha256_file(universalizer)
+        with mock.patch.object(
+            build_pipeline.focus_macos,
+            "PINNED_CHROMIUM_UNIVERSALIZER_SHA256",
+            pinned,
+        ), self.assertRaisesRegex(
+            build_pipeline.PipelineError, "executable classification differs"
+        ):
+            with build_pipeline.permission_normalized_merge_inputs(
+                self.source, plan, {}
+            ):
+                self.fail("mismatched mode bridge must not yield")
+        self.assertEqual(0o644, stat.S_IMODE((arm / "Contents/Resources/shared.dat").stat().st_mode))
+        self.assertEqual(0o700, stat.S_IMODE(unsafe.stat().st_mode))
+        self.assertEqual(
+            [],
+            list((self.source / "out").glob(
+                build_pipeline.MERGE_PERMISSION_BRIDGE_PREFIX + "*"
+            )),
+        )
 
     def test_merge_rejects_relative_dmg_output(self):
         _, _, universalizer = self.prepare_merge_fixture()
@@ -4704,6 +4938,64 @@ class BuildPipelineTests(unittest.TestCase):
                 out, 0, Path("/Users/legacy"), Path("/Users/current")
             )
 
+    def test_changed_path_scan_allows_intermediate_realpath_only(self):
+        out = self.root / "scan-distribution-boundary"
+        out.mkdir()
+        for name in (build_pipeline.APP_NAME, build_pipeline.PACKAGING_NAME):
+            (out / name).mkdir()
+        (out / "toolchain.ninja").write_bytes(b"/Users/current/src")
+        (out / build_pipeline.APP_NAME / "safe.bin").write_bytes(b"safe")
+        report = build_pipeline.changed_path_scan(
+            out,
+            0,
+            Path("/Users/legacy"),
+            Path("/Users/current"),
+            protected_artifact_roots=(
+                build_pipeline.APP_NAME,
+                build_pipeline.PACKAGING_NAME,
+            ),
+        )
+        self.assertEqual(1, report["physical_home_occurrences"])
+        self.assertEqual(1, report["intermediate_physical_home_occurrences"])
+        self.assertEqual(
+            0, report["protected_artifact_physical_home_occurrences"]
+        )
+        (out / build_pipeline.APP_NAME / "leaked.bin").write_bytes(
+            b"/Users/current/private"
+        )
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "protected artifact"
+        ):
+            build_pipeline.changed_path_scan(
+                out,
+                0,
+                Path("/Users/legacy"),
+                Path("/Users/current"),
+                protected_artifact_roots=(
+                    build_pipeline.APP_NAME,
+                    build_pipeline.PACKAGING_NAME,
+                ),
+            )
+
+    def test_changed_path_scan_requires_exact_protected_root_spelling(self):
+        out = self.root / "scan-protected-case"
+        out.mkdir()
+        (out / build_pipeline.APP_NAME.lower()).mkdir()
+        (out / build_pipeline.PACKAGING_NAME).mkdir()
+        with self.assertRaisesRegex(
+            build_pipeline.PipelineError, "spelling changed"
+        ):
+            build_pipeline.changed_path_scan(
+                out,
+                0,
+                Path("/Users/legacy"),
+                Path("/Users/current"),
+                protected_artifact_roots=(
+                    build_pipeline.APP_NAME,
+                    build_pipeline.PACKAGING_NAME,
+                ),
+            )
+
     def test_changed_path_scan_checks_old_files_and_rejects_special_nodes(self):
         out = self.root / "scan-old-leak"
         out.mkdir()
@@ -5365,6 +5657,37 @@ class BuildPipelineTests(unittest.TestCase):
                     plan,
                     True,
                 )
+
+    def test_x64_onboarding_binding_uses_reclaimed_arm_bridge(self):
+        binding = {
+            "path": str(self.source / ".focus-macos-onboarding-alias-root.json"),
+            "bytes": 1234,
+            "sha256": "9" * 64,
+        }
+        evidence = {"kind": "reclaimed-arm-fixture"}
+        with mock.patch.object(
+            build_pipeline,
+            "_reclaimed_arm_onboarding_evidence",
+            return_value=evidence,
+        ) as exported, mock.patch.object(
+            build_pipeline,
+            "_reclaimed_arm_onboarding_contract",
+            return_value={"receipt": binding},
+        ) as validated, mock.patch.object(
+            build_pipeline,
+            "onboarding_alias_root_receipt_contract",
+            side_effect=AssertionError("live ARM graph must not be required"),
+        ), mock.patch.object(
+            build_pipeline.os.path, "lexists", return_value=False
+        ):
+            self.assertEqual(
+                binding,
+                build_pipeline._onboarding_alias_root_binding(
+                    self.source, allow_reclaimed_arm=True
+                ),
+            )
+        exported.assert_called_once_with(self.source)
+        validated.assert_called_once_with(self.source, evidence)
 
     def write_invalid_legacy_x64_graph(self):
         out = self.source / build_pipeline.X64_OUT

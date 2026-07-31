@@ -120,7 +120,7 @@ class RuntimeSmokeTests(unittest.TestCase):
                     if crashpad_entitlement and label == "crashpad":
                         value[runtime_smoke.DISABLE_LIBRARY_VALIDATION] = True
                     return (self._plist(value) if value else b""), b"Executable=fixture\n"
-                if label in ("crashpad", "privileged-helper"):
+                if label == "crashpad":
                     flags = [
                         "restrict",
                         "library-validation",
@@ -180,6 +180,61 @@ class RuntimeSmokeTests(unittest.TestCase):
             side_effect=self.semantic_codesign_runner(crashpad_entitlement=True),
         ), self.assertRaisesRegex(runtime_smoke.RuntimeSmokeError, "unexpectedly disables"):
             runtime_smoke.validate_adhoc_signing_matrix(self.app)
+
+    def test_signing_inventory_rejects_updater_privileged_helper(self):
+        self._touch(
+            self.app
+            / "Contents/Library/LaunchServices"
+            / "com.focusbrowser.UpdaterPrivilegedHelper",
+            executable=True,
+        )
+        with self.assertRaisesRegex(
+            runtime_smoke.RuntimeSmokeError, "manual-update-only"
+        ):
+            runtime_smoke._signing_inventory(self.app)
+
+    def test_read_app_rejects_application_update_plist_keys_before_lipo(self):
+        info_path = self.app / "Contents/Info.plist"
+        with info_path.open("rb") as stream:
+            info = plistlib.load(stream)
+        for key in ("KSUpdateURL", "SUFeedURL"):
+            with self.subTest(key=key):
+                updated = dict(info)
+                updated[key] = "https://updates.invalid/feed"
+                with info_path.open("wb") as stream:
+                    plistlib.dump(updated, stream)
+                with mock.patch.object(
+                    runtime_smoke, "_run_capture"
+                ) as run, self.assertRaisesRegex(
+                    runtime_smoke.RuntimeSmokeError,
+                    "prohibited Info.plist keys",
+                ):
+                    runtime_smoke._read_app(self.app)
+                run.assert_not_called()
+        with info_path.open("wb") as stream:
+            plistlib.dump(info, stream)
+
+    def test_read_app_rejects_application_update_artifacts_before_lipo(self):
+        relative_paths = (
+            "Contents/Frameworks/Sparkle.framework",
+            "Contents/Helpers/GoogleUpdater.app",
+            "Contents/Resources/ksadmin",
+        )
+        for relative in relative_paths:
+            with self.subTest(relative=relative):
+                artifact = self.app / relative
+                artifact.mkdir(parents=True)
+                try:
+                    with mock.patch.object(
+                        runtime_smoke, "_run_capture"
+                    ) as run, self.assertRaisesRegex(
+                        runtime_smoke.RuntimeSmokeError,
+                        "prohibited updater artifact",
+                    ):
+                        runtime_smoke._read_app(self.app)
+                    run.assert_not_called()
+                finally:
+                    artifact.rmdir()
 
     def test_runtime_browser_command_is_offline_incognito_and_bounded(self):
         captured = {}

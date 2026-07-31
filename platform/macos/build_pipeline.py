@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,6 +61,21 @@ X64_EXTERNAL_INTERRUPTION_RESUME_STEM = (
 )
 POLL_SECONDS = 2.0
 DMG_RUNTIME_CANDIDATE_PREFIX = ".focusbrowser-runtime-candidate-"
+MERGE_PERMISSION_BRIDGE_PREFIX = ".FocusMacMergePermissionBridge-"
+MERGE_PERMISSION_BRIDGE_SCHEMA = 1
+MERGE_PERMISSION_CANONICAL_MODES = {
+    "directory": 0o755,
+    "regular_data": 0o644,
+    "regular_executable": 0o755,
+    "symbolic_link": 0o755,
+}
+MERGE_PERMISSION_SAFE_INPUT_MODES = {
+    "directory": frozenset((0o700, 0o755)),
+    "file": frozenset((0o600, 0o644, 0o700, 0o755)),
+    "symbolic_link": frozenset((0o700, 0o755)),
+}
+MACOS_XATTR_NOFOLLOW = 0x0001
+_MACOS_XATTR_FUNCTIONS = None
 
 APP_NAME = "Focus Browser.app"
 PACKAGING_NAME = "Focus Browser Packaging"
@@ -3932,6 +3948,18 @@ def _reclaimed_arm_onboarding_contract(source, reclaimed_arm):
     }
 
 
+def _onboarding_alias_root_binding(source, allow_reclaimed_arm=False):
+    """Return the canonical onboarding receipt link for the current ARM state."""
+    arm_out = in_source(source, ARM_OUT, "arm64 output")
+    if allow_reclaimed_arm and not os.path.lexists(str(arm_out)):
+        reclaimed_arm = _reclaimed_arm_onboarding_evidence(source)
+        return _reclaimed_arm_onboarding_contract(source, reclaimed_arm)[
+            "receipt"
+        ]
+    _, _, binding = onboarding_alias_root_receipt_contract(source)
+    return binding
+
+
 def _onboarding_preparation_projection(
     source, alias_context, reclaimed_arm=None
 ):
@@ -4484,8 +4512,8 @@ def slice_receipt_contract(
             "sha256": sha256_file(alias_path),
         }:
             raise PipelineError("resumed slice home-alias provenance mismatch")
-        _, _, onboarding_alias_root = onboarding_alias_root_receipt_contract(
-            source
+        onboarding_alias_root = _onboarding_alias_root_binding(
+            source, allow_reclaimed_arm=(architecture == "x64")
         )
         if (
             receipt.get("onboarding_alias_root_compatibility")
@@ -4513,6 +4541,9 @@ def slice_receipt_contract(
             execution["started_at_ns"],
             Path(alias["logical_home"]),
             Path(alias["physical_home"]),
+            protected_artifact_roots=(
+                (APP_NAME, PACKAGING_NAME) if architecture == "x64" else ()
+            ),
         )
         if (
             not allow_resumed_history_growth
@@ -6172,6 +6203,560 @@ def tree_digest(root):
         digest.update(body)
         digest.update(b"\n")
     return digest.hexdigest()
+
+
+def _merge_permission_kind(mode):
+    if stat.S_ISDIR(mode) and not stat.S_ISLNK(mode):
+        return "directory"
+    if stat.S_ISREG(mode):
+        return "file"
+    if stat.S_ISLNK(mode):
+        return "symbolic_link"
+    raise PipelineError("special file in merge permission input")
+
+
+def _merge_permission_canonical_mode(kind, mode):
+    """Map only the two build umasks to Chromium's canonical app modes."""
+    permission = stat.S_IMODE(mode)
+    safe = MERGE_PERMISSION_SAFE_INPUT_MODES.get(kind)
+    if safe is None or permission not in safe:
+        raise PipelineError(
+            "unsafe merge permission input mode for {}: {:04o}".format(
+                kind, permission
+            )
+        )
+    if kind == "directory":
+        return MERGE_PERMISSION_CANONICAL_MODES["directory"]
+    if kind == "symbolic_link":
+        return MERGE_PERMISSION_CANONICAL_MODES["symbolic_link"]
+    if permission & 0o111:
+        return MERGE_PERMISSION_CANONICAL_MODES["regular_executable"]
+    return MERGE_PERMISSION_CANONICAL_MODES["regular_data"]
+
+
+def _merge_permission_file_body(path, before):
+    descriptor = os.open(
+        str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    )
+    digest = hashlib.sha256()
+    with os.fdopen(descriptor, "rb", closefd=True) as stream:
+        opened = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino, opened.st_size)
+            != (before.st_dev, before.st_ino, before.st_size)
+        ):
+            raise PipelineError(
+                "merge permission input changed while opening: {}".format(path)
+            )
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+        after = os.fstat(stream.fileno())
+        if (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ) != (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+        ):
+            raise PipelineError(
+                "merge permission input changed while hashing: {}".format(path)
+            )
+    after_path = os.lstat(str(path))
+    if (
+        after_path.st_dev,
+        after_path.st_ino,
+        after_path.st_size,
+        after_path.st_mtime_ns,
+        after_path.st_ctime_ns,
+    ) != (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    ):
+        raise PipelineError(
+            "merge permission input path changed while hashing: {}".format(path)
+        )
+    return digest.digest()
+
+
+def _macos_xattr_functions():
+    global _MACOS_XATTR_FUNCTIONS  # pylint: disable=global-statement
+    if _MACOS_XATTR_FUNCTIONS is None:
+        library = ctypes.CDLL(None, use_errno=True)
+        list_function = library.listxattr
+        list_function.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_int,
+        ]
+        list_function.restype = ctypes.c_ssize_t
+        get_function = library.getxattr
+        get_function.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_uint32,
+            ctypes.c_int,
+        ]
+        get_function.restype = ctypes.c_ssize_t
+        _MACOS_XATTR_FUNCTIONS = (list_function, get_function)
+    return _MACOS_XATTR_FUNCTIONS
+
+
+def _macos_xattr_call(function, prefix, suffix, label):
+    for _attempt in range(3):
+        ctypes.set_errno(0)
+        size = function(*prefix, None, 0, *suffix)
+        if size < 0:
+            error = ctypes.get_errno()
+            if error == errno.ERANGE:
+                continue
+            raise PipelineError(
+                "cannot size {}: {}".format(label, os.strerror(error))
+            )
+        if size == 0:
+            return b""
+        buffer = ctypes.create_string_buffer(size)
+        ctypes.set_errno(0)
+        result = function(*prefix, buffer, size, *suffix)
+        if result < 0:
+            error = ctypes.get_errno()
+            if error == errno.ERANGE:
+                continue
+            raise PipelineError(
+                "cannot read {}: {}".format(label, os.strerror(error))
+            )
+        return buffer.raw[:result]
+    raise PipelineError("{} changed repeatedly while reading".format(label))
+
+
+def _merge_permission_xattrs(path):
+    list_function, get_function = _macos_xattr_functions()
+    encoded_path = os.fsencode(path)
+    packed_names = _macos_xattr_call(
+        list_function,
+        (encoded_path,),
+        (MACOS_XATTR_NOFOLLOW,),
+        "merge permission input xattr names for {}".format(path),
+    )
+    names = sorted(name for name in packed_names.split(b"\0") if name)
+    values = []
+    for name in names:
+        value = _macos_xattr_call(
+            get_function,
+            (encoded_path, name),
+            (0, MACOS_XATTR_NOFOLLOW),
+            "merge permission input xattr {} for {}".format(
+                os.fsdecode(name), path
+            ),
+        )
+        values.append((name, value))
+    return tuple(values)
+
+
+def _merge_permission_snapshot(root):
+    """Bind app payload, links, types, modes, and xattrs without mutation."""
+    root = Path(root)
+    root_stat = os.lstat(str(root))
+    if (
+        not stat.S_ISDIR(root_stat.st_mode)
+        or stat.S_ISLNK(root_stat.st_mode)
+        or root_stat.st_uid != os.geteuid()
+    ):
+        raise PipelineError("merge permission input must be an owned real directory")
+    nodes = [root]
+    nodes.extend(
+        sorted(
+            root.rglob("*"),
+            key=lambda item: item.relative_to(root).as_posix(),
+        )
+    )
+    entries = {}
+    exact = hashlib.sha256()
+    payload = hashlib.sha256()
+    tree = hashlib.sha256()
+    for node in nodes:
+        relative = "." if node == root else node.relative_to(root).as_posix()
+        before = os.lstat(str(node))
+        kind = _merge_permission_kind(before.st_mode)
+        permission = stat.S_IMODE(before.st_mode)
+        flags = getattr(before, "st_flags", 0)
+        if before.st_uid != os.geteuid() or flags != 0:
+            raise PipelineError(
+                "merge permission input ownership or flags are unsafe: {}".format(
+                    node
+                )
+            )
+        canonical = _merge_permission_canonical_mode(kind, before.st_mode)
+        if kind == "file":
+            body = _merge_permission_file_body(node, before)
+            size = before.st_size
+        elif kind == "symbolic_link":
+            target = os.readlink(str(node))
+            after_link = os.lstat(str(node))
+            if (
+                after_link.st_dev,
+                after_link.st_ino,
+                after_link.st_mode,
+                after_link.st_mtime_ns,
+                after_link.st_ctime_ns,
+            ) != (
+                before.st_dev,
+                before.st_ino,
+                before.st_mode,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            ):
+                raise PipelineError(
+                    "merge permission symlink changed while reading: {}".format(
+                        node
+                    )
+                )
+            body = target.encode("utf-8")
+            size = len(body)
+        else:
+            body = b""
+            size = 0
+        xattrs = _merge_permission_xattrs(node)
+        record = {
+            "kind": kind,
+            "mode": permission,
+            "uid": before.st_uid,
+            "gid": before.st_gid,
+            "flags": flags,
+            "canonical_mode": canonical,
+            "bytes": size,
+            "body_sha256": hashlib.sha256(body).hexdigest(),
+            "body": body,
+            "xattrs": xattrs,
+        }
+        entries[relative] = record
+        relative_bytes = relative.encode("utf-8")
+        kind_bytes = kind.encode("ascii")
+        for digest, include_mode in ((exact, True), (payload, False)):
+            digest.update(kind_bytes + b"\0" + relative_bytes + b"\0")
+            if include_mode:
+                digest.update("{:04o}".format(permission).encode("ascii") + b"\0")
+                digest.update(
+                    "{}\0{}\0{}\0".format(
+                        before.st_uid, before.st_gid, flags
+                    ).encode("ascii")
+                )
+            digest.update(body)
+            digest.update(b"\0")
+            for name, value in xattrs:
+                digest.update(name + b"\0" + value + b"\0")
+            digest.update(b"\n")
+        if relative != ".":
+            tree_kind = {
+                "symbolic_link": "L",
+                "file": "F",
+                "directory": "D",
+            }[kind]
+            tree.update(
+                "{}\0{}\0{:o}\0".format(
+                    tree_kind, relative, permission
+                ).encode()
+            )
+            tree.update(body)
+            tree.update(b"\n")
+    return {
+        "path": str(root),
+        "root_identity": {
+            "device": root_stat.st_dev,
+            "inode": root_stat.st_ino,
+            "uid": root_stat.st_uid,
+        },
+        "entry_count": len(entries),
+        "exact_sha256": exact.hexdigest(),
+        "payload_sha256": payload.hexdigest(),
+        "tree_sha256": tree.hexdigest(),
+        "entries": entries,
+    }
+
+
+def _merge_permission_binding(snapshot):
+    return {
+        "path": snapshot["path"],
+        "root_identity": snapshot["root_identity"],
+        "entry_count": snapshot["entry_count"],
+        "exact_sha256": snapshot["exact_sha256"],
+        "payload_sha256": snapshot["payload_sha256"],
+        "tree_sha256": snapshot["tree_sha256"],
+    }
+
+
+def _merge_permission_copy_matches(source_snapshot, copy_snapshot, label):
+    source_entries = source_snapshot["entries"]
+    copy_entries = copy_snapshot["entries"]
+    if set(source_entries) != set(copy_entries):
+        raise PipelineError("{} permission bridge entry set changed".format(label))
+    for relative, source_entry in source_entries.items():
+        copied = copy_entries[relative]
+        for key in (
+            "kind",
+            "uid",
+            "gid",
+            "flags",
+            "bytes",
+            "body_sha256",
+            "xattrs",
+        ):
+            if copied[key] != source_entry[key]:
+                raise PipelineError(
+                    "{} permission bridge changed {} at {}".format(
+                        label, key, relative
+                    )
+                )
+
+
+def _validate_canonical_arm_permission_source(arm_snapshot):
+    for relative, entry in arm_snapshot["entries"].items():
+        if entry["mode"] != entry["canonical_mode"]:
+            raise PipelineError(
+                "arm64 merge permission source is not canonical at {}".format(
+                    relative
+                )
+            )
+
+
+def _x64_permission_target_modes(arm_snapshot, x64_snapshot):
+    arm_entries = arm_snapshot["entries"]
+    x64_entries = x64_snapshot["entries"]
+    targets = {}
+    for relative in sorted(x64_entries):
+        source_entry = x64_entries[relative]
+        arm_entry = arm_entries.get(relative)
+        if arm_entry is not None:
+            if arm_entry["kind"] != source_entry["kind"]:
+                raise PipelineError(
+                    "merge permission inputs have varying types at {}".format(
+                        relative
+                    )
+                )
+            target_mode = arm_entry["mode"]
+            if source_entry["canonical_mode"] != target_mode:
+                raise PipelineError(
+                    "merge permission executable classification differs at {}".format(
+                        relative
+                    )
+                )
+        else:
+            target_mode = source_entry["canonical_mode"]
+        targets[relative] = target_mode
+    return targets
+
+
+def _normalize_x64_permission_copy(arm_snapshot, x64_snapshot, x64_copy):
+    targets = _x64_permission_target_modes(arm_snapshot, x64_snapshot)
+    for relative, target_mode in targets.items():
+        source_entry = x64_snapshot["entries"][relative]
+        destination = x64_copy if relative == "." else x64_copy / relative
+        if source_entry["mode"] != target_mode:
+            if source_entry["kind"] == "symbolic_link":
+                if not hasattr(os, "lchmod"):
+                    raise PipelineError(
+                        "macOS lchmod is unavailable for permission bridge"
+                    )
+                os.lchmod(str(destination), target_mode)
+            else:
+                os.chmod(str(destination), target_mode)
+
+
+def _private_merge_permission_root(root):
+    observed = os.lstat(str(root))
+    if (
+        not stat.S_ISDIR(observed.st_mode)
+        or stat.S_ISLNK(observed.st_mode)
+        or stat.S_IMODE(observed.st_mode) != 0o700
+        or observed.st_uid != os.geteuid()
+    ):
+        raise PipelineError("merge permission bridge root is not private")
+    return observed.st_dev, observed.st_ino
+
+
+def _cleanup_merge_permission_root(root, identity):
+    root = Path(root)
+    if not os.path.lexists(str(root)):
+        return
+    if _private_merge_permission_root(root) != tuple(identity):
+        raise PipelineError("merge permission bridge root identity changed")
+    shutil.rmtree(str(root))
+    if os.path.lexists(str(root)):
+        raise PipelineError("merge permission bridge cleanup did not complete")
+
+
+def _permission_bridge_universalize_command(source, plan, x64_copy):
+    command = plan.get("commands", {}).get("universalize")
+    universalizer = in_source(
+        source,
+        focus_macos.CHROMIUM_UNIVERSALIZER,
+        "Chromium universalizer",
+        must_exist=True,
+    )
+    if (
+        not isinstance(command, list)
+        or len(command) != 5
+        or command[1] != str(universalizer)
+        or command[-3] != plan.get("x64_app")
+        or command[-2] != plan.get("arm_app")
+        or command[-1]
+        != str(Path(plan.get("unsigned_root", "")) / APP_NAME)
+    ):
+        raise PipelineError("planned universalizer command changed")
+    if sha256_file(universalizer) != focus_macos.PINNED_CHROMIUM_UNIVERSALIZER_SHA256:
+        raise PipelineError("Chromium universalizer hash changed before merge")
+    return command[:2] + [str(x64_copy), plan["arm_app"], command[-1]]
+
+
+@contextmanager
+def permission_normalized_merge_inputs(source, plan, environment):
+    """Yield private app copies; normalize only x64 modes from canonical ARM."""
+    bridge = plan.get("permission_bridge")
+    expected_keys = {
+        "schema",
+        "strategy",
+        "temporary_parent",
+        "canonical_modes",
+        "expected_x64_mode_changes",
+        "arm64",
+        "x64",
+    }
+    if (
+        not isinstance(bridge, dict)
+        or set(bridge) != expected_keys
+        or bridge.get("schema") != MERGE_PERMISSION_BRIDGE_SCHEMA
+        or bridge.get("strategy")
+        != "private-x64-copy-arm64-mode-source-of-truth"
+        or bridge.get("temporary_parent") != str(Path(source) / "out")
+        or bridge.get("canonical_modes")
+        != {
+            key: "{:04o}".format(value)
+            for key, value in MERGE_PERMISSION_CANONICAL_MODES.items()
+        }
+    ):
+        raise PipelineError("merge permission bridge plan mismatch")
+    arm_source = Path(plan["arm_app"])
+    x64_source = Path(plan["x64_app"])
+    arm_before = _merge_permission_snapshot(arm_source)
+    x64_before = _merge_permission_snapshot(x64_source)
+    _validate_canonical_arm_permission_source(arm_before)
+    x64_targets = _x64_permission_target_modes(arm_before, x64_before)
+    expected_mode_changes = sum(
+        x64_before["entries"][relative]["mode"] != target
+        for relative, target in x64_targets.items()
+    )
+    if bridge.get("expected_x64_mode_changes") != expected_mode_changes:
+        raise PipelineError("x86_64 merge permission change count changed")
+    if _merge_permission_binding(arm_before) != bridge.get("arm64"):
+        raise PipelineError("arm64 merge permission provenance changed")
+    if _merge_permission_binding(x64_before) != bridge.get("x64"):
+        raise PipelineError("x86_64 merge permission provenance changed")
+    out = in_source(source, "out", "merge permission bridge parent", must_exist=True, directory=True)
+    temporary_root = Path(tempfile.mkdtemp(
+        dir=str(out), prefix=MERGE_PERMISSION_BRIDGE_PREFIX
+    ))
+    created_identity = _private_merge_permission_root(temporary_root)
+    try:
+        os.chmod(str(temporary_root), 0o700)
+        root_identity = _private_merge_permission_root(temporary_root)
+        if root_identity != created_identity:
+            raise PipelineError("merge permission bridge root changed during setup")
+    except BaseException:
+        _cleanup_merge_permission_root(temporary_root, created_identity)
+        raise
+    x64_copy = temporary_root / "x86_64" / APP_NAME
+    verification_ready = False
+    normalized_copy_binding = None
+    try:
+        x64_copy.parent.mkdir(mode=0o700)
+        run_monitored(
+            [
+                "/usr/bin/ditto",
+                "--rsrc",
+                "--extattr",
+                str(x64_source),
+                str(x64_copy),
+            ],
+            source,
+            environment,
+            watched_paths=(source, temporary_root),
+        )
+        arm_source_after = _merge_permission_snapshot(arm_source)
+        x64_source_after = _merge_permission_snapshot(x64_source)
+        if _merge_permission_binding(arm_source_after) != _merge_permission_binding(
+            arm_before
+        ) or _merge_permission_binding(
+            x64_source_after
+        ) != _merge_permission_binding(
+            x64_before
+        ):
+            raise PipelineError("merge permission source changed during copy")
+        x64_copy_before = _merge_permission_snapshot(x64_copy)
+        _merge_permission_copy_matches(x64_before, x64_copy_before, "x86_64")
+        _normalize_x64_permission_copy(arm_before, x64_before, x64_copy)
+        x64_copy_after = _merge_permission_snapshot(x64_copy)
+        _merge_permission_copy_matches(x64_before, x64_copy_after, "x86_64")
+        for relative, x64_entry in x64_copy_after["entries"].items():
+            expected_mode = x64_targets[relative]
+            if x64_entry["mode"] != expected_mode:
+                raise PipelineError(
+                    "x86_64 permission normalization failed at {}".format(
+                        relative
+                    )
+                )
+        normalized_copy_binding = _merge_permission_binding(x64_copy_after)
+        verification_ready = True
+        yield _permission_bridge_universalize_command(source, plan, x64_copy)
+    finally:
+        verification_error = None
+        cleanup_error = None
+        if verification_ready:
+            try:
+                if _merge_permission_binding(
+                    _merge_permission_snapshot(arm_source)
+                ) != _merge_permission_binding(arm_before) or _merge_permission_binding(
+                    _merge_permission_snapshot(x64_source)
+                ) != _merge_permission_binding(
+                    x64_before
+                ):
+                    raise PipelineError(
+                        "merge permission source changed during universalization"
+                    )
+                if _merge_permission_binding(
+                    _merge_permission_snapshot(x64_copy)
+                ) != normalized_copy_binding:
+                    raise PipelineError(
+                        "normalized x86_64 merge copy changed during universalization"
+                    )
+            except BaseException as error:  # preserve cleanup on every exit
+                verification_error = error
+        try:
+            _cleanup_merge_permission_root(temporary_root, root_identity)
+        except BaseException as error:  # retain the exact unsafe root for audit
+            cleanup_error = error
+        if verification_error is not None and cleanup_error is not None:
+            raise PipelineError(
+                "merge permission verification and cleanup failed: "
+                "verification={!r}; cleanup={!r}".format(
+                    verification_error, cleanup_error
+                )
+            ) from verification_error
+        if verification_error is not None:
+            raise verification_error
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
 def bootstrap_plan(source, developer_dir):
@@ -11899,11 +12484,46 @@ def _count_stream_needles(path, needles, expected_stat):
     return counts, digest.hexdigest()
 
 
-def changed_path_scan(root, resume_start_ns, logical_home, physical_home):
-    """Inventory changed nodes and scan the full tree for physical-home leaks."""
+def changed_path_scan(
+    root,
+    resume_start_ns,
+    logical_home,
+    physical_home,
+    protected_artifact_roots=(),
+):
+    """Inventory the full tree and reject physical-home leaks from artifacts."""
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
         raise PipelineError("mixed-path scan root must be a real directory")
+    protected = tuple(protected_artifact_roots)
+    if (
+        len(set(protected)) != len(protected)
+        or any(
+            not isinstance(name, str)
+            or not name
+            or Path(name).is_absolute()
+            or len(Path(name).parts) != 1
+            or name in (".", "..")
+            for name in protected
+        )
+    ):
+        raise PipelineError("protected artifact roots are invalid")
+    exact_root_entries = set(os.listdir(root))
+    protected_identities = {}
+    for name in protected:
+        if name not in exact_root_entries:
+            raise PipelineError(
+                "protected artifact root spelling changed: {}".format(name)
+            )
+        artifact = root / name
+        observed = os.lstat(str(artifact))
+        if not stat.S_ISDIR(observed.st_mode) or stat.S_ISLNK(observed.st_mode):
+            raise PipelineError(
+                "protected artifact root must be a real directory: {}".format(
+                    artifact
+                )
+            )
+        protected_identities[name] = (observed.st_dev, observed.st_ino)
     logical = str(logical_home).encode("utf-8")
     physical = str(physical_home).encode("utf-8")
     inventory = hashlib.sha256()
@@ -11920,13 +12540,16 @@ def changed_path_scan(root, resume_start_ns, logical_home, physical_home):
     full_scanned_bytes = 0
     full_logical_occurrences = 0
     full_physical_occurrences = 0
+    protected_physical_occurrences = 0
     full_inventory = hashlib.sha256()
+    first_protected_forbidden = None
     def record_node(path, relative, observed, kind):
         nonlocal files, directories, symlinks, logical_occurrences
         nonlocal physical_occurrences, logical_files, scanned_bytes
         nonlocal first_forbidden
         nonlocal full_files, full_symlinks, full_scanned_bytes
         nonlocal full_logical_occurrences, full_physical_occurrences
+        nonlocal protected_physical_occurrences, first_protected_forbidden
         if observed.st_uid != os.getuid():
             raise PipelineError("resumed output ownership changed: {}".format(path))
         changed_ns = max(observed.st_mtime_ns, observed.st_ctime_ns)
@@ -11970,6 +12593,10 @@ def changed_path_scan(root, resume_start_ns, logical_home, physical_home):
         full_scanned_bytes += size
         full_logical_occurrences += counts[logical]
         full_physical_occurrences += counts[physical]
+        if protected and Path(relative).parts[0] in protected:
+            protected_physical_occurrences += counts[physical]
+            if counts[physical] and first_protected_forbidden is None:
+                first_protected_forbidden = relative
         if kind != "directory":
             full_inventory.update(
                 "{}\0{}\0{}\0{}\0{}\n".format(
@@ -12042,9 +12669,34 @@ def changed_path_scan(root, resume_start_ns, logical_home, physical_home):
                 raise PipelineError(
                     "special file changed during raw Ninja resume: {}".format(path)
                 )
-    if full_physical_occurrences:
+    if set(os.listdir(root)) != exact_root_entries:
+        raise PipelineError("mixed-path scan root entries changed during scan")
+    for name, identity in protected_identities.items():
+        observed = os.lstat(str(root / name))
+        if (
+            not stat.S_ISDIR(observed.st_mode)
+            or stat.S_ISLNK(observed.st_mode)
+            or (observed.st_dev, observed.st_ino) != identity
+        ):
+            raise PipelineError(
+                "protected artifact root identity changed during scan: {}".format(
+                    root / name
+                )
+            )
+    forbidden_occurrences = (
+        protected_physical_occurrences
+        if protected
+        else full_physical_occurrences
+    )
+    forbidden_path = (
+        first_protected_forbidden if protected else first_forbidden
+    )
+    if forbidden_occurrences:
         raise PipelineError(
-            "physical home leaked into resumed output: {}".format(first_forbidden)
+            "physical home leaked into resumed {}: {}".format(
+                "protected artifact" if protected else "output",
+                forbidden_path,
+            )
         )
     if files + directories + symlinks <= 0:
         raise PipelineError("mixed-path scan found no files changed since resume")
@@ -12061,6 +12713,14 @@ def changed_path_scan(root, resume_start_ns, logical_home, physical_home):
         "logical_home_occurrences": logical_occurrences,
         "physical_home": str(physical_home),
         "physical_home_occurrences": full_physical_occurrences,
+        "changed_physical_home_occurrences": physical_occurrences,
+        "protected_artifact_roots": list(protected),
+        "protected_artifact_physical_home_occurrences": (
+            protected_physical_occurrences
+        ),
+        "intermediate_physical_home_occurrences": (
+            full_physical_occurrences - protected_physical_occurrences
+        ),
         "mixed_paths": False,
         "inventory_sha256": inventory.hexdigest(),
         "full_path_scan": {
@@ -12069,6 +12729,9 @@ def changed_path_scan(root, resume_start_ns, logical_home, physical_home):
             "scanned_bytes": full_scanned_bytes,
             "logical_home_occurrences": full_logical_occurrences,
             "physical_home_occurrences": full_physical_occurrences,
+            "protected_artifact_physical_home_occurrences": (
+                protected_physical_occurrences
+            ),
             "inventory_sha256": full_inventory.hexdigest(),
         },
     }
@@ -12277,7 +12940,9 @@ def resumed_slice_plan(source, developer_dir, architecture, resume_record):
         allow_reclaimed_arm=allow_reclaimed_arm,
         alias_context=alias_context,
     )
-    _, _, onboarding_alias_root = onboarding_alias_root_receipt_contract(source)
+    onboarding_alias_root = _onboarding_alias_root_binding(
+        source, allow_reclaimed_arm=allow_reclaimed_arm
+    )
     out = in_source(
         source, out_relative, "resumed build output", must_exist=True, directory=True
     )
@@ -12312,6 +12977,9 @@ def resumed_slice_plan(source, developer_dir, architecture, resume_record):
         execution["started_at_ns"],
         Path(alias_receipt["logical_home"]),
         Path(alias_receipt["physical_home"]),
+        protected_artifact_roots=(
+            (APP_NAME, PACKAGING_NAME) if architecture == "x64" else ()
+        ),
     )
     return {
         "stage": "finalize-resumed-{}".format(architecture),
@@ -12812,8 +13480,12 @@ def merge_plan(source, developer_dir, dmg_output):
     arm_app = in_source(
         source, STAGED_ARM_APP, "staged arm64 app", must_exist=True, directory=True
     )
-    if tree_digest(arm_app) != reclaim_receipt.get("tree_sha256"):
+    arm_permission_snapshot = _merge_permission_snapshot(arm_app)
+    if arm_permission_snapshot["tree_sha256"] != reclaim_receipt.get(
+        "tree_sha256"
+    ):
         raise PipelineError("staged arm64 app no longer matches its receipt")
+    _validate_canonical_arm_permission_source(arm_permission_snapshot)
     app_report(arm_app, ("arm64",))
     x64_out = in_source(source, X64_OUT, "x86_64 output", must_exist=True, directory=True)
     x64_app = x64_out / APP_NAME
@@ -12862,6 +13534,10 @@ def merge_plan(source, developer_dir, dmg_output):
     )
     if sha256_file(universalizer) != focus_macos.PINNED_CHROMIUM_UNIVERSALIZER_SHA256:
         raise PipelineError("Chromium universalizer hash mismatch")
+    x64_permission_snapshot = _merge_permission_snapshot(x64_app)
+    x64_permission_targets = _x64_permission_target_modes(
+        arm_permission_snapshot, x64_permission_snapshot
+    )
     packaging_python = packaging_python_contract(source)
     python = packaging_python["path"]
     unsigned_root = in_source(source, UNSIGNED_ROOT, "unsigned universal root")
@@ -12915,6 +13591,21 @@ def merge_plan(source, developer_dir, dmg_output):
         "signed_root": str(signed_root),
         "dmg_output": str(output),
         "commands": commands,
+        "permission_bridge": {
+            "schema": MERGE_PERMISSION_BRIDGE_SCHEMA,
+            "strategy": "private-x64-copy-arm64-mode-source-of-truth",
+            "temporary_parent": str(source / "out"),
+            "canonical_modes": {
+                key: "{:04o}".format(value)
+                for key, value in MERGE_PERMISSION_CANONICAL_MODES.items()
+            },
+            "expected_x64_mode_changes": sum(
+                x64_permission_snapshot["entries"][relative]["mode"] != mode
+                for relative, mode in x64_permission_targets.items()
+            ),
+            "arm64": _merge_permission_binding(arm_permission_snapshot),
+            "x64": _merge_permission_binding(x64_permission_snapshot),
+        },
         "packaging_python": packaging_python,
         "swiftshader_disabled_signing": {
             "path": str(swiftshader_receipt_path),
@@ -13232,13 +13923,22 @@ def execute_merge(source, developer_dir, plan):
     arm_size = physical_size(plan["arm_app"])
     x64_size = physical_size(plan["x64_app"])
     # Universalization creates one combined app and signing creates another.
-    merge_required = SOFT_FLOOR_GIB + 2 + 2.2 * (arm_size + x64_size) / GIB
+    # The permission bridge also holds one private x64 copy until merge ends.
+    merge_required = (
+        SOFT_FLOOR_GIB
+        + 2
+        + 2.2 * (arm_size + x64_size) / GIB
+        + 1.1 * x64_size / GIB
+    )
     require_free(source, merge_required, "universal merge")
     unsigned_root = Path(plan["unsigned_root"])
     unsigned_root.mkdir(parents=True)
     environment = _build_child_environment(source, developer_dir)
-    for name in ("copy_packaging", "universalize"):
-        run_monitored(plan["commands"][name], source, environment)
+    run_monitored(plan["commands"]["copy_packaging"], source, environment)
+    with permission_normalized_merge_inputs(
+        source, plan, environment
+    ) as universalize_command:
+        run_monitored(universalize_command, source, environment)
     unsigned_app = unsigned_root / APP_NAME
     app_report(unsigned_app, ("arm64", "x86_64"))
     copied_sign = unsigned_root / PACKAGING_NAME / "sign_chrome.py"
