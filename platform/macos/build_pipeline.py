@@ -55,6 +55,9 @@ X64_MEMORY_ABORT_PRIOR_STEM = (
 X64_MEMORY_SAFE_RESUME_STEM = (
     "build-x64-resume4-memory-safe-20260730T222000MSK"
 )
+X64_EXTERNAL_INTERRUPTION_RESUME_STEM = (
+    "build-x64-resume5-detached-20260731T000500MSK"
+)
 POLL_SECONDS = 2.0
 DMG_RUNTIME_CANDIDATE_PREFIX = ".focusbrowser-runtime-candidate-"
 
@@ -9636,6 +9639,992 @@ def x64_memory_abort_resume_contract(source, developer_dir, prior_exit_path):
     return path, value
 
 
+def _x64_external_interruption_exact_sibling(
+    exit_path, link, alias_receipt, suffix, label
+):
+    """Read one immutable sibling from the fixed resume4 interruption."""
+    if not isinstance(link, dict) or set(link) != {"path", "sha256"}:
+        raise PipelineError("{} link schema mismatch".format(label))
+    expected = Path(exit_path).with_name(
+        X64_MEMORY_SAFE_RESUME_STEM + suffix
+    )
+    path = _execution_evidence_path(link.get("path", ""), alias_receipt, label)
+    if Path(link.get("path", "")) != expected or path != expected:
+        raise PipelineError(
+            "{} is not the fixed external-interruption sibling".format(label)
+        )
+    if _volume_identity(path)["volume_uuid"] != alias_receipt["volume"][
+        "volume_uuid"
+    ]:
+        raise PipelineError("{} volume changed".format(label))
+    value, observed_hash, _identity = _descriptor_bound_immutable_json(
+        path, label
+    )
+    if link.get("sha256") != observed_hash:
+        raise PipelineError("{} hash changed".format(label))
+    return path, value
+
+
+def _x64_external_interruption_monitor_contract(monitor, source, logs):
+    """Accept only the exact pre-first-poll fallback emitted on SIGTERM."""
+    thresholds = {
+        "immediate_free_percent": 5,
+        "sustained_free_percent": 10,
+        "sustained_free_samples": 3,
+        "swap_free_percent": 15,
+        "swap_used_bytes": 8 * GIB,
+        "swap_sustained_samples": 2,
+    }
+    expected = {
+        "checks": 0,
+        "minimum_free_bytes": {"source": None, "logs": None},
+        "last_free_bytes": {"source": None, "logs": None},
+        "maximum_stdout_bytes": 0,
+        "hard_floor_bytes": HARD_FLOOR_GIB * GIB,
+        "stdout_limit_bytes": MAX_RESUME_STDOUT_BYTES,
+        "poll_interval_ms": 1000,
+        "source_path": str(Path(source).resolve(strict=True)),
+        "logs_path": str(Path(logs).resolve(strict=True)),
+        "process_group_absent": True,
+        "memory": {
+            "samples": 0,
+            "minimum_free_percent": None,
+            "maximum_swap_used_bytes": 0,
+            "maximum_swap_total_bytes": 0,
+            "last": None,
+            "critical_free_consecutive": 0,
+            "critical_swap_consecutive": 0,
+            "maximum_critical_free_consecutive": 0,
+            "maximum_critical_swap_consecutive": 0,
+            "probe_every_checks": 5,
+            "thresholds": thresholds,
+        },
+    }
+    if not _strict_json_identity(monitor, expected):
+        raise PipelineError(
+            "x64 external interruption is not the exact zero-sample fallback"
+        )
+    return monitor
+
+
+def _x64_external_interruption_evidence_contract(
+    source,
+    developer_dir,
+    prior_exit_path,
+    *,
+    require_current_history,
+    require_unfinished,
+):
+    """Validate the fixed resume4 SIGTERM without treating it as success."""
+    source = Path(source)
+    developer_dir = Path(developer_dir)
+    _alias_path, alias_receipt = home_alias_receipt_contract(
+        source, developer_dir
+    )
+    logical_workspace = Path(alias_receipt["mappings"]["workspace"]["logical"])
+    expected_exit = (
+        logical_workspace
+        / "work/logs"
+        / (X64_MEMORY_SAFE_RESUME_STEM + ".exit-status.json")
+    )
+    exit_path = _execution_evidence_path(
+        prior_exit_path, alias_receipt, "x64 external-interruption exit status"
+    )
+    if exit_path != expected_exit:
+        raise PipelineError(
+            "x64 external-interruption exit path is not the fixed resume4 run"
+        )
+    if _volume_identity(exit_path)["volume_uuid"] != alias_receipt["volume"][
+        "volume_uuid"
+    ]:
+        raise PipelineError("x64 external-interruption exit volume changed")
+    status, status_hash, _identity = _descriptor_bound_immutable_json(
+        exit_path, "x64 external-interruption exit status"
+    )
+    status_keys = {
+        "schema",
+        "kind",
+        "run_id",
+        "architecture",
+        "pid",
+        "pgid",
+        "wait_observation",
+        "pipefail",
+        "outcome",
+        "failure",
+        "monitor",
+        "evidence_complete",
+        "pipeline_success_derived",
+        "pre_launch",
+        "live_evidence",
+        "stdout_log",
+        "post_run",
+        "explicit_gn_gen_command",
+        "network_operations",
+    }
+    _resume3_exact_keys(
+        status, status_keys, "x64 external-interruption exit status"
+    )
+    wait = status["wait_observation"]
+    _resume3_exact_keys(
+        wait,
+        {"api", "returncode", "wait_returned_at_ns", "runner_pid"},
+        "x64 external-interruption wait observation",
+    )
+    expected_failure = {
+        "primary": {
+            "type": "ControlledTermination",
+            "stage": "signal-SIGTERM",
+            "message": (
+                "runner received SIGTERM (15) while it owned the build process"
+            ),
+        },
+        "secondary": [],
+    }
+    if (
+        type(status["schema"]) is not int
+        or status["schema"] != 2
+        or status["kind"]
+        != "focus-macos-alias-resume3-popen-exit-status"
+        or status["run_id"] != X64_MEMORY_SAFE_RESUME_STEM
+        or status["architecture"] != "x64"
+        or type(status["pid"]) is not int
+        or status["pid"] <= 1
+        or status["pgid"] != status["pid"]
+        or wait["api"] != "subprocess.Popen.wait"
+        or type(wait["returncode"]) is not int
+        or wait["returncode"] != -signal.SIGTERM
+        or type(wait["wait_returned_at_ns"]) is not int
+        or wait["wait_returned_at_ns"] <= 0
+        or type(wait["runner_pid"]) is not int
+        or wait["runner_pid"] <= 1
+        or status["pipefail"] is not True
+        or status["outcome"] != "interrupted"
+        or not _strict_json_identity(status["failure"], expected_failure)
+        or status["evidence_complete"] is not True
+        or status["pipeline_success_derived"] is not False
+        or status["explicit_gn_gen_command"] is not False
+        or type(status["network_operations"]) is not int
+        or status["network_operations"] != 0
+    ):
+        raise PipelineError(
+            "x64 prior run is not the authorized external interruption"
+        )
+    pre_path, pre = _x64_external_interruption_exact_sibling(
+        exit_path,
+        status["pre_launch"],
+        alias_receipt,
+        ".pre-launch.json",
+        "x64 external-interruption pre-launch",
+    )
+    live = status["live_evidence"]
+    _resume3_exact_keys(
+        live,
+        {"primary", "supplement", "revalidation"},
+        "x64 external-interruption live evidence",
+    )
+    primary_path, primary = _x64_external_interruption_exact_sibling(
+        exit_path,
+        live["primary"],
+        alias_receipt,
+        ".live-process-observation.json",
+        "x64 external-interruption primary observation",
+    )
+    supplement_path, supplement = _x64_external_interruption_exact_sibling(
+        exit_path,
+        live["supplement"],
+        alias_receipt,
+        ".live-environment-supplement.json",
+        "x64 external-interruption supplement",
+    )
+    revalidation_path, revalidation = _x64_external_interruption_exact_sibling(
+        exit_path,
+        live["revalidation"],
+        alias_receipt,
+        ".live-process-revalidation.json",
+        "x64 external-interruption revalidation",
+    )
+    out = in_source(
+        source,
+        X64_OUT,
+        "x64 external-interruption output",
+        must_exist=True,
+        directory=True,
+    )
+    expected_logical = {
+        "home": alias_receipt["logical_home"],
+        "workspace": str(logical_workspace),
+        "source": str(source),
+        "developer_dir": str(developer_dir),
+        "out": str(out),
+    }
+    ninja = ninja_contract(source)
+    expected_argv = [
+        str(source.parent / "depot_tools/autoninja"),
+        "-j{}".format(X64_MEMORY_SAFE_RESUME_JOBS),
+        "-C",
+        X64_OUT,
+        "chrome",
+        "chrome/installer/mac:copies",
+    ]
+    expected_environment = {
+        "HOME": alias_receipt["logical_home"],
+        "LANG": "C",
+        "LC_ALL": "C",
+        "TZ": "UTC",
+        "DEVELOPER_DIR": str(developer_dir),
+        "PATH": os.pathsep.join(
+            (
+                str(source.parent / "depot_tools"),
+                str(Path(ninja["path"]).parent),
+                SYSTEM_PATH,
+            )
+        ),
+        "DEPOT_TOOLS_UPDATE": "0",
+        "DEPOT_TOOLS_METRICS": "0",
+        "GCLIENT_FILE": str(source.parent / ".gclient"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "NINJA_SUMMARIZE_BUILD": "1",
+    }
+    expected_stdout_logical = exit_path.with_name(
+        X64_MEMORY_SAFE_RESUME_STEM + ".log"
+    )
+    expected_stdout_physical = _physical_execution_path(
+        expected_stdout_logical,
+        alias_receipt,
+        "x64 external-interruption stdout",
+    )
+    environment_order = (
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "TZ",
+        "DEVELOPER_DIR",
+        "PATH",
+        "DEPOT_TOOLS_UPDATE",
+        "DEPOT_TOOLS_METRICS",
+        "GCLIENT_FILE",
+        "PYTHONDONTWRITEBYTECODE",
+        "NINJA_SUMMARIZE_BUILD",
+    )
+    expected_shell_script = (
+        "set -o pipefail\n/usr/bin/env -i {} {} 2>&1 | /usr/bin/tee -a {}"
+    ).format(
+        " ".join(
+            "{}={}".format(name, shlex.quote(expected_environment[name]))
+            for name in environment_order
+        ),
+        " ".join(shlex.quote(item) for item in expected_argv),
+        shlex.quote(str(expected_stdout_physical)),
+    )
+    alias_identity = dict(alias_receipt["alias"])
+    alias_identity.pop("root_owned", None)
+    alias_identity.pop("absolute_exact_target", None)
+    alias_identity.pop("target_identity", None)
+    expected_identity = {
+        "alias": alias_identity,
+        "source": _execution_identity_mapping(
+            alias_receipt["mappings"]["source"]
+        ),
+        "developer": _execution_identity_mapping(
+            alias_receipt["mappings"]["developer"]
+        ),
+    }
+    pre_keys = {
+        "schema",
+        "kind",
+        "run_id",
+        "created_at_ns",
+        "architecture",
+        "logical",
+        "planned_process",
+        "identity",
+        "pre_run",
+        "stdout_log",
+        "runner",
+        "policy",
+        "fresh_x64_preparation",
+        "prior_memory_abort",
+    }
+    _resume3_exact_keys(
+        pre, pre_keys, "x64 external-interruption pre-launch"
+    )
+    planned = pre["planned_process"]
+    _resume3_exact_keys(
+        planned,
+        {"cwd", "argv", "environment", "shell_argv", "start_new_session", "jobs"},
+        "x64 external-interruption planned process",
+    )
+    expected_runner = (MACOS_DIR / "x64_abort_resume_runner.py").resolve(
+        strict=True
+    )
+    runner = pre["runner"]
+    _resume3_exact_keys(
+        runner,
+        {"path", "bytes", "sha256"},
+        "x64 external-interruption runner",
+    )
+    if (
+        type(pre["schema"]) is not int
+        or pre["schema"] != 1
+        or pre["kind"] != "focus-macos-alias-resume3-pre-launch"
+        or pre["run_id"] != X64_MEMORY_SAFE_RESUME_STEM
+        or type(pre["created_at_ns"]) is not int
+        or pre["created_at_ns"] <= 0
+        or pre["architecture"] != "x64"
+        or not _strict_json_identity(pre["logical"], expected_logical)
+        or planned["cwd"] != str(source)
+        or not _strict_json_identity(planned["argv"], expected_argv)
+        or not _strict_json_identity(
+            planned["environment"], expected_environment
+        )
+        or planned["shell_argv"]
+        != ["/bin/zsh", "-f", "-c", expected_shell_script]
+        or type(planned["jobs"]) is not int
+        or planned["jobs"] != X64_MEMORY_SAFE_RESUME_JOBS
+        or planned["start_new_session"] is not True
+        or "gn gen" in planned["shell_argv"][-1]
+        or "http://" in planned["shell_argv"][-1]
+        or "https://" in planned["shell_argv"][-1]
+        or planned["shell_argv"][-1].count("-j6") != 1
+        or not _strict_json_identity(
+            pre["policy"],
+            {
+                "explicit_gn_gen_command": False,
+                "network_operations": 0,
+                "single_run": True,
+                "final_success_requires_popen_wait_zero": True,
+            },
+        )
+        or not _strict_json_identity(pre["identity"], expected_identity)
+        or Path(runner["path"]).resolve(strict=True) != expected_runner
+        or type(runner["bytes"]) is not int
+        or runner["bytes"] != expected_runner.stat().st_size
+        or runner["sha256"] != sha256_file(expected_runner)
+    ):
+        raise PipelineError(
+            "x64 external-interruption pre-launch or runner was forged"
+        )
+    initial_stdout = pre["stdout_log"]
+    _resume3_exact_keys(
+        initial_stdout,
+        {
+            "logical_path",
+            "physical_path",
+            "device",
+            "inode",
+            "uid",
+            "gid",
+            "mode",
+            "bytes",
+            "mtime_ns",
+            "birth_time_ns",
+        },
+        "x64 external-interruption initial stdout",
+    )
+    if (
+        initial_stdout["logical_path"] != str(expected_stdout_logical)
+        or initial_stdout["physical_path"] != str(expected_stdout_physical)
+        or any(
+            type(initial_stdout[name]) is not int
+            for name in set(initial_stdout)
+            - {"logical_path", "physical_path"}
+        )
+        or initial_stdout["bytes"] != 0
+        or initial_stdout["mode"] & 0o022
+    ):
+        raise PipelineError(
+            "x64 external-interruption initial stdout identity mismatch"
+        )
+    pre_run = pre["pre_run"]
+    _resume3_exact_keys(
+        pre_run,
+        {"ninja_log", "ninja_deps", "build_ninja", "toolchain_inventory"},
+        "x64 external-interruption pre-run",
+    )
+    for name, relative in (
+        ("ninja_log", ".ninja_log"),
+        ("ninja_deps", ".ninja_deps"),
+        ("build_ninja", "build.ninja"),
+    ):
+        _validate_recorded_file_snapshot(
+            pre_run[name],
+            out / relative,
+            "x64 external-interruption pre-run " + name,
+        )
+    _validate_recorded_toolchain_inventory(pre_run["toolchain_inventory"])
+    fresh_pre_run = dict(pre_run)
+    fresh_pre_run["ninja_log"] = None
+    fresh_pre_run["ninja_deps"] = None
+    _x64_memory_abort_fresh_binding(
+        source,
+        developer_dir,
+        out,
+        pre["fresh_x64_preparation"],
+        fresh_pre_run,
+    )
+    prior_abort = _x64_memory_abort_resume_binding(
+        source,
+        developer_dir,
+        out,
+        pre["prior_memory_abort"],
+        pre_run,
+    )
+    prior_wait_ns = prior_abort["exit_status"]["wait_observation"][
+        "wait_returned_at_ns"
+    ]
+    if pre["created_at_ns"] <= prior_wait_ns:
+        raise PipelineError(
+            "x64 external-interruption did not follow the memory abort"
+        )
+    pre_stat = os.stat(str(pre_path), follow_symlinks=False)
+    if status["pre_launch"] != {
+        "path": str(pre_path),
+        "sha256": sha256_file(pre_path),
+    }:
+        raise PipelineError(
+            "x64 external-interruption pre-launch timing or hash changed"
+        )
+    primary_keys = {
+        "schema",
+        "kind",
+        "run_id",
+        "architecture",
+        "observed_at_ns",
+        "observation_methods",
+        "pre_launch",
+        "process_group",
+        "stdout_log_live_snapshot",
+    }
+    _resume3_exact_keys(
+        primary, primary_keys, "x64 external-interruption primary"
+    )
+    if (
+        type(primary["schema"]) is not int
+        or primary["schema"] != 2
+        or primary["kind"]
+        != "focus-macos-alias-raw-ninja-live-process-chain-observation"
+        or primary["run_id"] != X64_MEMORY_SAFE_RESUME_STEM
+        or primary["architecture"] != "x64"
+        or type(primary["observed_at_ns"]) is not int
+        or primary["observed_at_ns"] <= pre["created_at_ns"]
+        or primary["observation_methods"] != ["ps", "lsof", "proc_pidpath"]
+        or not _strict_json_identity(primary["pre_launch"], status["pre_launch"])
+    ):
+        raise PipelineError("x64 external-interruption primary evidence mismatch")
+    stable_roles = _resume3_process_group_contract(
+        primary,
+        {"process": {"pgid": status["pgid"], "argv": expected_argv}},
+        source,
+        out,
+        ninja,
+        expected_stdout_physical,
+        expected_jobs=X64_MEMORY_SAFE_RESUME_JOBS,
+    )
+    leader = stable_roles["pipeline_shell_group_leader"]
+    if (
+        leader["pid"] != status["pid"]
+        or leader["started_at_ns"] <= pre["created_at_ns"]
+        or pre_stat.st_mtime_ns >= leader["started_at_ns"]
+        or leader["started_at_ns"] > primary["observed_at_ns"]
+    ):
+        raise PipelineError(
+            "x64 external-interruption process identity or start time mismatch"
+        )
+    primary_stdout = _resume3_snapshot_contract(
+        primary["stdout_log_live_snapshot"],
+        "x64 external-interruption primary stdout",
+    )
+    if (
+        Path(primary_stdout["path"]) != expected_stdout_physical
+        or primary_stdout["device"] != initial_stdout["device"]
+        or primary_stdout["inode"] != initial_stdout["inode"]
+        or primary_stdout["birth_time_ns"] != initial_stdout["birth_time_ns"]
+        or primary_stdout["bytes"] <= 0
+        or primary_stdout["bytes"] > MAX_RESUME_STDOUT_BYTES
+        or primary_stdout["mode"] & 0o022
+        or primary_stdout["mtime_ns"] > primary["observed_at_ns"]
+    ):
+        raise PipelineError(
+            "x64 external-interruption primary stdout mismatch"
+        )
+    supplement_keys = {
+        "schema",
+        "kind",
+        "run_id",
+        "architecture",
+        "observed_at_ns",
+        "observation_method",
+        "primary_observation",
+        "processes",
+    }
+    _resume3_exact_keys(
+        supplement, supplement_keys, "x64 external-interruption supplement"
+    )
+    if (
+        type(supplement["schema"]) is not int
+        or supplement["schema"] != 2
+        or supplement["kind"]
+        != "focus-macos-alias-raw-ninja-live-process-chain-observation-supplement"
+        or supplement["run_id"] != X64_MEMORY_SAFE_RESUME_STEM
+        or supplement["architecture"] != "x64"
+        or type(supplement["observed_at_ns"]) is not int
+        or supplement["observed_at_ns"] < primary["observed_at_ns"]
+        or supplement["observation_method"] != "ps eww"
+        or not _strict_json_identity(
+            supplement["primary_observation"], live["primary"]
+        )
+        or not isinstance(supplement["processes"], list)
+        or len(supplement["processes"]) != 2
+    ):
+        raise PipelineError(
+            "x64 external-interruption supplement evidence mismatch"
+        )
+    supplemented = {}
+    supplement_process_keys = {
+        "role",
+        "pid",
+        "ppid",
+        "pgid",
+        "PATH",
+        "PWD",
+        "allowlisted_environment",
+        "ps_eww_bytes",
+        "ps_eww_sha256",
+    }
+    python_bin = (
+        source.parent
+        / "depot_tools/python-bin/.."
+        / PACKAGING_PYTHON_RELDIR
+    )
+    expected_path = os.pathsep.join(
+        (
+            str(python_bin),
+            str(python_bin / "Scripts"),
+            expected_environment["PATH"],
+        )
+    )
+    expected_allowlisted = dict(expected_environment)
+    expected_allowlisted.pop("PATH")
+    for item in supplement["processes"]:
+        _resume3_exact_keys(
+            item,
+            supplement_process_keys,
+            "x64 external-interruption supplemented process",
+        )
+        role = item["role"]
+        if role not in {"autoninja_python", "pinned_ninja"} or role in supplemented:
+            raise PipelineError(
+                "x64 external-interruption supplemented role mismatch"
+            )
+        stable = stable_roles[role]
+        if (
+            any(type(item[name]) is not int for name in ("pid", "ppid", "pgid"))
+            or item["pid"] != stable["pid"]
+            or item["ppid"] != stable["ppid"]
+            or item["pgid"] != status["pgid"]
+            or item["PATH"] != expected_path
+            or Path(item["PWD"]).resolve(strict=True)
+            != Path(source).resolve(strict=True)
+            or not _strict_json_identity(
+                item["allowlisted_environment"], expected_allowlisted
+            )
+            or type(item["ps_eww_bytes"]) is not int
+            or item["ps_eww_bytes"] <= 0
+            or not re.fullmatch(r"[0-9a-f]{64}", item["ps_eww_sha256"])
+        ):
+            raise PipelineError(
+                "x64 external-interruption supplemented process mismatch"
+            )
+        supplemented[role] = item
+    revalidation_keys = {
+        "schema",
+        "kind",
+        "run_id",
+        "architecture",
+        "capture_started_at_ns",
+        "capture_finished_at_ns",
+        "observation_methods",
+        "linked_evidence",
+        "stable_spine",
+        "dynamic_descendants",
+        "script_identities",
+        "stdout_log_live_snapshot",
+    }
+    _resume3_exact_keys(
+        revalidation,
+        revalidation_keys,
+        "x64 external-interruption revalidation",
+    )
+    if (
+        type(revalidation["schema"]) is not int
+        or revalidation["schema"] != 2
+        or revalidation["kind"]
+        != "focus-macos-alias-raw-ninja-live-process-chain-revalidation"
+        or revalidation["run_id"] != X64_MEMORY_SAFE_RESUME_STEM
+        or revalidation["architecture"] != "x64"
+        or type(revalidation["capture_started_at_ns"]) is not int
+        or type(revalidation["capture_finished_at_ns"]) is not int
+        or revalidation["capture_started_at_ns"] < supplement["observed_at_ns"]
+        or revalidation["capture_finished_at_ns"]
+        < revalidation["capture_started_at_ns"]
+        or revalidation["observation_methods"] != ["ps", "lsof", "proc_pidpath"]
+        or not _strict_json_identity(
+            revalidation["linked_evidence"],
+            {
+                "pre_launch": status["pre_launch"],
+                "primary_observation": live["primary"],
+                "environment_supplement": live["supplement"],
+            },
+        )
+    ):
+        raise PipelineError(
+            "x64 external-interruption revalidation evidence mismatch"
+        )
+    spine_keys = {
+        "role",
+        "pid",
+        "ppid",
+        "pgid",
+        "started_at_ns",
+        "cwd_physical",
+        "executable",
+        "ps_command",
+    }
+    spine = revalidation["stable_spine"]
+    if not isinstance(spine, list) or len(spine) != len(stable_roles):
+        raise PipelineError(
+            "x64 external-interruption stable spine mismatch"
+        )
+    revalidated = {}
+    for item in spine:
+        _resume3_exact_keys(
+            item, spine_keys, "x64 external-interruption stable spine member"
+        )
+        role = item["role"]
+        if role not in stable_roles or role in revalidated:
+            raise PipelineError(
+                "x64 external-interruption revalidated role mismatch"
+            )
+        expected = {key: stable_roles[role][key] for key in spine_keys}
+        if not _strict_json_identity(item, expected):
+            raise PipelineError(
+                "x64 external-interruption stable process changed"
+            )
+        revalidated[role] = item
+    dynamic_revalidation = revalidation["dynamic_descendants"]
+    if not isinstance(dynamic_revalidation, list):
+        raise PipelineError(
+            "x64 external-interruption dynamic descendants are not a list"
+        )
+    revalidation_pids = {item["pid"]: item for item in spine}
+    for item in dynamic_revalidation:
+        _resume3_exact_keys(
+            item, spine_keys, "x64 external-interruption dynamic process"
+        )
+        if (
+            item["role"] != "dynamic_descendant"
+            or any(
+                type(item[name]) is not int
+                for name in ("pid", "ppid", "pgid", "started_at_ns")
+            )
+            or item["pid"] <= 1
+            or item["ppid"] <= 1
+            or item["pgid"] != status["pgid"]
+            or item["pid"] in revalidation_pids
+        ):
+            raise PipelineError(
+                "x64 external-interruption dynamic process mismatch"
+            )
+        revalidation_pids[item["pid"]] = item
+    pinned_pid = stable_roles["pinned_ninja"]["pid"]
+    for item in dynamic_revalidation:
+        cursor = item
+        visited = set()
+        while cursor["pid"] != pinned_pid:
+            if cursor["pid"] in visited:
+                raise PipelineError(
+                    "x64 external-interruption dynamic ancestry cycle"
+                )
+            visited.add(cursor["pid"])
+            cursor = revalidation_pids.get(cursor["ppid"])
+            if cursor is None:
+                raise PipelineError(
+                    "x64 external-interruption dynamic ancestry does not reach Ninja"
+                )
+    scripts = revalidation["script_identities"]
+    script_keys = {"path", "bytes", "inode", "uid", "gid", "mode", "sha256"}
+    expected_scripts = {
+        (source.parent / "depot_tools/autoninja").resolve(strict=True),
+        (source.parent / "depot_tools/autoninja.py").resolve(strict=True),
+        expected_runner,
+    }
+    if not isinstance(scripts, list) or len(scripts) != len(expected_scripts):
+        raise PipelineError(
+            "x64 external-interruption script identity list mismatch"
+        )
+    observed_scripts = set()
+    for item in scripts:
+        _resume3_exact_keys(
+            item, script_keys, "x64 external-interruption script identity"
+        )
+        path = Path(item["path"]).resolve(strict=True)
+        observed = os.stat(str(path), follow_symlinks=False)
+        if (
+            path not in expected_scripts
+            or path in observed_scripts
+            or any(
+                type(item[name]) is not int
+                for name in ("bytes", "inode", "uid", "gid", "mode")
+            )
+            or item["bytes"] != observed.st_size
+            or item["inode"] != observed.st_ino
+            or item["uid"] != observed.st_uid
+            or item["gid"] != observed.st_gid
+            or item["mode"] != stat.S_IMODE(observed.st_mode)
+            or item["sha256"] != sha256_file(path)
+        ):
+            raise PipelineError(
+                "x64 external-interruption script identity changed"
+            )
+        observed_scripts.add(path)
+    revalidation_stdout = _resume3_snapshot_contract(
+        revalidation["stdout_log_live_snapshot"],
+        "x64 external-interruption revalidation stdout",
+    )
+    if (
+        Path(revalidation_stdout["path"]) != expected_stdout_physical
+        or revalidation_stdout["inode"] != initial_stdout["inode"]
+        or revalidation_stdout["birth_time_ns"]
+        != initial_stdout["birth_time_ns"]
+        or revalidation_stdout["bytes"] < primary_stdout["bytes"]
+        or revalidation_stdout["bytes"] > MAX_RESUME_STDOUT_BYTES
+        or revalidation_stdout["mode"] & 0o022
+        or revalidation_stdout["mtime_ns"]
+        > revalidation["capture_finished_at_ns"]
+    ):
+        raise PipelineError(
+            "x64 external-interruption revalidation stdout mismatch"
+        )
+    final_stdout = _resume3_snapshot_contract(
+        status["stdout_log"], "x64 external-interruption final stdout"
+    )
+    # Device identity was captured from the physical Home-alias target.  Hash
+    # the logical spelling, but compare metadata from that same physical node.
+    stdout_stat = os.stat(str(expected_stdout_physical), follow_symlinks=False)
+    current_stdout = {
+        "device": stdout_stat.st_dev,
+        "inode": stdout_stat.st_ino,
+        "uid": stdout_stat.st_uid,
+        "gid": stdout_stat.st_gid,
+        "mode": stat.S_IMODE(stdout_stat.st_mode),
+        "bytes": stdout_stat.st_size,
+        "mtime_ns": stdout_stat.st_mtime_ns,
+        "ctime_ns": stdout_stat.st_ctime_ns,
+        "birth_time_ns": int(
+            getattr(stdout_stat, "st_birthtime", stdout_stat.st_ctime)
+            * 1_000_000_000
+        ),
+        "path": str(expected_stdout_logical),
+        "sha256": sha256_file(expected_stdout_logical),
+    }
+    current_stdout_without_device = dict(current_stdout)
+    current_stdout_without_device.pop("device")
+    recorded_stdout_without_device = dict(final_stdout)
+    recorded_stdout_without_device.pop("device")
+    if (
+        not _strict_json_identity(
+            recorded_stdout_without_device, current_stdout_without_device
+        )
+        # Darwin's numeric st_dev can change across a reboot.  The immutable
+        # evidence must agree internally, while the live location is pinned by
+        # the stable APFS volume UUID above and by inode/birth/hash below.
+        or final_stdout["device"] != initial_stdout["device"]
+        or _volume_identity(expected_stdout_physical)["volume_uuid"]
+        != alias_receipt["volume"]["volume_uuid"]
+        or final_stdout["inode"] != initial_stdout["inode"]
+        or final_stdout["birth_time_ns"] != initial_stdout["birth_time_ns"]
+        or final_stdout["mode"] & 0o222
+        or final_stdout["bytes"] <= 0
+        or final_stdout["bytes"] > MAX_RESUME_STDOUT_BYTES
+        or primary_stdout["bytes"] > final_stdout["bytes"]
+        or revalidation_stdout["bytes"] > final_stdout["bytes"]
+        or _sha256_file_prefix(
+            expected_stdout_logical, primary_stdout["bytes"]
+        )
+        != primary_stdout["sha256"]
+        or _sha256_file_prefix(
+            expected_stdout_logical, revalidation_stdout["bytes"]
+        )
+        != revalidation_stdout["sha256"]
+        or final_stdout["mtime_ns"] > wait["wait_returned_at_ns"]
+    ):
+        raise PipelineError(
+            "x64 external-interruption final stdout identity/prefix mismatch"
+        )
+    _x64_external_interruption_monitor_contract(
+        status["monitor"], source, exit_path.parent
+    )
+    if _process_group_exists(status["pgid"]):
+        raise PipelineError(
+            "x64 external-interruption process group still exists"
+        )
+    post = status["post_run"]
+    _resume3_exact_keys(
+        post,
+        {"ninja_log", "ninja_deps", "build_ninja", "toolchain_inventory"},
+        "x64 external-interruption post-run",
+    )
+    for name, relative in (
+        ("ninja_log", ".ninja_log"),
+        ("ninja_deps", ".ninja_deps"),
+        ("build_ninja", "build.ninja"),
+    ):
+        _validate_recorded_file_snapshot(
+            post[name],
+            out / relative,
+            "x64 external-interruption post-run " + name,
+        )
+    _validate_recorded_toolchain_inventory(post["toolchain_inventory"])
+    current_graph = {
+        "build_ninja": _regular_file_snapshot(out / "build.ninja"),
+        "toolchain_inventory": _toolchain_inventory(out),
+    }
+    if (
+        not _strict_json_identity(post["build_ninja"], current_graph["build_ninja"])
+        or not _strict_json_identity(
+            post["toolchain_inventory"], current_graph["toolchain_inventory"]
+        )
+    ):
+        raise PipelineError(
+            "x64 external-interruption graph or toolchains changed"
+        )
+    _resume3_ninja_history_transition_contract(
+        pre_run,
+        post,
+        "x64",
+        leader["started_at_ns"],
+        resume_after_memory_abort=True,
+        out=out,
+    )
+    if require_current_history:
+        _ninja_history_exact_contract(
+            {"ninja_log": post["ninja_log"], "ninja_deps": post["ninja_deps"]},
+            out,
+            "x64 external-interruption post-run",
+        )
+    if require_unfinished and (
+        os.path.lexists(str(out / APP_NAME))
+        or os.path.lexists(str(out / SLICE_RECEIPT_NAME))
+    ):
+        raise PipelineError(
+            "x64 external-interruption unexpectedly has a finished app or receipt"
+        )
+    if not (
+        pre["created_at_ns"]
+        < leader["started_at_ns"]
+        <= primary["observed_at_ns"]
+        <= supplement["observed_at_ns"]
+        <= revalidation["capture_started_at_ns"]
+        <= revalidation["capture_finished_at_ns"]
+        < wait["wait_returned_at_ns"]
+    ):
+        raise PipelineError(
+            "x64 external-interruption evidence chronology mismatch"
+        )
+    for evidence_path, earliest, latest, label in (
+        (
+            primary_path,
+            primary["observed_at_ns"],
+            supplement["observed_at_ns"],
+            "primary",
+        ),
+        (
+            supplement_path,
+            supplement["observed_at_ns"],
+            revalidation["capture_finished_at_ns"],
+            "supplement",
+        ),
+        (
+            revalidation_path,
+            revalidation["capture_finished_at_ns"],
+            wait["wait_returned_at_ns"],
+            "revalidation",
+        ),
+    ):
+        observed = os.stat(str(evidence_path), follow_symlinks=False)
+        if (
+            observed.st_mtime_ns < earliest
+            or observed.st_mtime_ns > latest + 1_000_000_000
+        ):
+            raise PipelineError(
+                "x64 external-interruption {} evidence timing mismatch".format(
+                    label
+                )
+            )
+    return exit_path, status, status_hash, pre
+
+
+def x64_external_interruption_resume_contract(
+    source, developer_dir, prior_exit_path
+):
+    """Public fail-closed gate authorizing one resume after resume4 SIGTERM."""
+    path, value, _sha256, _pre = _x64_external_interruption_evidence_contract(
+        source,
+        developer_dir,
+        prior_exit_path,
+        require_current_history=True,
+        require_unfinished=True,
+    )
+    return path, value
+
+
+def _x64_external_interruption_resume_binding(
+    source, developer_dir, out, supplied, pre_run
+):
+    """Bind resume5 to the exact immutable resume4 interruption post-state."""
+    if not isinstance(supplied, dict) or set(supplied) != {
+        "exit_status",
+        "contract_sha256",
+    }:
+        raise PipelineError("resume5 prior external-interruption link mismatch")
+    link = supplied["exit_status"]
+    if not isinstance(link, dict) or set(link) != {"path", "bytes", "sha256"}:
+        raise PipelineError(
+            "resume5 prior external-interruption snapshot mismatch"
+        )
+    path, value, observed_hash, prior_pre = (
+        _x64_external_interruption_evidence_contract(
+            source,
+            developer_dir,
+            link.get("path", ""),
+            require_current_history=False,
+            require_unfinished=False,
+        )
+    )
+    snapshot = _regular_file_snapshot(path)
+    expected_link = {
+        "path": str(path),
+        "bytes": snapshot["bytes"],
+        "sha256": snapshot["sha256"],
+    }
+    if (
+        not _strict_json_identity(link, expected_link)
+        or supplied["contract_sha256"] != observed_hash
+        or observed_hash != snapshot["sha256"]
+        or not _strict_json_identity(pre_run, value["post_run"])
+        or Path(out) != in_source(source, X64_OUT, "resume5 x64 output")
+    ):
+        raise PipelineError(
+            "resume5 is not bound to the exact external-interruption post-state"
+        )
+    return {
+        "link": supplied,
+        "exit_status": value,
+        "pre_launch": prior_pre,
+    }
+
+
 def _x64_memory_abort_resume_binding(source, developer_dir, out, supplied, pre_run):
     if not isinstance(supplied, dict) or set(supplied) != {
         "exit_status", "contract_sha256"
@@ -9665,13 +10654,34 @@ def _x64_memory_abort_resume_binding(source, developer_dir, out, supplied, pre_r
 
 def _resume3_run_profile(record_path, record, architecture):
     """Select one immutable execution profile without weakening resume3."""
-    memory_safe = architecture == "x64" and "prior_memory_abort" in record
+    external_interruption = (
+        architecture == "x64" and "prior_external_interruption" in record
+    )
+    memory_safe = (
+        architecture == "x64"
+        and "prior_memory_abort" in record
+        and not external_interruption
+    )
     stem = Path(record_path).name[: -len(".execution.json")]
+    if external_interruption:
+        if "prior_memory_abort" not in record:
+            raise PipelineError("resume5 is missing the prior memory-abort chain")
+        if stem != X64_EXTERNAL_INTERRUPTION_RESUME_STEM:
+            raise PipelineError("resume5 run identifier mismatch")
+        return {
+            "memory_safe_resume": False,
+            "external_interruption_resume": True,
+            "continued_x64_resume": True,
+            "jobs": X64_MEMORY_SAFE_RESUME_JOBS,
+            "runner": MACOS_DIR / "x64_interrupted_resume_runner.py",
+        }
     if memory_safe:
         if stem != X64_MEMORY_SAFE_RESUME_STEM:
             raise PipelineError("resume4 run identifier mismatch")
         return {
             "memory_safe_resume": True,
+            "external_interruption_resume": False,
+            "continued_x64_resume": True,
             "jobs": X64_MEMORY_SAFE_RESUME_JOBS,
             "runner": MACOS_DIR / "x64_abort_resume_runner.py",
         }
@@ -9683,6 +10693,8 @@ def _resume3_run_profile(record_path, record, architecture):
         raise PipelineError("resume3 run identifier mismatch")
     return {
         "memory_safe_resume": False,
+        "external_interruption_resume": False,
+        "continued_x64_resume": False,
         "jobs": BUILD_JOBS,
         "runner": MACOS_DIR / "alias_resume_runner.py",
     }
@@ -9703,6 +10715,8 @@ def _resume3_execution_record_contract(
 ):
     profile = _resume3_run_profile(record_path, record, architecture)
     memory_safe_resume = profile["memory_safe_resume"]
+    external_interruption_resume = profile["external_interruption_resume"]
+    continued_x64_resume = profile["continued_x64_resume"]
     expected_jobs = profile["jobs"]
     root_keys = {
         "schema",
@@ -9723,8 +10737,10 @@ def _resume3_execution_record_contract(
     }
     if architecture == "x64":
         root_keys.add("fresh_x64_preparation")
-    if memory_safe_resume:
+    if continued_x64_resume:
         root_keys.add("prior_memory_abort")
+    if external_interruption_resume:
+        root_keys.add("prior_external_interruption")
     _resume3_exact_keys(record, root_keys, "resume3 execution record")
     if (
         type(record["schema"]) is not int
@@ -9880,8 +10896,10 @@ def _resume3_execution_record_contract(
     }
     if architecture == "x64":
         pre_keys.add("fresh_x64_preparation")
-    if memory_safe_resume:
+    if continued_x64_resume:
         pre_keys.add("prior_memory_abort")
+    if external_interruption_resume:
+        pre_keys.add("prior_external_interruption")
     _resume3_exact_keys(pre, pre_keys, "resume3 pre-launch")
     planned = pre["planned_process"]
     _resume3_exact_keys(
@@ -9918,9 +10936,16 @@ def _resume3_execution_record_contract(
             )
         )
         or (
-            memory_safe_resume
+            continued_x64_resume
             and not _strict_json_identity(
                 pre["prior_memory_abort"], record["prior_memory_abort"]
+            )
+        )
+        or (
+            external_interruption_resume
+            and not _strict_json_identity(
+                pre["prior_external_interruption"],
+                record["prior_external_interruption"],
             )
         )
     ):
@@ -9959,7 +10984,7 @@ def _resume3_execution_record_contract(
         {"ninja_log", "ninja_deps", "build_ninja", "toolchain_inventory"},
         "resume3 pre-run",
     )
-    if architecture == "x64" and not memory_safe_resume:
+    if architecture == "x64" and not continued_x64_resume:
         if pre_run["ninja_log"] is not None or pre_run["ninja_deps"] is not None:
             raise PipelineError("resume3 fresh x86_64 pre-run history is not absent")
         _validate_recorded_file_snapshot(
@@ -9981,15 +11006,16 @@ def _resume3_execution_record_contract(
     _validate_recorded_toolchain_inventory(pre_run["toolchain_inventory"])
     fresh_x64_binding = None
     prior_memory_abort_binding = None
+    prior_external_interruption_binding = None
     if architecture == "x64":
         fresh_pre_run = pre_run
-        if memory_safe_resume:
+        if continued_x64_resume:
             fresh_pre_run = dict(pre_run)
             fresh_pre_run["ninja_log"] = None
             fresh_pre_run["ninja_deps"] = None
         fresh_binding_contract = (
             _x64_memory_abort_fresh_binding
-            if memory_safe_resume
+            if continued_x64_resume
             else _fresh_x64_resume_preparation_binding
         )
         fresh_x64_binding = fresh_binding_contract(
@@ -10013,6 +11039,37 @@ def _resume3_execution_record_contract(
             if pre["created_at_ns"] <= prior_wait_ns:
                 raise PipelineError(
                     "resume4 pre-launch does not follow the memory abort"
+                )
+        elif external_interruption_resume:
+            prior_external_interruption_binding = (
+                _x64_external_interruption_resume_binding(
+                    source,
+                    developer_dir,
+                    out,
+                    record["prior_external_interruption"],
+                    pre_run,
+                )
+            )
+            prior_pre = prior_external_interruption_binding["pre_launch"]
+            if (
+                not _strict_json_identity(
+                    record["fresh_x64_preparation"],
+                    prior_pre["fresh_x64_preparation"],
+                )
+                or not _strict_json_identity(
+                    record["prior_memory_abort"],
+                    prior_pre["prior_memory_abort"],
+                )
+            ):
+                raise PipelineError(
+                    "resume5 prior fresh/memory-abort provenance chain changed"
+                )
+            prior_wait_ns = prior_external_interruption_binding["exit_status"][
+                "wait_observation"
+            ]["wait_returned_at_ns"]
+            if pre["created_at_ns"] <= prior_wait_ns:
+                raise PipelineError(
+                    "resume5 pre-launch does not follow the external interruption"
                 )
     initial_stdout = pre["stdout_log"]
     _resume3_exact_keys(
@@ -10389,8 +11446,8 @@ def _resume3_execution_record_contract(
         post,
         architecture,
         process["started_at_ns"],
-        resume_after_memory_abort=memory_safe_resume,
-        out=out if memory_safe_resume else None,
+        resume_after_memory_abort=continued_x64_resume,
+        out=out if continued_x64_resume else None,
     )
     for evidence_path, earliest, latest, label in (
         (primary_path, primary["observed_at_ns"], supplement["observed_at_ns"], "primary"),
@@ -10416,8 +11473,15 @@ def _resume3_execution_record_contract(
     }
     if architecture == "x64":
         result["fresh_x64_preparation"] = fresh_x64_binding["link"]
-    if memory_safe_resume:
-        result["prior_memory_abort"] = prior_memory_abort_binding["link"]
+    if continued_x64_resume:
+        if memory_safe_resume:
+            result["prior_memory_abort"] = prior_memory_abort_binding["link"]
+        else:
+            result["prior_memory_abort"] = record["prior_memory_abort"]
+    if external_interruption_resume:
+        result["prior_external_interruption"] = (
+            prior_external_interruption_binding["link"]
+        )
     return result
 
 

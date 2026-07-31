@@ -6034,6 +6034,145 @@ class BuildPipelineTests(unittest.TestCase):
                     {"ninja_log": {"sha256": "b" * 64}},
                 )
 
+    def test_resume5_profile_is_fixed_to_j6_dedicated_runner_and_full_chain(self):
+        record = {
+            "prior_memory_abort": {"fixture": "memory"},
+            "prior_external_interruption": {"fixture": "external"},
+        }
+        accepted = Path(
+            build_pipeline.X64_EXTERNAL_INTERRUPTION_RESUME_STEM
+            + ".execution.json"
+        )
+        profile = build_pipeline._resume3_run_profile(
+            accepted, record, "x64"
+        )
+        self.assertFalse(profile["memory_safe_resume"])
+        self.assertTrue(profile["external_interruption_resume"])
+        self.assertTrue(profile["continued_x64_resume"])
+        self.assertEqual(6, profile["jobs"])
+        self.assertEqual(
+            "x64_interrupted_resume_runner.py", Path(profile["runner"]).name
+        )
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "resume5 run"):
+            build_pipeline._resume3_run_profile(
+                Path("build-x64-resume5-forged.execution.json"),
+                record,
+                "x64",
+            )
+        with self.assertRaisesRegex(build_pipeline.PipelineError, "memory-abort"):
+            build_pipeline._resume3_run_profile(
+                accepted,
+                {"prior_external_interruption": {"fixture": True}},
+                "x64",
+            )
+
+    def test_external_interruption_monitor_requires_exact_zero_sample_fallback(self):
+        thresholds = {
+            "immediate_free_percent": 5,
+            "sustained_free_percent": 10,
+            "sustained_free_samples": 3,
+            "swap_free_percent": 15,
+            "swap_used_bytes": 8 * build_pipeline.GIB,
+            "swap_sustained_samples": 2,
+        }
+        monitor = {
+            "checks": 0,
+            "minimum_free_bytes": {"source": None, "logs": None},
+            "last_free_bytes": {"source": None, "logs": None},
+            "maximum_stdout_bytes": 0,
+            "hard_floor_bytes": build_pipeline.HARD_FLOOR_GIB
+            * build_pipeline.GIB,
+            "stdout_limit_bytes": build_pipeline.MAX_RESUME_STDOUT_BYTES,
+            "poll_interval_ms": 1000,
+            "source_path": str(self.source.resolve()),
+            "logs_path": str(self.root.resolve()),
+            "process_group_absent": True,
+            "memory": {
+                "samples": 0,
+                "minimum_free_percent": None,
+                "maximum_swap_used_bytes": 0,
+                "maximum_swap_total_bytes": 0,
+                "last": None,
+                "critical_free_consecutive": 0,
+                "critical_swap_consecutive": 0,
+                "maximum_critical_free_consecutive": 0,
+                "maximum_critical_swap_consecutive": 0,
+                "probe_every_checks": 5,
+                "thresholds": thresholds,
+            },
+        }
+        self.assertIs(
+            monitor,
+            build_pipeline._x64_external_interruption_monitor_contract(
+                monitor, self.source, self.root
+            ),
+        )
+        for mutator in (
+            lambda value: value.__setitem__("checks", 1),
+            lambda value: value.__setitem__("process_group_absent", False),
+            lambda value: value["memory"].__setitem__("samples", 1),
+            lambda value: value["memory"]["thresholds"].__setitem__(
+                "sustained_free_percent", 11
+            ),
+        ):
+            forged = json.loads(json.dumps(monitor))
+            mutator(forged)
+            with self.assertRaisesRegex(
+                build_pipeline.PipelineError, "zero-sample fallback"
+            ):
+                build_pipeline._x64_external_interruption_monitor_contract(
+                    forged, self.source, self.root
+                )
+
+    def test_resume5_external_binding_rejects_forged_hash_and_history(self):
+        out = self.source / build_pipeline.X64_OUT
+        out.mkdir(parents=True, exist_ok=True)
+        path = self.root / "resume4.exit-status.json"
+        path.write_text('{"fixture":true}\n', encoding="utf-8")
+        snapshot = build_pipeline._regular_file_snapshot(path)
+        pre_run = {"ninja_log": {"sha256": "a" * 64}}
+        value = {"post_run": pre_run}
+        prior_pre = {
+            "fresh_x64_preparation": {"fixture": "fresh"},
+            "prior_memory_abort": {"fixture": "abort"},
+        }
+        supplied = {
+            "exit_status": {
+                "path": str(path),
+                "bytes": snapshot["bytes"],
+                "sha256": snapshot["sha256"],
+            },
+            "contract_sha256": snapshot["sha256"],
+        }
+        with mock.patch.object(
+            build_pipeline,
+            "_x64_external_interruption_evidence_contract",
+            return_value=(path, value, snapshot["sha256"], prior_pre),
+        ):
+            result = build_pipeline._x64_external_interruption_resume_binding(
+                self.source, self.developer, out, supplied, pre_run
+            )
+            self.assertEqual(supplied, result["link"])
+            self.assertEqual(prior_pre, result["pre_launch"])
+            forged = json.loads(json.dumps(supplied))
+            forged["contract_sha256"] = "0" * 64
+            with self.assertRaisesRegex(
+                build_pipeline.PipelineError, "exact external-interruption"
+            ):
+                build_pipeline._x64_external_interruption_resume_binding(
+                    self.source, self.developer, out, forged, pre_run
+                )
+            with self.assertRaisesRegex(
+                build_pipeline.PipelineError, "exact external-interruption"
+            ):
+                build_pipeline._x64_external_interruption_resume_binding(
+                    self.source,
+                    self.developer,
+                    out,
+                    supplied,
+                    {"ninja_log": {"sha256": "b" * 64}},
+                )
+
     def test_home_alias_resume_cli_is_explicit_and_has_no_gn_option(self):
         adopt = build_pipeline.parser().parse_args(
             [
