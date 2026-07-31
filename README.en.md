@@ -7,21 +7,24 @@
 <h1 align="center">Focus Browser</h1>
 
 <p align="center">
-  A Chromium-based Windows browser built for focused work.
+  A Chromium-based browser for focused work on Windows and macOS.
 </p>
 
 <p align="center">
-  <a href="https://github.com/DanilBend/FocusBrowser/releases/latest">Download</a>
+  <a href="https://github.com/DanilBend/FocusBrowser/releases">Download Windows</a>
+  · <a href="docs/MACOS.md#english">Focus Browser for macOS</a>
   · <a href="https://github.com/DanilBend/FocusBrowser/issues">Report a bug</a>
-  · <a href="docs/RELEASING.md">Release guide</a>
+  · <a href="docs/RELEASING.md">Windows release guide</a>
 </p>
 
 ## Focus Browser 1.0.5
 
 Focus Browser uses the Chromium engine while reducing distractions
-and integrating focus tools directly into the browser interface. Version 1.0.5
-is based on Chromium 150.0.7871.128 and targets 64-bit Windows 10 and Windows
-11.
+and integrating focus tools directly into the browser interface. The 1.0.5
+source version is based on Chromium 150.0.7871.128 and targets 64-bit Windows 10
+and Windows 11. The repository also contains a separate native port for macOS
+12 and later: one local universal build for Apple Silicon and 64-bit Intel
+Macs.
 
 ### Main features
 
@@ -42,10 +45,13 @@ is based on Chromium 150.0.7871.128 and targets 64-bit Windows 10 and Windows
   normal tab without an embedded player.
 - Built-in password manager, compatible extension installation, proprietary
   media codecs and DRM integration hooks.
-- **Non-disruptive updates** — a discovered update is offered on the next
-  launch, with options to update now, remind later or skip that exact version.
+- **Non-disruptive Windows updates** — a discovered update is offered on the
+  next launch, with options to update now, remind later or skip that exact
+  version. Application updates are manual on the macOS port.
 
 ## Download and installation
+
+### Windows
 
 Download the installer or portable archive from
 [Releases](https://github.com/DanilBend/FocusBrowser/releases).
@@ -61,6 +67,21 @@ channel at
 `https://danilbend.github.io/FocusBrowser/appcast-x64.xml`. If the channel is
 temporarily unavailable, use a manual GitHub Releases installation.
 
+### macOS
+
+The current public Releases list contains no macOS assets. The separate macOS
+port produces a local, ad-hoc-signed universal DMG for Apple Silicon and 64-bit
+Intel Macs running macOS 12 or later. It is not Apple-notarized and is not
+currently published.
+
+The macOS build has no automatic application updater, appcast, or Sparkle.
+After a verified DMG appears in a future official
+[GitHub Release](https://github.com/DanilBend/FocusBrowser/releases), updating
+will be manual: quit Focus Browser, download the new DMG, verify its published
+SHA-256, and replace `Focus Browser.app`. See
+[Focus Browser for macOS](docs/MACOS.md#english) for the current status and
+local-DMG limitations.
+
 ## Privacy and external services
 
 - FocusBlock filtering runs locally.
@@ -73,6 +94,7 @@ temporarily unavailable, use a manual GitHub Releases installation.
   importer does not transfer passwords or autofill data.
 - DRM support is compiled in, but the proprietary module is not stored in this
   repository and may be obtained through the browser's component updater.
+  Chromium component updates are not macOS application updates.
 
 See [PRIVACY.en.md](PRIVACY.en.md) for component-level notes.
 
@@ -97,12 +119,21 @@ Output is written under `build/`. Release details are in
 [docs/RELEASING.md](docs/RELEASING.md), and the manual checklist is in
 [build_support/FOCUS_RELEASE_QA.md](build_support/FOCUS_RELEASE_QA.md).
 
+## Building on macOS
+
+The native macOS port builds separate `arm64` and `x86_64` slices from one
+Chromium tree, merges them into a universal application, and creates a local
+DMG. It does not touch Windows/Android or publish the result. See
+[platform/macos/README.md](platform/macos/README.md) for the contracts and exact
+stage order.
+
 ## Repository layout
 
 - `focus-chromium/` — Chromium configuration, branding and patch set.
 - `patches/focus/` — Windows integration and updater patches.
 - `source_overrides/` — files overlaid onto a Chromium checkout.
 - `installer/` — Focus Browser NSIS installer.
+- `platform/macos/` — native universal build and local-DMG packaging for macOS.
 - `build.py`, `package.py` — source preparation, build and packaging.
 - `build_support/`, `qa/` — release validation.
 

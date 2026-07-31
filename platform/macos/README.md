@@ -15,6 +15,9 @@ See `INCOGNITO.md` for the native private-mode contract and runtime acceptance
 matrix, `UNIVERSAL.md` for Intel/Apple Silicon and macOS 12+ compatibility,
 `LOCAL-DMG.md` for the local ad-hoc `.app`/DMG boundary, and
 `BUILD-PIPELINE.md` for the exact executable stage order.
+The user-facing download status and manual-update instructions are kept in
+[`docs/MACOS.md`](../../docs/MACOS.md); that page does not announce a download
+until an accepted DMG is separately published.
 
 The writable macOS sequence is provenance-gated: `acquire_chromium.py` must
 first produce a completed pinned acquisition marker, then

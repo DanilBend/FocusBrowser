@@ -1,8 +1,9 @@
 # Local Focus Browser app and DMG
 
 The target is local installation on supported Intel and Apple Silicon Macs.
-There is no App Store, publishing, updater, Developer ID, or notarization
-workflow.
+There is no App Store, automatic application updater, appcast, Sparkle,
+Developer ID, or notarization workflow. This build/package pipeline never
+publishes an artifact; any future GitHub Release is a separate manual step.
 
 A paid Apple Developer account is not required. Executable code in the final
 bundle may use an ad-hoc signature, which has no certificate identity and is
@@ -42,6 +43,30 @@ After the separate arm64 and x86_64 builds are merged and the complete
 7. Record the app/DMG SHA-256, both runtime reports, and exact Chromium/Focus
    versions.
 
+## Manual application updates
+
+The user-facing status and installation page is
+[`docs/MACOS.md`](../../docs/MACOS.md).
+
+Both macOS architecture profiles compile with the Chromium application updater
+disabled. The app contains no macOS appcast, Sparkle feed, update helper, or
+background application-update flow. The Windows Ed25519 appcast is a
+Windows-only release mechanism and is not used by this port. Chromium component
+updates, where available, are separate from updating `Focus Browser.app`.
+
+The current public Focus Browser Releases list has no macOS asset, and this
+document does not announce one. After an accepted universal DMG is explicitly
+published in a future official GitHub Release, updating remains manual:
+
+1. Quit every running Focus Browser window and helper process.
+2. Download the new universal DMG only from that official release.
+3. Compare its SHA-256 with the checksum published for the same asset.
+4. Open the DMG and replace the existing `Focus Browser.app` in Applications.
+5. Launch the replacement and verify the displayed Focus Browser version.
+
+There is no silent download, automatic restart, or in-app installation on
+macOS.
+
 The DMG container itself does not require an Apple account for local use. An
 ad-hoc signature satisfies the native-code signature requirement but does not
 establish a trusted developer identity. If another Mac receives the app or DMG
@@ -55,7 +80,8 @@ Ad-hoc signing must preserve every entitlement required by Chromium and its
 nested helpers. "No Developer ID, provisioning, or notarization" never means
 removing those entitlements.
 
-No DMG is generated at the planning stage: the repository has no Chromium
-checkout or built `.app`, and the current free space has not been proven
-sufficient against a measured checkout, two native builds, universal merge,
-and packaging threshold.
+Chromium checkouts, built applications, and DMGs are not stored in Git. A macOS
+download must not be documented as available until the universal app and its
+DMG have passed the complete acceptance matrix, their exact size and SHA-256
+have been recorded, and a separate authorized release has actually published
+that asset. This repository workflow performs none of those publishing steps.
