@@ -26,6 +26,7 @@ from pathlib import Path
 
 MACOS_DIR = Path(__file__).resolve().parent
 WORKTREE = MACOS_DIR.parent.parent
+UTILS_DIR = WORKTREE / "focus-chromium/utils"
 RUNNER = MACOS_DIR / "x64_interrupted_resume_runner.py"
 RUNNER_SHA256 = "78204a7ba8fa56ba308eedcb889f643abcf35257baebdc423eba9953f73f71cd"
 SOURCE = Path(
@@ -77,6 +78,86 @@ EXECUTION_SPINE = {
     ),
     MACOS_DIR / "build_pipeline.py": (
         "b7427f883cfd32041062a81b43ee936c910feec1b2db967db84cd52943e5e17e"
+    ),
+    MACOS_DIR / "acquire_chromium.py": (
+        "504a55ede3af761b4404d08154c71794f0d77a90ecbf48ccf8d560ee37101ada"
+    ),
+    MACOS_DIR / "focus_macos.py": (
+        "678a237f0f264a8eb67597a80d42d5ba65a170b52152140af27eb8931a611755"
+    ),
+    MACOS_DIR / "onboarding_alias_compat.py": (
+        "a51843a9d07f290a0d16203959faed7d9b579eeb87d45cdc8df2c276fdf9bdf7"
+    ),
+    MACOS_DIR / "package_local_dmg.py": (
+        "152b58aa43ec3e256641bd7c020b89da200ee4cac1dfd2b96eb1b1bef44c5c90"
+    ),
+    MACOS_DIR / "prepare_source.py": (
+        "eae6b9f02c728c7abe32b69413eb1a207a4e5bac493f21ab23de9d6f00930305"
+    ),
+    MACOS_DIR / "runtime_smoke.py": (
+        "2e404799cf010de41791c26d3c1700fcfc0641be6942a809f02035da9e3b6cb7"
+    ),
+    MACOS_DIR / "icon_contract.py": (
+        "e30769754dda88c7364da23766a8c14e52809bad620386a40b56b5c8a102830c"
+    ),
+    UTILS_DIR / "domain_substitution.py": (
+        "c2cb335b2289dd92dd04cdbc0865655affe81ec822b9caf0caf789ef30434d16"
+    ),
+    UTILS_DIR / "focus_version.py": (
+        "e6b6ebc828eb27181c7237cfe5011e44d70c5d5bc63c15b798ab5ce63bb0ce80"
+    ),
+    UTILS_DIR / "i18n_apply.py": (
+        "ef4b800626f26996bce9a2474922f2ab1c2a61b2dc6938e5f4ac6d5438b549bd"
+    ),
+    UTILS_DIR / "name_substitution.py": (
+        "817d12372c99bcbb727d11734a671a43213537d018236db3d823bd72f3cbf0cd"
+    ),
+    UTILS_DIR / "name_substitution_utils.py": (
+        "60d9d81a16405756a2dfa65e2260f76a7c67e830206e16d4015a598bd903cc10"
+    ),
+    UTILS_DIR / "_extraction.py": (
+        "2d7e3271a0619a8288bbc0aba6f38b29cfbf3ab3af8207dea479707a7ab11048"
+    ),
+    UTILS_DIR / "_common.py": (
+        "65a5e436409bfa4450453043ceb7636cd72e4966054e8d7ec14b3951c2c4559f"
+    ),
+}
+PYTHON_IMPORT_SURFACE = {
+    MACOS_DIR: (
+        "acquire_chromium.py",
+        "alias_resume_recover.py",
+        "alias_resume_runner.py",
+        "build_pipeline.py",
+        "focus_macos.py",
+        "generate_icns.py",
+        "icon_contract.py",
+        "onboarding_alias_compat.py",
+        "package_local_dmg.py",
+        "prepare_source.py",
+        "runtime_smoke.py",
+        "x64_abort_resume_runner.py",
+        "x64_frozen_relink.py",
+        "x64_frozen_relink_executor.py",
+        "x64_interrupted_resume_runner.py",
+        "x64_resume5_detached_launcher.py",
+    ),
+    UTILS_DIR: (
+        "__init__.py",
+        "_common.py",
+        "_extraction.py",
+        "clone.py",
+        "domain_substitution.py",
+        "downloads.py",
+        "filescfg.py",
+        "focus_version.py",
+        "generate_resources.py",
+        "i18n_apply.py",
+        "make_domsub_script.py",
+        "name_substitution.py",
+        "name_substitution_utils.py",
+        "patches.py",
+        "prune_binaries.py",
+        "replace_resources.py",
     ),
 }
 
@@ -195,6 +276,7 @@ def _fixed_preflight():
             "bytes": info.st_size,
             "sha256": observed_hash,
         }
+    import_surface = _python_import_surface_still_exact()
     _regular_system(PYTHON, "system Python")
     python_image = Path(_probe_system_python_image())
     python_image_info = _regular_system(python_image, "system Python image")
@@ -269,6 +351,7 @@ def _fixed_preflight():
             "sha256": RUNNER_SHA256,
         },
         "execution_spine": spine,
+        "python_import_surface": import_surface,
         "python": {
             "launcher": str(PYTHON),
             "image": str(python_image),
@@ -308,6 +391,35 @@ def _execution_spine_still_exact(expected):
         info = _regular_owned(path, "resume5 execution spine recheck")
         if info.st_size != recorded["bytes"] or _sha256(path) != recorded["sha256"]:
             raise LaunchError("resume5 execution spine changed before exec")
+
+
+def _python_import_surface_still_exact():
+    report = {}
+    for root, expected_names in PYTHON_IMPORT_SURFACE.items():
+        info = os.stat(str(root), follow_symlinks=False)
+        if (
+            root.is_symlink()
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) & 0o022
+        ):
+            raise LaunchError("unsafe Python import root: {}".format(root))
+        observed = []
+        for entry in root.iterdir():
+            name = entry.name
+            importable_file = entry.suffix in {".py", ".pyc", ".so"}
+            importable_directory = entry.is_dir() and (
+                name == "__pycache__" or (entry / "__init__.py").exists()
+            )
+            if importable_file or importable_directory:
+                observed.append(name)
+        observed_names = tuple(sorted(observed))
+        if observed_names != tuple(sorted(expected_names)):
+            raise LaunchError(
+                "Python import surface changed under {}".format(root)
+            )
+        report[str(root)] = list(observed_names)
+    return report
 
 
 def _proc_pidpath(pid):
@@ -445,6 +557,13 @@ def _session_absent(session_pgid):
     return False
 
 
+def _unsafe_process_group(process_group):
+    return process_group <= 1 or process_group in {
+        os.getpgrp(),
+        os.getsid(0),
+    }
+
+
 def _process_rows():
     output = subprocess.check_output(
         ["/bin/ps", "-ww", "-axo", "pid=,ppid=,pgid=,command="],
@@ -523,8 +642,7 @@ def _owned_process_groups(rows, ownership):
     _expand_owned_processes(rows, ownership)
     live = [token for token in ownership if _token_still_live(token)]
     groups = {token[4] for token in live}
-    current_group = os.getpgrp()
-    if any(group <= 1 or group == current_group for group in groups):
+    if any(_unsafe_process_group(group) for group in groups):
         raise LaunchError("unsafe process group in detached resume5 ownership tree")
     return groups, live
 
@@ -550,6 +668,8 @@ def _termination_observation(ownership, known_groups):
 
 
 def _signal_process_group(process_group, signum):
+    if _unsafe_process_group(process_group):
+        raise LaunchError("refusing to signal controller process group or session")
     try:
         os.killpg(process_group, signum)
     except OSError as exc:
@@ -559,7 +679,7 @@ def _signal_process_group(process_group, signum):
 
 def _settle_owned_processes(session_pgid, ownership):
     """TERM, observe controlled cleanup, then KILL only still-owned groups."""
-    if session_pgid <= 1 or session_pgid == os.getpgrp():
+    if _unsafe_process_group(session_pgid):
         raise LaunchError("unsafe detached resume5 session group")
     known_groups = {token[4] for token in ownership}
     rows = _process_rows()
@@ -604,7 +724,7 @@ def _capture_handshake_runner_token(
     child_pid, session_pgid, expected_python_image
 ):
     """Bind the handshake PID to microsecond start time, image and session."""
-    if child_pid <= 1 or session_pgid <= 1 or session_pgid == os.getpgrp():
+    if child_pid <= 1 or _unsafe_process_group(session_pgid):
         raise LaunchError("unsafe detached resume5 process identity")
     rows = _process_rows()
     candidates = [
@@ -640,33 +760,6 @@ def _terminate_detached_runner(child_pid, session_pgid, expected_token):
             return True
         raise LaunchError("handshake runner identity drifted before rollback")
     return _settle_owned_processes(session_pgid, {expected_token})
-
-
-def _capture_new_session_ownership(session_pgid):
-    """Capture precise member tokens while the first child is still ours."""
-    if session_pgid <= 1 or session_pgid == os.getpgrp():
-        raise LaunchError("unsafe newly-created resume5 session group")
-    rows = _process_rows()
-    ownership = set()
-    for row in rows:
-        if row["pgid"] != session_pgid:
-            continue
-        try:
-            ownership.add(_capture_process_token(row))
-        except (LaunchError, OSError):
-            continue
-    return ownership
-
-
-def _terminate_new_session_after_handshake_failure(session_pgid, ownership):
-    """Settle only precise member tokens captured before first-child reap."""
-    if session_pgid <= 1 or session_pgid == os.getpgrp():
-        raise LaunchError("unsafe newly-created resume5 session group")
-    if not ownership:
-        if _session_absent(session_pgid):
-            return True
-        raise LaunchError("new resume5 session lacks pre-reap ownership tokens")
-    return _settle_owned_processes(session_pgid, ownership)
 
 
 def _write_handshake(descriptor, message):
@@ -761,6 +854,25 @@ def _terminate_unreaped_first_child(first_pid):
         pass
 
 
+def _rollback_handshake_failure(first_pid):
+    """Kill the just-created group while its unreaped leader prevents reuse."""
+    if _unsafe_process_group(first_pid):
+        raise LaunchError("unsafe first-child rollback group")
+    # The first child is still ours and unreaped here, so its numeric PID/PGID
+    # cannot be reused.  Settle the new group without depending on ps/libproc;
+    # this also covers a capture-tool failure before a typed token exists.
+    _signal_process_group(first_pid, signal.SIGTERM)
+    time.sleep(0.25)
+    _signal_process_group(first_pid, signal.SIGKILL)
+    _terminate_unreaped_first_child(first_pid)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if _session_absent(first_pid):
+            return True
+        time.sleep(0.05)
+    raise LaunchError("new detached session survived handshake rollback")
+
+
 def _spawn_detached(
     stdout_fd, stderr_fd, execution_spine, expected_python_image
 ):
@@ -773,11 +885,7 @@ def _spawn_detached(
         try:
             child_pid = _read_exec_handshake(read_fd)
         except BaseException:
-            try:
-                ownership = _capture_new_session_ownership(first_pid)
-            finally:
-                _terminate_unreaped_first_child(first_pid)
-            _terminate_new_session_after_handshake_failure(first_pid, ownership)
+            _rollback_handshake_failure(first_pid)
             raise
         else:
             try:
@@ -785,16 +893,19 @@ def _spawn_detached(
                     child_pid, first_pid, expected_python_image
                 )
             except BaseException:
-                try:
-                    ownership = _capture_new_session_ownership(first_pid)
-                finally:
-                    _terminate_unreaped_first_child(first_pid)
-                _terminate_new_session_after_handshake_failure(
-                    first_pid, ownership
-                )
+                _rollback_handshake_failure(first_pid)
                 raise
             else:
-                os.waitpid(first_pid, 0)
+                try:
+                    os.waitpid(first_pid, 0)
+                except BaseException:
+                    try:
+                        _terminate_detached_runner(
+                            child_pid, first_pid, spawn_token
+                        )
+                    finally:
+                        _terminate_unreaped_first_child(first_pid)
+                    raise
         finally:
             os.close(read_fd)
             os.close(stdout_fd)
@@ -813,6 +924,7 @@ def _spawn_detached(
             os.chdir(str(WORKTREE))
             os.umask(0o077)
             _execution_spine_still_exact(execution_spine)
+            _python_import_surface_still_exact()
             stdin_fd = os.open("/dev/null", os.O_RDONLY)
             os.dup2(stdin_fd, 0)
             os.dup2(stdout_fd, 1)

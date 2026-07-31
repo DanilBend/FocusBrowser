@@ -34,6 +34,11 @@ class DetachedLauncherTests(unittest.TestCase):
             "build-x64-resume5-detached-20260731T000500MSK",
             launcher.STEM,
         )
+        self.assertIn(launcher.MACOS_DIR / "prepare_source.py", launcher.EXECUTION_SPINE)
+        self.assertIn(
+            launcher.UTILS_DIR / "name_substitution_utils.py",
+            launcher.EXECUTION_SPINE,
+        )
 
     def test_live_launch_requires_both_confirmations(self):
         for execute, confirm in ((False, False), (True, False), (False, True)):
@@ -295,41 +300,51 @@ class DetachedLauncherTests(unittest.TestCase):
         ), mock.patch.object(
             launcher, "_read_exec_handshake", side_effect=launcher.LaunchError("bad")
         ), mock.patch.object(
-            launcher, "_capture_new_session_ownership", return_value={"token"}
-        ) as capture, mock.patch.object(
-            launcher, "_terminate_unreaped_first_child"
-        ) as terminate_child, mock.patch.object(
-            launcher, "_terminate_new_session_after_handshake_failure"
-        ) as terminate_session, mock.patch.object(
+            launcher, "_rollback_handshake_failure"
+        ) as rollback, mock.patch.object(
             launcher.os, "close"
         ):
             with self.assertRaisesRegex(launcher.LaunchError, "bad"):
                 launcher._spawn_detached(10, 11, {}, "/bin/sh")
-        capture.assert_called_once_with(4242)
-        terminate_child.assert_called_once_with(4242)
-        terminate_session.assert_called_once_with(4242, {"token"})
+        rollback.assert_called_once_with(4242)
 
-    def test_spawn_capture_failure_still_reaps_owned_first_child(self):
+    def test_handshake_rollback_is_anchored_before_reap_and_proves_absence(self):
         with mock.patch.object(
-            launcher.os, "pipe", return_value=(20, 21)
-        ), mock.patch.object(
-            launcher.os, "set_inheritable"
-        ), mock.patch.object(
-            launcher.os, "fork", return_value=4242
-        ), mock.patch.object(
-            launcher, "_read_exec_handshake", side_effect=launcher.LaunchError("bad")
-        ), mock.patch.object(
-            launcher,
-            "_capture_new_session_ownership",
-            side_effect=launcher.LaunchError("capture failed"),
-        ), mock.patch.object(
+            launcher, "_signal_process_group"
+        ) as signal_group, mock.patch.object(
             launcher, "_terminate_unreaped_first_child"
         ) as terminate_child, mock.patch.object(
-            launcher.os, "close"
+            launcher, "_session_absent", return_value=True
+        ), mock.patch.object(
+            launcher.time, "sleep"
+        ), mock.patch.object(
+            launcher.time, "monotonic", side_effect=(0, 1)
+        ), mock.patch.object(
+            launcher.os, "getpgrp", return_value=900
+        ), mock.patch.object(
+            launcher.os, "getsid", return_value=800
         ):
-            with self.assertRaisesRegex(launcher.LaunchError, "capture failed"):
-                launcher._spawn_detached(10, 11, {}, "/bin/sh")
+            self.assertTrue(launcher._rollback_handshake_failure(4242))
+        self.assertEqual(
+            [
+                mock.call(4242, launcher.signal.SIGTERM),
+                mock.call(4242, launcher.signal.SIGKILL),
+            ],
+            signal_group.call_args_list,
+        )
         terminate_child.assert_called_once_with(4242)
+
+    def test_controller_session_group_is_rejected_before_signal(self):
+        with mock.patch.object(
+            launcher.os, "getpgrp", return_value=900
+        ), mock.patch.object(
+            launcher.os, "getsid", return_value=800
+        ), mock.patch.object(
+            launcher.os, "killpg"
+        ) as killpg:
+            with self.assertRaisesRegex(launcher.LaunchError, "controller"):
+                launcher._signal_process_group(800, launcher.signal.SIGTERM)
+        killpg.assert_not_called()
 
     def test_unreaped_prefork_child_allows_direct_term_only_while_owned(self):
         with mock.patch.object(
@@ -373,9 +388,24 @@ class DetachedLauncherTests(unittest.TestCase):
     def test_child_exec_path_rechecks_spine_and_closes_inherited_fds(self):
         source = Path(launcher.__file__).read_text()
         self.assertIn("_execution_spine_still_exact(execution_spine)", source)
+        self.assertIn("_python_import_surface_still_exact()", source)
         self.assertIn("os.closerange(3, write_fd)", source)
         self.assertIn("os.closerange(write_fd + 1, maximum_fd)", source)
         self.assertIn("os.set_inheritable(write_fd, False)", source)
+
+    def test_python_import_surface_rejects_new_shadow_module(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            expected = root / "expected.py"
+            expected.write_text("VALUE = 1\n")
+            with mock.patch.object(
+                launcher, "PYTHON_IMPORT_SURFACE", {root: ("expected.py",)}
+            ):
+                report = launcher._python_import_surface_still_exact()
+                self.assertEqual(["expected.py"], report[str(root)])
+                (root / "json.py").write_text("raise RuntimeError\n")
+                with self.assertRaisesRegex(launcher.LaunchError, "surface changed"):
+                    launcher._python_import_surface_still_exact()
 
     def test_launch_publishes_exact_detached_controller_contract(self):
         preflight = {
