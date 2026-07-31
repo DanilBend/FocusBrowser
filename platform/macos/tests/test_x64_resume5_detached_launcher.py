@@ -6,6 +6,7 @@ import os
 import stat
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -74,6 +75,7 @@ class DetachedLauncherTests(unittest.TestCase):
             "runner": {"path": "runner", "bytes": 1, "sha256": "a" * 64},
             "run_id": launcher.STEM,
             "repository_head": "d" * 40,
+            "execution_spine": {"runner": {"bytes": 1, "sha256": "a" * 64}},
         }
         publications = []
 
@@ -86,21 +88,33 @@ class DetachedLauncherTests(unittest.TestCase):
         ), mock.patch.object(
             launcher, "_open_controller_log", side_effect=(10, 11)
         ), mock.patch.object(
-            launcher, "_spawn_detached", return_value=2468
+            launcher, "_spawn_detached", return_value=(2468, 1357)
         ), mock.patch.object(
             launcher.time, "sleep"
         ), mock.patch.object(
-            launcher.os, "kill"
-        ) as kill, mock.patch.object(
+            launcher.os,
+            "fstat",
+            side_effect=(
+                types.SimpleNamespace(st_dev=1, st_ino=2, st_uid=os.getuid(), st_size=0),
+                types.SimpleNamespace(st_dev=1, st_ino=3, st_uid=os.getuid(), st_size=0),
+            ),
+        ), mock.patch.object(
+            launcher,
+            "_process_identity",
+            return_value={"pid": 2468, "pgid": 1357},
+        ), mock.patch.object(
             launcher, "_atomic_json", side_effect=capture
         ):
             result = launcher.launch(True, True)
 
-        kill.assert_called_once_with(2468, 0)
         self.assertTrue(result["launched"])
         self.assertEqual(2468, result["child_pid"])
-        self.assertEqual(1, len(publications))
-        path, receipt = publications[0]
+        self.assertEqual(1357, result["session_pgid"])
+        self.assertEqual(2, len(publications))
+        intent_path, intent = publications[0]
+        self.assertEqual(launcher.CONTROLLER_INTENT, intent_path)
+        self.assertTrue(intent["one_shot"])
+        path, receipt = publications[1]
         self.assertEqual(launcher.CONTROLLER_RECEIPT, path)
         self.assertTrue(receipt["double_fork"])
         self.assertTrue(receipt["setsid"])
@@ -108,6 +122,7 @@ class DetachedLauncherTests(unittest.TestCase):
         self.assertEqual("cloexec-success", receipt["exec_handshake"])
         self.assertEqual(list(launcher.ARGUMENTS), receipt["arguments"])
         self.assertEqual("d" * 40, receipt["repository_head"])
+        self.assertEqual(1357, receipt["session_pgid"])
         self.assertEqual(preflight, receipt["preflight"])
 
 

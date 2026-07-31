@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import select
+import signal
 import stat
 import subprocess
 import sys
@@ -41,6 +42,7 @@ STEM = "build-x64-resume5-detached-20260731T000500MSK"
 STDOUT_LOG = LOGS / (STEM + ".daemon.stdout.log")
 STDERR_LOG = LOGS / (STEM + ".daemon.stderr.log")
 CONTROLLER_RECEIPT = LOGS / (STEM + ".daemon-controller.json")
+CONTROLLER_INTENT = LOGS / (STEM + ".daemon-intent.json")
 EXECUTION_RECEIPT = LOGS / (STEM + ".execution.json")
 EXIT_STATUS = LOGS / (STEM + ".exit-status.json")
 EVIDENCE_SUFFIXES = (
@@ -64,6 +66,18 @@ ARGUMENTS = (
     "--execute",
     "--confirm-official-resume5",
 )
+EXECUTION_SPINE = {
+    RUNNER: RUNNER_SHA256,
+    MACOS_DIR / "x64_abort_resume_runner.py": (
+        "2ed5b52d9f073c299946babc9691f36229da541eb4e1ee6459e0a474926efeb4"
+    ),
+    MACOS_DIR / "alias_resume_runner.py": (
+        "968dd7031bb2eb42f55040f1d7f72a1e7a7dae0a06382ff34c58c67c5a46324e"
+    ),
+    MACOS_DIR / "build_pipeline.py": (
+        "b7427f883cfd32041062a81b43ee936c910feec1b2db967db84cd52943e5e17e"
+    ),
+}
 
 
 class LaunchError(RuntimeError):
@@ -143,8 +157,16 @@ def _fixed_preflight():
     if sys.platform != "darwin":
         raise LaunchError("detached resume5 launcher is macOS-only")
     runner_info = _regular_owned(RUNNER, "resume5 runner")
-    if _sha256(RUNNER) != RUNNER_SHA256:
-        raise LaunchError("resume5 runner hash changed")
+    spine = {}
+    for path, expected_hash in EXECUTION_SPINE.items():
+        info = _regular_owned(path, "resume5 execution spine")
+        observed_hash = _sha256(path)
+        if observed_hash != expected_hash:
+            raise LaunchError("resume5 execution spine hash changed: {}".format(path))
+        spine[str(path)] = {
+            "bytes": info.st_size,
+            "sha256": observed_hash,
+        }
     _regular_system(PYTHON, "system Python")
     if WORKTREE.resolve(strict=True) != WORKTREE:
         raise LaunchError("worktree path must be physical")
@@ -156,7 +178,12 @@ def _fixed_preflight():
         or stat.S_IMODE(logs_info.st_mode) & 0o022
     ):
         raise LaunchError("unsafe logs directory")
-    for path in (STDOUT_LOG, STDERR_LOG, CONTROLLER_RECEIPT):
+    for path in (
+        STDOUT_LOG,
+        STDERR_LOG,
+        CONTROLLER_INTENT,
+        CONTROLLER_RECEIPT,
+    ):
         if os.path.lexists(str(path)):
             raise LaunchError("controller output already exists: {}".format(path))
     for suffix in EVIDENCE_SUFFIXES:
@@ -192,12 +219,26 @@ def _fixed_preflight():
     ).strip()
     if len(head) != 40 or any(character not in "0123456789abcdef" for character in head):
         raise LaunchError("repository HEAD is not a full lowercase commit hash")
+    dirty = subprocess.check_output(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(WORKTREE),
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ],
+        text=True,
+    )
+    if dirty:
+        raise LaunchError("tracked worktree is not clean")
     return {
         "runner": {
             "path": str(RUNNER),
             "bytes": runner_info.st_size,
             "sha256": RUNNER_SHA256,
         },
+        "execution_spine": spine,
         "run_id": plan.run_stem,
         "architecture": plan.architecture,
         "jobs": 6,
@@ -213,6 +254,104 @@ def _open_controller_log(path):
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     return os.open(str(path), flags, 0o600)
+
+
+def _unlink_exact_empty(path, identity):
+    """Remove only an empty controller file created by this invocation."""
+    path = Path(path)
+    current = os.stat(str(path), follow_symlinks=False)
+    observed = (current.st_dev, current.st_ino, current.st_uid, current.st_size)
+    if path.is_symlink() or observed != identity or current.st_size != 0:
+        raise LaunchError("controller rollback identity changed: {}".format(path))
+    os.unlink(str(path))
+
+
+def _execution_spine_still_exact(expected):
+    for path_text, recorded in expected.items():
+        path = Path(path_text)
+        info = _regular_owned(path, "resume5 execution spine recheck")
+        if info.st_size != recorded["bytes"] or _sha256(path) != recorded["sha256"]:
+            raise LaunchError("resume5 execution spine changed before exec")
+
+
+def _process_identity(child_pid, session_pgid):
+    if os.getpgid(child_pid) != session_pgid or os.getsid(child_pid) != session_pgid:
+        raise LaunchError("detached runner session identity changed")
+    output = subprocess.check_output(
+        [
+            "/bin/ps",
+            "-p",
+            str(child_pid),
+            "-o",
+            "ppid=,pgid=,sess=,command=",
+        ],
+        text=True,
+    ).strip()
+    fields = output.split(None, 3)
+    if len(fields) != 4:
+        raise LaunchError("detached runner process identity is incomplete")
+    parent_pid, process_group, session_id, command = fields
+    if (
+        int(parent_pid) != 1
+        or int(process_group) != session_pgid
+        or int(session_id) != session_pgid
+        or command != " ".join(ARGUMENTS)
+    ):
+        raise LaunchError("detached runner argv or ancestry changed")
+    return {
+        "pid": child_pid,
+        "ppid": 1,
+        "pgid": session_pgid,
+        "sid": session_pgid,
+        "command": command,
+    }
+
+
+def _session_absent(session_pgid):
+    try:
+        os.killpg(session_pgid, 0)
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return True
+        if exc.errno == errno.EPERM:
+            return False
+        raise
+    return False
+
+
+def _terminate_session(session_pgid):
+    """Terminate the exact newly-created session and prove it is absent."""
+    try:
+        os.killpg(session_pgid, signal.SIGTERM)
+    except OSError as exc:
+        if exc.errno != errno.ESRCH:
+            raise
+        try:
+            os.kill(session_pgid, signal.SIGTERM)
+        except OSError as direct_exc:
+            if direct_exc.errno != errno.ESRCH:
+                raise
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if _session_absent(session_pgid):
+            return True
+        time.sleep(0.1)
+    try:
+        os.killpg(session_pgid, signal.SIGKILL)
+    except OSError as exc:
+        if exc.errno != errno.ESRCH:
+            raise
+        try:
+            os.kill(session_pgid, signal.SIGKILL)
+        except OSError as direct_exc:
+            if direct_exc.errno != errno.ESRCH:
+                raise
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if _session_absent(session_pgid):
+            return True
+        time.sleep(0.1)
+    raise LaunchError("detached resume5 session could not be terminated")
 
 
 def _write_handshake(descriptor, message):
@@ -255,7 +394,7 @@ def _read_exec_handshake(descriptor, timeout_seconds=15):
     return child_pid
 
 
-def _spawn_detached(stdout_fd, stderr_fd):
+def _spawn_detached(stdout_fd, stderr_fd, execution_spine):
     read_fd, write_fd = os.pipe()
     os.set_inheritable(read_fd, False)
     os.set_inheritable(write_fd, False)
@@ -263,13 +402,17 @@ def _spawn_detached(stdout_fd, stderr_fd):
     if first_pid:
         os.close(write_fd)
         try:
-            child_pid = _read_exec_handshake(read_fd)
+            try:
+                child_pid = _read_exec_handshake(read_fd)
+            except BaseException:
+                _terminate_session(first_pid)
+                raise
         finally:
             os.close(read_fd)
             os.close(stdout_fd)
             os.close(stderr_fd)
             os.waitpid(first_pid, 0)
-        return child_pid
+        return child_pid, first_pid
 
     try:
         os.close(read_fd)
@@ -282,6 +425,7 @@ def _spawn_detached(stdout_fd, stderr_fd):
         try:
             os.chdir(str(WORKTREE))
             os.umask(0o077)
+            _execution_spine_still_exact(execution_spine)
             stdin_fd = os.open("/dev/null", os.O_RDONLY)
             os.dup2(stdin_fd, 0)
             os.dup2(stdout_fd, 1)
@@ -289,6 +433,9 @@ def _spawn_detached(stdout_fd, stderr_fd):
             for descriptor in (stdin_fd, stdout_fd, stderr_fd):
                 if descriptor > 2:
                     os.close(descriptor)
+            maximum_fd = os.sysconf("SC_OPEN_MAX")
+            os.closerange(3, write_fd)
+            os.closerange(write_fd + 1, maximum_fd)
             environment = {
                 "HOME": "/Users/gicza",
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -311,42 +458,85 @@ def launch(execute_requested, confirmation):
         raise LaunchError("live detached launch requires both confirmations")
     preflight = _fixed_preflight()
     stdout_fd = _open_controller_log(STDOUT_LOG)
+    stdout_stat = os.fstat(stdout_fd)
+    stdout_identity = (
+        stdout_stat.st_dev,
+        stdout_stat.st_ino,
+        stdout_stat.st_uid,
+        stdout_stat.st_size,
+    )
     try:
         stderr_fd = _open_controller_log(STDERR_LOG)
     except BaseException:
         os.close(stdout_fd)
+        _unlink_exact_empty(STDOUT_LOG, stdout_identity)
         raise
-    launched_at_ns = time.time_ns()
-    child_pid = _spawn_detached(stdout_fd, stderr_fd)
-    time.sleep(2)
-    try:
-        os.kill(child_pid, 0)
-    except OSError as exc:
-        if exc.errno == errno.ESRCH:
-            raise LaunchError("detached runner exited during startup") from exc
-        if exc.errno != errno.EPERM:
-            raise
-    receipt_value = {
+    stderr_stat = os.fstat(stderr_fd)
+    stderr_identity = (
+        stderr_stat.st_dev,
+        stderr_stat.st_ino,
+        stderr_stat.st_uid,
+        stderr_stat.st_size,
+    )
+    intent_value = {
         "schema": 1,
-        "kind": "focus-macos-x64-resume5-detached-controller",
+        "kind": "focus-macos-x64-resume5-detached-controller-intent",
         "created_at_ns": time.time_ns(),
-        "launched_at_ns": launched_at_ns,
-        "child_pid": child_pid,
-        "double_fork": True,
-        "setsid": True,
-        "stdio_detached": True,
-        "exec_handshake": "cloexec-success",
-        "repository_head": preflight["repository_head"],
+        "controller_pid": os.getpid(),
         "arguments": list(ARGUMENTS),
         "working_directory": str(WORKTREE),
         "stdout_log": str(STDOUT_LOG),
         "stderr_log": str(STDERR_LOG),
         "preflight": preflight,
+        "one_shot": True,
     }
-    publication = _atomic_json(CONTROLLER_RECEIPT, receipt_value)
+    try:
+        intent_publication = _atomic_json(CONTROLLER_INTENT, intent_value)
+    except BaseException:
+        os.close(stdout_fd)
+        os.close(stderr_fd)
+        _unlink_exact_empty(STDOUT_LOG, stdout_identity)
+        _unlink_exact_empty(STDERR_LOG, stderr_identity)
+        raise
+    launched_at_ns = time.time_ns()
+    child_pid = None
+    session_pgid = None
+    try:
+        child_pid, session_pgid = _spawn_detached(
+            stdout_fd, stderr_fd, preflight["execution_spine"]
+        )
+        time.sleep(2)
+        process_identity = _process_identity(child_pid, session_pgid)
+        receipt_value = {
+            "schema": 1,
+            "kind": "focus-macos-x64-resume5-detached-controller",
+            "created_at_ns": time.time_ns(),
+            "launched_at_ns": launched_at_ns,
+            "child_pid": child_pid,
+            "session_pgid": session_pgid,
+            "double_fork": True,
+            "setsid": True,
+            "stdio_detached": True,
+            "exec_handshake": "cloexec-success",
+            "repository_head": preflight["repository_head"],
+            "arguments": list(ARGUMENTS),
+            "working_directory": str(WORKTREE),
+            "stdout_log": str(STDOUT_LOG),
+            "stderr_log": str(STDERR_LOG),
+            "intent": intent_publication,
+            "process_identity": process_identity,
+            "preflight": preflight,
+        }
+        publication = _atomic_json(CONTROLLER_RECEIPT, receipt_value)
+    except BaseException:
+        if session_pgid is not None:
+            _terminate_session(session_pgid)
+        raise
     return {
         "launched": True,
         "child_pid": child_pid,
+        "session_pgid": session_pgid,
+        "controller_intent": intent_publication,
         "controller_receipt": publication,
         "stdout_log": str(STDOUT_LOG),
         "stderr_log": str(STDERR_LOG),
