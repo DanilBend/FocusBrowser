@@ -158,6 +158,8 @@ PYTHON_IMPORT_SURFACE = {
         "patches.py",
         "prune_binaries.py",
         "replace_resources.py",
+        "tests",
+        "third_party",
     ),
 }
 
