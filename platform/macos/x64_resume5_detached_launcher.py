@@ -10,6 +10,7 @@ under Documents).
 """
 
 import argparse
+import ctypes
 import errno
 import hashlib
 import json
@@ -82,6 +83,33 @@ EXECUTION_SPINE = {
 
 class LaunchError(RuntimeError):
     pass
+
+
+class _ProcBSDInfo(ctypes.Structure):
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
 
 
 def _sha256(path):
@@ -168,6 +196,8 @@ def _fixed_preflight():
             "sha256": observed_hash,
         }
     _regular_system(PYTHON, "system Python")
+    python_image = Path(_probe_system_python_image())
+    python_image_info = _regular_system(python_image, "system Python image")
     if WORKTREE.resolve(strict=True) != WORKTREE:
         raise LaunchError("worktree path must be physical")
     logs_info = os.stat(str(LOGS), follow_symlinks=False)
@@ -239,6 +269,12 @@ def _fixed_preflight():
             "sha256": RUNNER_SHA256,
         },
         "execution_spine": spine,
+        "python": {
+            "launcher": str(PYTHON),
+            "image": str(python_image),
+            "bytes": python_image_info.st_size,
+            "sha256": _sha256(python_image),
+        },
         "run_id": plan.run_stem,
         "architecture": plan.architecture,
         "jobs": 6,
@@ -274,28 +310,116 @@ def _execution_spine_still_exact(expected):
             raise LaunchError("resume5 execution spine changed before exec")
 
 
-def _process_identity(child_pid, session_pgid):
+def _proc_pidpath(pid):
+    library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    function = library.proc_pidpath
+    function.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    function.restype = ctypes.c_int
+    buffer = ctypes.create_string_buffer(4096)
+    result = function(pid, buffer, len(buffer))
+    if result <= 0:
+        error_number = ctypes.get_errno()
+        raise LaunchError(
+            "proc_pidpath failed for {}: {}".format(
+                pid, os.strerror(error_number) if error_number else "unknown"
+            )
+        )
+    return str(Path(os.fsdecode(buffer.value)).resolve(strict=True))
+
+
+def _proc_bsd_info(pid):
+    library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    function = library.proc_pidinfo
+    function.argtypes = [
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_uint64,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    value = _ProcBSDInfo()
+    result = function(
+        pid,
+        3,  # PROC_PIDTBSDINFO
+        0,
+        ctypes.byref(value),
+        ctypes.sizeof(value),
+    )
+    if result != ctypes.sizeof(value) or value.pbi_pid != pid:
+        error_number = ctypes.get_errno()
+        raise LaunchError(
+            "proc_pidinfo failed for {}: {}".format(
+                pid, os.strerror(error_number) if error_number else "vanished"
+            )
+        )
+    return value
+
+
+def _probe_system_python_image():
+    """Resolve the executable image that /usr/bin/python3 actually execs."""
+    script = (
+        "import ctypes,os;"
+        "lib=ctypes.CDLL('/usr/lib/libproc.dylib',use_errno=True);"
+        "f=lib.proc_pidpath;"
+        "f.argtypes=[ctypes.c_int,ctypes.c_void_p,ctypes.c_uint32];"
+        "f.restype=ctypes.c_int;"
+        "b=ctypes.create_string_buffer(4096);"
+        "n=f(os.getpid(),b,len(b));"
+        "assert n>0;"
+        "print(os.fsdecode(b.value),flush=True)"
+    )
+    result = subprocess.run(
+        [str(PYTHON), "-c", script],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=5,
+        check=False,
+        env={
+            "HOME": "/Users/gicza",
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "TZ": "UTC",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+    )
+    lines = result.stdout.splitlines()
+    if result.returncode != 0 or len(lines) != 1 or not lines[0].startswith("/"):
+        raise LaunchError("system Python image self-probe failed")
+    return str(Path(lines[0]).resolve(strict=True))
+
+
+def _process_identity(child_pid, session_pgid, expected_python_image):
     if os.getpgid(child_pid) != session_pgid or os.getsid(child_pid) != session_pgid:
         raise LaunchError("detached runner session identity changed")
     output = subprocess.check_output(
         [
             "/bin/ps",
+            "-ww",
             "-p",
             str(child_pid),
             "-o",
-            "ppid=,pgid=,sess=,command=",
+            "ppid=,pgid=,lstart=,command=",
         ],
         text=True,
     ).strip()
-    fields = output.split(None, 3)
-    if len(fields) != 4:
+    fields = output.split(None, 7)
+    if len(fields) != 8:
         raise LaunchError("detached runner process identity is incomplete")
-    parent_pid, process_group, session_id, command = fields
+    parent_pid, process_group = fields[:2]
+    started = " ".join(fields[2:7])
+    command = fields[7]
+    argument_suffix = " ".join(ARGUMENTS[1:])
+    executable = _proc_pidpath(child_pid)
+    expected_command = "{} {}".format(expected_python_image, argument_suffix)
     if (
         int(parent_pid) != 1
         or int(process_group) != session_pgid
-        or int(session_id) != session_pgid
-        or command != " ".join(ARGUMENTS)
+        or executable != str(Path(expected_python_image).resolve(strict=True))
+        or command != expected_command
     ):
         raise LaunchError("detached runner argv or ancestry changed")
     return {
@@ -303,6 +427,8 @@ def _process_identity(child_pid, session_pgid):
         "ppid": 1,
         "pgid": session_pgid,
         "sid": session_pgid,
+        "started": started,
+        "executable": executable,
         "command": command,
     }
 
@@ -319,39 +445,228 @@ def _session_absent(session_pgid):
     return False
 
 
-def _terminate_session(session_pgid):
-    """Terminate the exact newly-created session and prove it is absent."""
+def _process_rows():
+    output = subprocess.check_output(
+        ["/bin/ps", "-ww", "-axo", "pid=,ppid=,pgid=,command="],
+        text=True,
+    )
+    rows = []
+    for line in output.splitlines():
+        fields = line.strip().split(None, 3)
+        if len(fields) != 4:
+            continue
+        try:
+            pid, parent_pid, process_group = map(int, fields[:3])
+        except ValueError:
+            continue
+        rows.append(
+            {
+                "pid": pid,
+                "ppid": parent_pid,
+                "pgid": process_group,
+                "command": fields[3],
+            }
+        )
+    return rows
+
+
+def _capture_process_token(row):
+    info = _proc_bsd_info(row["pid"])
+    if info.pbi_ppid != row["ppid"] or info.pbi_pgid != row["pgid"]:
+        raise LaunchError("process identity changed during ownership capture")
+    return (
+        row["pid"],
+        info.pbi_start_tvsec,
+        info.pbi_start_tvusec,
+        _proc_pidpath(row["pid"]),
+        row["pgid"],
+    )
+
+
+def _token_still_live(token):
+    pid, started_seconds, started_microseconds, executable, process_group = token
     try:
-        os.killpg(session_pgid, signal.SIGTERM)
+        info = _proc_bsd_info(pid)
+        image = _proc_pidpath(pid)
+    except (LaunchError, OSError):
+        return False
+    return (
+        info.pbi_pid == pid
+        and info.pbi_pgid == process_group
+        and info.pbi_start_tvsec == started_seconds
+        and info.pbi_start_tvusec == started_microseconds
+        and image == executable
+    )
+
+
+def _expand_owned_processes(rows, ownership):
+    """Expand only from live PID/start tokens already proven to be ours."""
+    changed = True
+    while changed:
+        changed = False
+        live_tokens = [token for token in ownership if _token_still_live(token)]
+        live_pids = {token[0] for token in live_tokens}
+        live_groups = {token[4] for token in live_tokens}
+        for row in rows:
+            if not any(token[0] == row["pid"] for token in ownership) and (
+                row["ppid"] in live_pids or row["pgid"] in live_groups
+            ):
+                try:
+                    ownership.add(_capture_process_token(row))
+                except (LaunchError, OSError):
+                    continue
+                changed = True
+    return ownership
+
+
+def _owned_process_groups(rows, ownership):
+    _expand_owned_processes(rows, ownership)
+    live = [token for token in ownership if _token_still_live(token)]
+    groups = {token[4] for token in live}
+    current_group = os.getpgrp()
+    if any(group <= 1 or group == current_group for group in groups):
+        raise LaunchError("unsafe process group in detached resume5 ownership tree")
+    return groups, live
+
+
+def _termination_observation(ownership, known_groups):
+    rows = _process_rows()
+    groups, live = _owned_process_groups(rows, ownership)
+    known_groups.update(groups)
+    present_groups = {
+        process_group
+        for process_group in known_groups
+        if not _session_absent(process_group)
+    }
+    live_groups = {token[4] for token in live}
+    return {
+        "absent": not live and not present_groups,
+        "groups": groups,
+        "live": live,
+        "present_groups": present_groups,
+        "unproven_groups": present_groups - live_groups,
+        "owned_tokens": len(ownership),
+    }
+
+
+def _signal_process_group(process_group, signum):
+    try:
+        os.killpg(process_group, signum)
     except OSError as exc:
         if exc.errno != errno.ESRCH:
             raise
-        try:
-            os.kill(session_pgid, signal.SIGTERM)
-        except OSError as direct_exc:
-            if direct_exc.errno != errno.ESRCH:
-                raise
-    deadline = time.monotonic() + 10
+
+
+def _settle_owned_processes(session_pgid, ownership):
+    """TERM, observe controlled cleanup, then KILL only still-owned groups."""
+    if session_pgid <= 1 or session_pgid == os.getpgrp():
+        raise LaunchError("unsafe detached resume5 session group")
+    known_groups = {token[4] for token in ownership}
+    rows = _process_rows()
+    initial_groups, _ = _owned_process_groups(rows, ownership)
+    known_groups.update(initial_groups)
+    if not initial_groups:
+        if all(_session_absent(group) for group in known_groups):
+            return True
+        raise LaunchError("owned resume5 group remains without a live identity token")
+    if session_pgid in initial_groups:
+        _signal_process_group(session_pgid, signal.SIGTERM)
+    else:
+        for process_group in sorted(initial_groups, reverse=True):
+            _signal_process_group(process_group, signal.SIGTERM)
+
+    # The runner's controlled TERM path owns Ninja settlement and immutable
+    # failure evidence.  Give its bounded TERM/KILL/absence proof ample time
+    # before the controller performs a last-resort group-wide SIGKILL.
+    deadline = time.monotonic() + 75
     while time.monotonic() < deadline:
-        if _session_absent(session_pgid):
+        observation = _termination_observation(ownership, known_groups)
+        if observation["absent"]:
             return True
         time.sleep(0.1)
-    try:
-        os.killpg(session_pgid, signal.SIGKILL)
-    except OSError as exc:
-        if exc.errno != errno.ESRCH:
-            raise
-        try:
-            os.kill(session_pgid, signal.SIGKILL)
-        except OSError as direct_exc:
-            if direct_exc.errno != errno.ESRCH:
-                raise
-    deadline = time.monotonic() + 10
+
+    observation = _termination_observation(ownership, known_groups)
+    for process_group in sorted(observation["groups"], reverse=True):
+        _signal_process_group(process_group, signal.SIGKILL)
+
+    deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
-        if _session_absent(session_pgid):
+        observation = _termination_observation(ownership, known_groups)
+        if observation["absent"]:
             return True
         time.sleep(0.1)
-    raise LaunchError("detached resume5 session could not be terminated")
+    raise LaunchError(
+        "detached resume5 runner or build process groups could not be terminated"
+    )
+
+
+def _capture_handshake_runner_token(
+    child_pid, session_pgid, expected_python_image
+):
+    """Bind the handshake PID to microsecond start time, image and session."""
+    if child_pid <= 1 or session_pgid <= 1 or session_pgid == os.getpgrp():
+        raise LaunchError("unsafe detached resume5 process identity")
+    rows = _process_rows()
+    candidates = [
+        row
+        for row in rows
+        if row["pid"] == child_pid
+        and row["pgid"] == session_pgid
+        and row["command"]
+        == "{} {}".format(expected_python_image, " ".join(ARGUMENTS[1:]))
+    ]
+    if not candidates:
+        raise LaunchError("handshake runner PID no longer identifies its session")
+    if len(candidates) != 1:
+        raise LaunchError("handshake runner PID is not unique")
+    if os.getpgid(child_pid) != session_pgid or os.getsid(child_pid) != session_pgid:
+        raise LaunchError("handshake runner session identity changed")
+    token = _capture_process_token(candidates[0])
+    if token[3] != str(Path(expected_python_image).resolve(strict=True)):
+        raise LaunchError("handshake runner executable image changed")
+    return token
+
+
+def _terminate_detached_runner(child_pid, session_pgid, expected_token):
+    """Rollback only the exact microsecond/image-bound handshake process."""
+    if (
+        expected_token is None
+        or expected_token[0] != child_pid
+        or expected_token[4] != session_pgid
+    ):
+        raise LaunchError("detached runner rollback token is invalid")
+    if not _token_still_live(expected_token):
+        if _session_absent(session_pgid):
+            return True
+        raise LaunchError("handshake runner identity drifted before rollback")
+    return _settle_owned_processes(session_pgid, {expected_token})
+
+
+def _capture_new_session_ownership(session_pgid):
+    """Capture precise member tokens while the first child is still ours."""
+    if session_pgid <= 1 or session_pgid == os.getpgrp():
+        raise LaunchError("unsafe newly-created resume5 session group")
+    rows = _process_rows()
+    ownership = set()
+    for row in rows:
+        if row["pgid"] != session_pgid:
+            continue
+        try:
+            ownership.add(_capture_process_token(row))
+        except (LaunchError, OSError):
+            continue
+    return ownership
+
+
+def _terminate_new_session_after_handshake_failure(session_pgid, ownership):
+    """Settle only precise member tokens captured before first-child reap."""
+    if session_pgid <= 1 or session_pgid == os.getpgrp():
+        raise LaunchError("unsafe newly-created resume5 session group")
+    if not ownership:
+        if _session_absent(session_pgid):
+            return True
+        raise LaunchError("new resume5 session lacks pre-reap ownership tokens")
+    return _settle_owned_processes(session_pgid, ownership)
 
 
 def _write_handshake(descriptor, message):
@@ -394,7 +709,61 @@ def _read_exec_handshake(descriptor, timeout_seconds=15):
     return child_pid
 
 
-def _spawn_detached(stdout_fd, stderr_fd, execution_spine):
+def _terminate_unreaped_first_child(first_pid):
+    """Boundedly settle exactly our own direct child and reap it once."""
+    try:
+        waited_pid, _ = os.waitpid(first_pid, os.WNOHANG)
+    except ChildProcessError:
+        return
+    if waited_pid == first_pid:
+        return
+    if waited_pid != 0:
+        raise LaunchError("unexpected first-child wait result")
+
+    try:
+        process_group = os.getpgid(first_pid)
+    except ProcessLookupError:
+        process_group = None
+    if process_group == first_pid:
+        _signal_process_group(first_pid, signal.SIGTERM)
+    else:
+        # waitpid(WNOHANG)==(0, 0) proves this PID remains our unreaped direct
+        # child, so a direct signal cannot target a reused unrelated PID.
+        try:
+            os.kill(first_pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            waited_pid, _ = os.waitpid(first_pid, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if waited_pid == first_pid:
+            return
+        time.sleep(0.05)
+
+    try:
+        current_group = os.getpgid(first_pid)
+    except ProcessLookupError:
+        current_group = None
+    if current_group == first_pid:
+        _signal_process_group(first_pid, signal.SIGKILL)
+    else:
+        try:
+            os.kill(first_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        os.waitpid(first_pid, 0)
+    except ChildProcessError:
+        pass
+
+
+def _spawn_detached(
+    stdout_fd, stderr_fd, execution_spine, expected_python_image
+):
     read_fd, write_fd = os.pipe()
     os.set_inheritable(read_fd, False)
     os.set_inheritable(write_fd, False)
@@ -402,17 +771,35 @@ def _spawn_detached(stdout_fd, stderr_fd, execution_spine):
     if first_pid:
         os.close(write_fd)
         try:
+            child_pid = _read_exec_handshake(read_fd)
+        except BaseException:
             try:
-                child_pid = _read_exec_handshake(read_fd)
+                ownership = _capture_new_session_ownership(first_pid)
+            finally:
+                _terminate_unreaped_first_child(first_pid)
+            _terminate_new_session_after_handshake_failure(first_pid, ownership)
+            raise
+        else:
+            try:
+                spawn_token = _capture_handshake_runner_token(
+                    child_pid, first_pid, expected_python_image
+                )
             except BaseException:
-                _terminate_session(first_pid)
+                try:
+                    ownership = _capture_new_session_ownership(first_pid)
+                finally:
+                    _terminate_unreaped_first_child(first_pid)
+                _terminate_new_session_after_handshake_failure(
+                    first_pid, ownership
+                )
                 raise
+            else:
+                os.waitpid(first_pid, 0)
         finally:
             os.close(read_fd)
             os.close(stdout_fd)
             os.close(stderr_fd)
-            os.waitpid(first_pid, 0)
-        return child_pid, first_pid
+        return child_pid, first_pid, spawn_token
 
     try:
         os.close(read_fd)
@@ -501,12 +888,22 @@ def launch(execute_requested, confirmation):
     launched_at_ns = time.time_ns()
     child_pid = None
     session_pgid = None
+    spawn_token = None
     try:
-        child_pid, session_pgid = _spawn_detached(
-            stdout_fd, stderr_fd, preflight["execution_spine"]
+        child_pid, session_pgid, spawn_token = _spawn_detached(
+            stdout_fd,
+            stderr_fd,
+            preflight["execution_spine"],
+            preflight["python"]["image"],
         )
         time.sleep(2)
-        process_identity = _process_identity(child_pid, session_pgid)
+        if not _token_still_live(spawn_token):
+            raise LaunchError("detached runner changed before controller receipt")
+        process_identity = _process_identity(
+            child_pid, session_pgid, preflight["python"]["image"]
+        )
+        if not _token_still_live(spawn_token):
+            raise LaunchError("detached runner changed before receipt publication")
         receipt_value = {
             "schema": 1,
             "kind": "focus-macos-x64-resume5-detached-controller",
@@ -524,13 +921,15 @@ def launch(execute_requested, confirmation):
             "stdout_log": str(STDOUT_LOG),
             "stderr_log": str(STDERR_LOG),
             "intent": intent_publication,
+            "spawn_token": list(spawn_token),
             "process_identity": process_identity,
             "preflight": preflight,
         }
         publication = _atomic_json(CONTROLLER_RECEIPT, receipt_value)
     except BaseException:
         if session_pgid is not None:
-            _terminate_session(session_pgid)
+            if spawn_token is not None:
+                _terminate_detached_runner(child_pid, session_pgid, spawn_token)
         raise
     return {
         "launched": True,
