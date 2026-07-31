@@ -4,8 +4,8 @@
 This runner deliberately reuses the reviewed process-group, immutable-evidence
 and resource-monitoring engine without changing either earlier runner.  Its
 fixed evidence names make it single-use.  The launched Ninja group has no
-terminal/stdin dependency, so the runner may be owned by launchd or invoked
-under ``nohup`` with its own launcher log.
+terminal/stdin dependency, so the runner can be owned by a one-shot launchd
+LaunchAgent and survive the lifetime of the invoking Codex terminal session.
 """
 
 import argparse
@@ -462,7 +462,7 @@ def _plan_report(plan):
     value["stage"] = "official-x64-resume5-detached-run"
     value["prior_memory_abort"] = plan.prior_memory_abort
     value["prior_external_interruption"] = plan.prior_external_interruption
-    value["detached_invocation"] = "launchd-or-nohup"
+    value["detached_invocation"] = "launchd-launchagent"
     return value
 
 
