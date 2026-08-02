@@ -1,11 +1,13 @@
 # Native macOS build pipeline
 
-`build_pipeline.py` is the executable, staged build boundary for the native
-Focus Browser macOS port. It produces the same-source arm64 and x86_64 slices,
-combines them with Chromium's pinned universalizer, applies a nested ad-hoc
-signature, and creates a local drag-and-drop DMG. It never publishes,
-notarizes, uses a Developer ID, changes `xcode-select`, or targets iOS,
-Android, or Windows.
+`build_pipeline.py` is the executable, staged build boundary for the preserved
+updater-free Focus Browser macOS path. It produces the same-source arm64 and
+x86_64 slices, combines them with Chromium's pinned universalizer, applies a
+nested ad-hoc signature, and creates a local drag-and-drop DMG. This is the
+path used for the historical manual-update `1.0.5` local artifact; it must not
+be confused with the separate `1.0.6` Auto outputs described below. Neither
+path publishes, notarizes, uses a Developer ID, changes `xcode-select`, or
+targets iOS, Android, or Windows.
 
 Every subcommand is a read-only dry run unless `--execute` is supplied. All
 paths are explicit. The checkout and its provenance receipts must come from
@@ -22,10 +24,11 @@ is rejected.
 - local parallelism: `-j8` on the 10-core, 16 GiB host, leaving headroom for
   Chromium generators that create their own worker pools
 - outputs: `chrome` and `chrome/installer/mac:copies`
-- remote execution, Siso, updater, and branded entitlements: disabled
-- signing: Chromium's generated nested signing workflow with ad-hoc identity
-  `-`, development mode, no provisioning profile, no notarization, and no
-  Chromium packaging
+- remote execution, Siso, ChromiumUpdater/Keystone, and branded entitlements:
+  disabled; the manual GN profiles also contain no application updater
+- signing: the historical manual-only Chromium nested workflow with ad-hoc
+  identity `-`, no provisioning profile, no notarization, and no Chromium
+  packaging; it is not used by the Auto release path
 - packaging: the repository's verified local UDZO DMG packager
 - merge/sign/package Python: depot_tools' pinned CIPD CPython 3.11.8; Apple
   `/usr/bin/python3` is rejected because Xcode 27 currently resolves it to
@@ -35,7 +38,31 @@ The final main executable must contain exactly `arm64` and `x86_64`. The
 Chromium universalizer input order is deliberately x86_64 first and arm64
 second, matching Chromium's own documented workflow.
 
-## Required order
+## Separate 1.0.6 Auto contract
+
+The updater-capable variant is deliberately isolated from the manual output
+directories and receipts:
+
+- displayed version `1.0.6`, bundle/build version `1.0.6.0`;
+- GN profiles `flags.arm64.autoupdate.gn` and
+  `flags.x64.autoupdate.gn`;
+- thin outputs `out/FocusMacArm64Auto` and `out/FocusMacX64Auto`;
+- Sparkle `2.9.4` only, with the macOS-only feed
+  `https://danilbend.github.io/FocusBrowser/appcast-macos.xml`;
+- prospective GitHub prerelease tag `v1.0.6-macos`, which is separate from
+  stable `v1.0.5` and does not consume the reserved plain `v1.0.6` tag;
+- nested ad-hoc signing through the pinned Auto release wrapper: normal
+  non-development Chromium configuration, identity `-`, no provisioning
+  profile, no Developer ID, and no Apple notarization. The wrapper skips only
+  Gatekeeper assessment (which cannot accept an ad-hoc identity) and keeps
+  `get-task-allow` forbidden.
+
+The Auto path keeps ChromiumUpdater, Keystone, and Google Updater disabled.
+Sparkle is the only application-update implementation. The first Auto build
+still requires a manual installation because an updater-free `1.0.5` app
+cannot discover the new feed.
+
+## Manual-path required order
 
 Assume these explicit paths in the examples:
 
@@ -256,24 +283,31 @@ distribution output, requires `Signature=adhoc`, verifies the complete
 signature and both architectures, and inspects the effective CodeDirectory
 flags and entitlements for both slices of every protected signing part. Exactly
 seven Framework loaders must retain hardened runtime while omitting explicit
-Library Validation and carrying
-`com.apple.security.cs.disable-library-validation=true`; Crashpad retains
-Library Validation, while the Framework and every bundled dylib remain
-unrelaxed.
+Library Validation. App carries its seven device/personal-information
+capabilities plus `disable-library-validation`; renderer and GPU carry exactly
+`allow-jit` plus `disable-library-validation`; the other four loaders carry
+only `disable-library-validation`. Every value is `true` and extras fail.
+Crashpad and the Framework retain full Library Validation flags with empty
+entitlements; every bundled dylib has data-only flags and empty entitlements.
 
 Before packaging, the signed app must launch natively as arm64 and through a
-mandatory Rosetta x86_64 probe. Each launch uses a distinct new profile,
-`--incognito`, a nonce-bearing offline `data:text/html` marker, network-
-disabling switches, a 60-second timeout, and an isolated process group whose
+mandatory Rosetta x86_64 probe. Each slice uses a distinct new profile: an
+Incognito launch writes a nonce to localStorage on a fixed offline `file:`
+origin, then a normal launch with that same profile must observe it absent.
+A separate normal/normal control profile must first prove the process lifecycle
+does persist the same storage key. All launches use network-disabling switches,
+a 60-second per-launch timeout, and an
+isolated process group whose
 stdout and stderr are drained concurrently under hard in-flight limits before
 the whole group is interrupted and killed during bounded cleanup. Only then
 does the monitored DMG packager run into a same-filesystem owner-only `0700`
 candidate directory; the requested final path remains absent. The candidate is
 hashed, mounted read-only, and the same two runtime smokes are repeated from the
 mounted app. After a second hash and proven detach, the pipeline uses an atomic
-no-overwrite hard link to publish that exact accepted inode, then removes the
-private link and directory. Any later failure rolls back only that exact
-published inode; a racing unrelated path is never overwritten or removed.
+no-overwrite hard link to place that exact accepted inode at the final local
+path, then removes the private link and directory. Any later failure rolls back
+only that exact placed inode; a racing unrelated path is never overwritten or
+removed. This placement is not GitHub release publication.
 
 If both normal and forced detach fail, the private backing candidate and exact
 mount root are retained for manual detach instead of unlinking a possibly
@@ -337,10 +371,100 @@ the pipeline never guesses that an incomplete output is reusable.
 The one-time LINKEDIT recovery uses a same-filesystem `.part` archive and
 rolls every exact move back if publication fails.
 
+## Auto stage, merge, sign, and DMG gates
+
+After both Auto thin outputs have completed, use the dedicated fail-closed
+receipt chain. Every command is a read-only plan unless `--execute` is present,
+and every later stage revalidates the receipts and inputs from earlier stages:
+
+```sh
+SPARKLE=/absolute/path/to/sparkle-2.9.4
+AUTO_DMG=/absolute/output/FocusBrowser-macOS-1.0.6-universal-autoupdate.dmg
+
+run_release_stage() {
+  python3 platform/macos/autoupdate_release.py "$@" --json
+  python3 platform/macos/autoupdate_release.py "$@" --execute --json
+}
+
+run_release_stage prepare-auto --source-root "$SRC"
+run_release_stage seal --source-root "$SRC"
+run_release_stage stage --source-root "$SRC"
+run_release_stage merge --source-root "$SRC"
+run_release_stage sign --source-root "$SRC"
+run_release_stage accept --source-root "$SRC" \
+  --sparkle-source-root "$SPARKLE"
+run_release_stage package --source-root "$SRC" \
+  --sparkle-source-root "$SPARKLE" --dmg-output "$AUTO_DMG"
+```
+
+`prepare-auto` preserves the historical 1.0.5 preparation receipt and writes a
+separate addendum binding its exact hash, acquisition/tools, relocated paths,
+the exact 1.0.6 Auto patches and current target hashes. `seal` requires both
+completed output graphs to report no work for the exact `chrome` and
+`chrome/installer/mac:copies` targets under pinned Ninja `-n`, then binds their
+Ninja state, generated args, app trees and x64 packaging. This chain
+stages the exact Auto slices, merges x86_64 first and arm64 second,
+checks the exact sole Sparkle load path/rpath, and signs the complete universal
+bundle ad-hoc. The `accept` boundary is mandatory: it binds the completed
+Sparkle provenance root, complete release contract, exact signing matrix, and
+successful native-arm64 plus Rosetta-x86_64 offline-Incognito launches. Package
+will not consume only a sign receipt. It does not invoke GN or a compiling
+Ninja command; the seal's read-only Ninja dry run is mandatory. It never
+publishes, notarizes, or uses a Developer ID.
+
+Before any candidate can be called release-ready, validate the signed app and
+create the final, still-unpublished DMG with the strict source/staged/mounted
+contract:
+
+```sh
+python3 platform/macos/autoupdate_release.py accept \
+  --source-root "$SRC" --sparkle-source-root "$SPARKLE" \
+  --execute --json
+
+python3 platform/macos/autoupdate_release.py package \
+  --source-root "$SRC" --sparkle-source-root "$SPARKLE" \
+  --dmg-output "$AUTO_DMG" --execute --json
+```
+
+The complete generated signing package is allowlisted and hashed from source
+through staging and before/after signing; merge/sign execute with Chromium's
+manifest-validated CIPD Python 3.11.8 in isolated `-I -B` mode with a fixed
+non-tree pycache prefix, never Apple Python 3.9. Sign creates a private,
+read-only snapshot of the pinned wrapper and exact signing-module surface,
+executes the wrapper through an inherited descriptor, verifies all module bytes
+before import, rejects preloaded/unlisted `signing.*`, and loads only the cached
+snapshot bytes. The sign receipt binds the snapshot before/after, Chromium
+driver, normalized closed command, and explicit no-development/no-
+`get-task-allow` policy. Every app contract also rejects embedded
+`.provisionprofile`/`.mobileprovision` payloads. Application
+tree receipts bind root metadata, modes, ownership, flags, xattrs, ACLs, link
+counts, symlink targets, paths, sizes, and hashes; regular-file hard-link aliases
+fail closed.
+
+The full gate must pass on the source app, isolated staged copy, signed app,
+and app mounted back from the DMG. The packaging helper first gives `hdiutil`
+an unpredictable same-inode hard-link pathname inside an owner-only inspection
+root. The later runtime gate gives it a separate owner-only,
+descriptor-verified pathname: a same-inode hard link when available, or a
+fsynced read-only byte-for-byte private copy after an allowlisted link failure.
+Both inputs and the original candidate are rebound around use. The read-only
+runtime mount repeats an Incognito localStorage write followed by a normal
+same-profile absence check for each slice. The accept receipt, app, Python
+tree, driver modules and candidate are rebound immediately before durable
+placement. Final inode/size/hash are rebound before and after its sidecar
+receipt; unproven detach retains the private candidate, while post-commit
+reporting failure leaves the verified final DMG in place and reports recovery
+details. Only after that may the final DMG size and SHA-256 be frozen,
+the signed `appcast-macos.xml` be generated, and the separate
+`v1.0.6-macos` prerelease/feed publication workflow be considered. No final
+size, hash, release, or published feed is asserted by this document.
+
 ## Distribution boundary
 
-An Apple Developer account is not required to create or locally install this
+An Apple Developer account is not required to create or locally install either
 ad-hoc-signed DMG. Gatekeeper may require the user to approve opening an
-unnotarized local build. Public redistribution is a separate task requiring
-legal review, Developer ID signing, notarization, and release/update policy;
-this pipeline intentionally performs none of those actions.
+unnotarized local build. The Sparkle Ed25519 signature authenticates an update
+payload but is not an Apple code-signing or notarization identity. Public
+redistribution is a separate task requiring the release, legal, checksum,
+appcast, and publication gates; these local pipelines intentionally perform no
+publication.

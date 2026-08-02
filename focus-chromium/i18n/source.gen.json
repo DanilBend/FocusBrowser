@@ -1591,6 +1591,24 @@
     "message": "Local, free, and open-source password manager for advanced users. Requires technical knowledge to set up and use."
   },
   {
+    "name": "IDS_SETTINGS_FOCUS_BROWSER_UPDATES",
+    "source": "chrome/app/settings_strings.grdp",
+    "context": "Label for the Focus Browser automatic updates toggle",
+    "message": "Automatically update Focus Browser"
+  },
+  {
+    "name": "IDS_SETTINGS_FOCUS_BROWSER_UPDATES_DESCRIPTION",
+    "source": "chrome/app/settings_strings.grdp",
+    "context": "Description for the Focus Browser automatic updates toggle",
+    "message": "Check for signed browser updates and install them automatically"
+  },
+  {
+    "name": "IDS_SETTINGS_ABOUT_UPGRADE_DEFERRED",
+    "source": "chrome/app/settings_strings.grdp",
+    "context": "Status label: The browser update was postponed and automatic checks continue",
+    "message": "Update postponed. Focus Browser will continue checking automatically."
+  },
+  {
     "name": "IDS_SETTINGS_FOCUS_MOTION",
     "source": "chrome/app/settings_strings.grdp",
     "context": "Label for the toggle which enables or disables smooth motion in Focus-owned browser interfaces.",

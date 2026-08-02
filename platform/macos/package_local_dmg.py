@@ -15,6 +15,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+PLATFORM_DIR = Path(__file__).resolve().parent
+if str(PLATFORM_DIR) not in sys.path:
+    sys.path.insert(0, str(PLATFORM_DIR))
+
+import autoupdate_contract
+
 
 APP_BUNDLE_NAME = "Focus Browser.app"
 BUNDLE_ID = "com.focusbrowser.browser"
@@ -25,6 +31,8 @@ HDIUTIL = "/usr/bin/hdiutil"
 LIPO = "/usr/bin/lipo"
 CODESIGN = "/usr/bin/codesign"
 SYSTEM_TOOLS = (DITTO, HDIUTIL, LIPO, CODESIGN)
+TOOL_TIMEOUT_SECONDS = 180
+_DARWIN_O_SYMLINK = 0x00200000
 
 ARCHITECTURE_ORDER = ("arm64", "x86_64")
 ACCEPTED_ARCHITECTURE_SETS = frozenset(
@@ -56,6 +64,14 @@ class RetainedQuarantineError(PackageError):
         super().__init__(message)
         self.quarantine_name = quarantine_name
         self.quarantine_path = quarantine_path
+
+
+class RetainedMountError(PackageError):
+    """A DMG mount could not be proven detached and must not be cleaned."""
+
+    def __init__(self, message, retained_mount_root):
+        super().__init__(message)
+        self.retained_mount_root = str(retained_mount_root)
 
 
 def _directory_flags():
@@ -145,6 +161,239 @@ def _sha256_fd(file_fd):
         digest.update(block)
         offset += len(block)
     return digest.hexdigest()
+
+
+def _tree_sha256_fd(file_fd):
+    """Tree hashing is separate from publication hashing for fault isolation."""
+    digest = hashlib.sha256()
+    offset = 0
+    while True:
+        block = os.pread(file_fd, 1024 * 1024, offset)
+        if not block:
+            return digest.hexdigest()
+        digest.update(block)
+        offset += len(block)
+
+
+def _inspection_sha256_fd(file_fd):
+    """Hash a mounted-image backing inode independently of publication hooks."""
+    digest = hashlib.sha256()
+    offset = 0
+    while True:
+        block = os.pread(file_fd, 1024 * 1024, offset)
+        if not block:
+            return digest.hexdigest()
+        digest.update(block)
+        offset += len(block)
+
+
+def _xattrs_fd(file_fd):
+    """Return canonical descriptor-bound extended attributes on Darwin."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    listxattr = libc.flistxattr
+    getxattr = libc.fgetxattr
+    listxattr.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int)
+    listxattr.restype = ctypes.c_ssize_t
+    getxattr.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_uint32,
+        ctypes.c_int,
+    )
+    getxattr.restype = ctypes.c_ssize_t
+    size = listxattr(file_fd, None, 0, 0)
+    if size < 0:
+        error_number = ctypes.get_errno()
+        raise PackageError("cannot list app extended attributes: {}".format(
+            os.strerror(error_number)
+        ))
+    if size == 0:
+        return []
+    names_buffer = ctypes.create_string_buffer(size)
+    observed_size = listxattr(file_fd, names_buffer, size, 0)
+    if observed_size != size:
+        raise PackageError("app extended attributes changed during inspection")
+    names = sorted(value for value in names_buffer.raw[:size].split(b"\0") if value)
+    result = []
+    for name in names:
+        value_size = getxattr(file_fd, name, None, 0, 0, 0)
+        if value_size < 0:
+            raise PackageError("cannot inspect app extended attribute")
+        value_buffer = ctypes.create_string_buffer(max(value_size, 1))
+        observed_value_size = getxattr(
+            file_fd, name, value_buffer, value_size, 0, 0
+        )
+        if observed_value_size != value_size:
+            raise PackageError("app extended attribute changed during inspection")
+        result.append((name, value_buffer.raw[:value_size]))
+    return result
+
+
+def _acl_fd(file_fd):
+    """Return the descriptor-bound canonical extended ACL text, or empty."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    acl_get_fd = libc.acl_get_fd_np
+    acl_to_text = libc.acl_to_text
+    acl_free = libc.acl_free
+    acl_get_fd.argtypes = (ctypes.c_int, ctypes.c_int)
+    acl_get_fd.restype = ctypes.c_void_p
+    acl_to_text.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ssize_t))
+    acl_to_text.restype = ctypes.c_void_p
+    acl_free.argtypes = (ctypes.c_void_p,)
+    acl_free.restype = ctypes.c_int
+    acl = acl_get_fd(file_fd, 0x00000100)
+    if not acl:
+        error_number = ctypes.get_errno()
+        if error_number == errno.ENOENT:
+            return b""
+        raise PackageError("cannot inspect app extended ACL")
+    text_pointer = None
+    try:
+        length = ctypes.c_ssize_t()
+        text_pointer = acl_to_text(acl, ctypes.byref(length))
+        if not text_pointer or length.value < 0:
+            raise PackageError("cannot serialize app extended ACL")
+        return ctypes.string_at(text_pointer, length.value)
+    finally:
+        if text_pointer:
+            acl_free(text_pointer)
+        acl_free(acl)
+
+
+def _digest_field(digest, label, value):
+    label_bytes = label.encode("ascii")
+    value_bytes = value if isinstance(value, bytes) else os.fsencode(str(value))
+    digest.update(len(label_bytes).to_bytes(4, "big"))
+    digest.update(label_bytes)
+    digest.update(len(value_bytes).to_bytes(8, "big"))
+    digest.update(value_bytes)
+
+
+def descriptor_tree_digest(root_value):
+    """Hash one exact app tree through pinned directory/file descriptors."""
+    root = Path(root_value)
+    root_fd = os.open(str(root), _directory_flags())
+    entries = 0
+    digest = hashlib.sha256()
+
+    def metadata_record(relative, kind, metadata, descriptor, extra=b""):
+        nonlocal entries
+        entries += 1
+        _digest_field(digest, "path", os.fsencode(relative))
+        _digest_field(digest, "type", kind)
+        _digest_field(digest, "mode", "{:06o}".format(stat.S_IMODE(metadata.st_mode)))
+        _digest_field(digest, "uid", str(metadata.st_uid))
+        _digest_field(digest, "gid", str(metadata.st_gid))
+        _digest_field(digest, "nlink", str(metadata.st_nlink))
+        _digest_field(digest, "flags", str(getattr(metadata, "st_flags", 0)))
+        _digest_field(digest, "extra", extra)
+        for name, value in _xattrs_fd(descriptor):
+            _digest_field(digest, "xattr-name", name)
+            _digest_field(digest, "xattr-value", value)
+        _digest_field(digest, "xattr-end", b"")
+        _digest_field(digest, "acl", _acl_fd(descriptor))
+        final_metadata = os.fstat(descriptor)
+        if (
+            not _same_inode(metadata, final_metadata)
+            or metadata.st_mode != final_metadata.st_mode
+            or metadata.st_size != final_metadata.st_size
+            or metadata.st_mtime_ns != final_metadata.st_mtime_ns
+            or metadata.st_ctime_ns != final_metadata.st_ctime_ns
+            or getattr(metadata, "st_flags", 0)
+            != getattr(final_metadata, "st_flags", 0)
+        ):
+            raise PackageError("app metadata changed during tree inspection")
+
+    def walk(directory_fd, relative):
+        directory_before = os.fstat(directory_fd)
+        metadata_record(relative, "directory", directory_before, directory_fd)
+        try:
+            names = sorted(os.listdir(directory_fd), key=os.fsencode)
+        except OSError as exc:
+            raise PackageError("cannot list descriptor-pinned app tree") from exc
+        for name in names:
+            child_relative = name if not relative else relative + "/" + name
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISDIR(before.st_mode):
+                child_fd = os.open(
+                    name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+                try:
+                    if not _same_inode(before, os.fstat(child_fd)):
+                        raise PackageError("app directory changed during inspection")
+                    walk(child_fd, child_relative)
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(before.st_mode):
+                child_fd = os.open(
+                    name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd
+                )
+                try:
+                    opened = os.fstat(child_fd)
+                    if not _same_inode(before, opened):
+                        raise PackageError("app file changed during inspection")
+                    content_sha256 = _tree_sha256_fd(child_fd).encode("ascii")
+                    after = os.fstat(child_fd)
+                    if (
+                        not _same_inode(opened, after)
+                        or opened.st_size != after.st_size
+                        or opened.st_mtime_ns != after.st_mtime_ns
+                        or opened.st_ctime_ns != after.st_ctime_ns
+                    ):
+                        raise PackageError("app file changed while hashing")
+                    metadata_record(
+                        child_relative, "file", after, child_fd, content_sha256
+                    )
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISLNK(before.st_mode):
+                child_fd = os.open(
+                    name, os.O_RDONLY | _DARWIN_O_SYMLINK, dir_fd=directory_fd
+                )
+                try:
+                    opened = os.fstat(child_fd)
+                    if not stat.S_ISLNK(opened.st_mode) or not _same_inode(
+                        before, opened
+                    ):
+                        raise PackageError("app symlink changed during inspection")
+                    target = os.readlink(name, dir_fd=directory_fd)
+                    after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    if not _same_inode(opened, after):
+                        raise PackageError("app symlink changed while reading")
+                    metadata_record(
+                        child_relative, "symlink", after, child_fd, os.fsencode(target)
+                    )
+                finally:
+                    os.close(child_fd)
+            else:
+                raise PackageError(
+                    "app tree contains a prohibited special file: {}".format(
+                        child_relative
+                    )
+                )
+        directory_after = os.fstat(directory_fd)
+        if (
+            not _same_inode(directory_before, directory_after)
+            or directory_before.st_mtime_ns != directory_after.st_mtime_ns
+            or directory_before.st_ctime_ns != directory_after.st_ctime_ns
+        ):
+            raise PackageError("app directory changed during inspection")
+
+    try:
+        pinned = os.fstat(root_fd)
+        named = os.lstat(str(root))
+        if not _same_inode(pinned, named):
+            raise PackageError("app root changed before tree inspection")
+        walk(root_fd, "")
+        if not _same_inode(os.fstat(root_fd), os.lstat(str(root))):
+            raise PackageError("app root changed during tree inspection")
+        return {"sha256": digest.hexdigest(), "entries": entries}
+    finally:
+        os.close(root_fd)
 
 
 _RENAME_EXCL = 0x00000004
@@ -608,15 +857,30 @@ def checked_run(command):
         isinstance(item, str) and item for item in command
     ):
         raise PackageError("subprocess command must be a non-empty list of strings")
-    result = subprocess.run(
-        command,
-        check=False,
-        shell=False,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    try:
+        pass_fds = tuple(
+            int(value.rsplit("/", 1)[1])
+            for value in command
+            if value.startswith("/dev/fd/")
+            and value.rsplit("/", 1)[1].isdigit()
+        )
+        result = subprocess.run(
+            command,
+            check=False,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=TOOL_TIMEOUT_SECONDS,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+            pass_fds=pass_fds,
+            close_fds=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PackageError(
+            "command could not run: {}".format(" ".join(command))
+        ) from exc
     if result.returncode:
         detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
         raise PackageError(
@@ -720,9 +984,14 @@ def _read_architectures(executable_path):
     return [name for name in ARCHITECTURE_ORDER if name in architecture_set]
 
 
-def validate_app(app_path):
+def validate_app(
+    app_path,
+    require_autoupdate=False,
+    sparkle_source_root=None,
+):
     """Validate identity, main architecture, and the complete existing signature."""
     app = resolve_app_path(app_path)
+    initial_tree = descriptor_tree_digest(app)
     info = _read_info_plist(app)
     bundle_id = info.get("CFBundleIdentifier")
     if bundle_id != BUNDLE_ID:
@@ -737,12 +1006,40 @@ def validate_app(app_path):
         raise PackageError("missing regular main executable: {}".format(executable_path))
     architectures = _read_architectures(executable_path)
     checked_run([CODESIGN, "--verify", "--deep", "--strict", str(app)])
-    return {
+    final_tree = descriptor_tree_digest(app)
+    if final_tree != initial_tree:
+        raise PackageError("app exact tree changed during validation")
+    report = {
         "app": str(app),
         "bundle_id": bundle_id,
         "executable": executable_name,
         "architectures": architectures,
+        "exact_tree": final_tree,
     }
+    if require_autoupdate:
+        if sparkle_source_root is None:
+            raise PackageError(
+                "automatic-update packaging requires --sparkle-source-root"
+            )
+        try:
+            update_report = autoupdate_contract.validate_release_bundle(
+                app,
+                sparkle_source_root=sparkle_source_root,
+            )
+        except autoupdate_contract.AutoupdateContractError as exc:
+            raise PackageError(
+                "automatic-update contract failed: {}".format(exc)
+            ) from exc
+        if update_report.get("passed") is not True:
+            raise PackageError(
+                "automatic-update contract did not return a passing report"
+            )
+        report["autoupdate_contract"] = update_report
+    elif sparkle_source_root is not None:
+        raise PackageError(
+            "--sparkle-source-root requires --require-autoupdate"
+        )
+    return report
 
 
 def _identity(report):
@@ -756,10 +1053,80 @@ def _identity(report):
 def _require_same_app(expected, observed, location):
     if _identity(observed) != _identity(expected):
         raise PackageError("{} app identity or architecture changed during packaging".format(location))
+    if observed.get("exact_tree") != expected.get("exact_tree"):
+        raise PackageError(
+            "{} app exact descriptor-pinned tree changed during packaging".format(
+                location
+            )
+        )
+    if ("autoupdate_contract" in expected) != (
+        "autoupdate_contract" in observed
+    ):
+        raise PackageError(
+            "{} automatic-update contract state changed during packaging".format(
+                location
+            )
+        )
+    if "autoupdate_contract" in expected:
+        def stable_contract(report):
+            contract = report["autoupdate_contract"]
+            return {
+                "app_version": contract.get("app_version"),
+                "app_short_version": contract.get("app_short_version"),
+                "minimum_macos": contract.get("minimum_macos"),
+                "feed_url": contract.get("feed_url"),
+                "public_ed_key": contract.get("public_ed_key"),
+                "sparkle": contract.get("sparkle"),
+                "icons": contract.get("icons"),
+                "nested_apps": contract.get("nested_apps"),
+                "universal_products": contract.get("universal_products"),
+                "release_gate": contract.get("release_gate"),
+            }
+
+        if stable_contract(expected) != stable_contract(observed):
+            raise PackageError(
+                "{} automatic-update release gate changed during packaging"
+                .format(location)
+            )
 
 
-def inspect_mounted_image(image_path, mountpoint, expected_app):
+def inspect_mounted_image(
+    image_path,
+    mountpoint,
+    expected_app,
+    require_autoupdate=False,
+    sparkle_source_root=None,
+):
     """Attach read-only, inspect the mounted payload, and always detach it."""
+    image_path = Path(image_path)
+    image_fd = os.open(
+        str(image_path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    )
+    pinned_image = os.fstat(image_fd)
+    named_image = os.lstat(str(image_path))
+    if not stat.S_ISREG(pinned_image.st_mode) or not _same_inode(
+        pinned_image, named_image
+    ):
+        os.close(image_fd)
+        raise PackageError("DMG image pathname changed before inspection")
+    pinned_image_path = (
+        mountpoint.parent
+        / (".focus-image-inspect-{}.dmg".format(secrets.token_hex(16)))
+    )
+    try:
+        os.link(
+            str(image_path), str(pinned_image_path), follow_symlinks=False
+        )
+    except OSError as exc:
+        os.close(image_fd)
+        raise PackageError("could not create descriptor-bound DMG inspection link") from exc
+    linked_image = os.lstat(str(pinned_image_path))
+    if not _same_inode(linked_image, pinned_image):
+        pinned_image_path.unlink()
+        os.close(image_fd)
+        raise PackageError("DMG image changed while pinning inspection input")
+    inspection_image = os.fstat(image_fd)
+    inspection_sha256 = _inspection_sha256_fd(image_fd)
     attach = [
         HDIUTIL,
         "attach",
@@ -768,11 +1135,11 @@ def inspect_mounted_image(image_path, mountpoint, expected_app):
         "-noautoopen",
         "-mountpoint",
         str(mountpoint),
-        str(image_path),
+        str(pinned_image_path),
     ]
     attached = False
     primary_error = None
-    detach_error = None
+    detach_errors = []
     observed = None
     try:
         checked_run(attach)
@@ -788,27 +1155,102 @@ def inspect_mounted_image(image_path, mountpoint, expected_app):
         if os.readlink(str(applications_link)) != "/Applications":
             raise PackageError("mounted Applications link has an unexpected target")
 
-        observed = validate_app(mountpoint / APP_BUNDLE_NAME)
+        if require_autoupdate:
+            observed = validate_app(
+                mountpoint / APP_BUNDLE_NAME,
+                require_autoupdate=True,
+                sparkle_source_root=sparkle_source_root,
+            )
+        else:
+            observed = validate_app(mountpoint / APP_BUNDLE_NAME)
         _require_same_app(expected_app, observed, "mounted")
-    except Exception as exc:  # Detachment still has to run for validation failures.
+        current_image = os.fstat(image_fd)
+        if (
+            not _same_inode(current_image, inspection_image)
+            or not _same_inode(os.lstat(str(image_path)), pinned_image)
+            or current_image.st_size != inspection_image.st_size
+            or current_image.st_mtime_ns != inspection_image.st_mtime_ns
+            or current_image.st_ctime_ns != inspection_image.st_ctime_ns
+            or _inspection_sha256_fd(image_fd) != inspection_sha256
+        ):
+            raise PackageError("DMG image pathname changed during inspection")
+    except BaseException as exc:  # Detachment also has to run for interruptions.
         primary_error = exc
     finally:
         if attached or os.path.ismount(str(mountpoint)):
             try:
                 checked_run([HDIUTIL, "detach", str(mountpoint)])
             except Exception as exc:
-                detach_error = exc
+                detach_errors.append(exc)
+            if os.path.ismount(str(mountpoint)):
+                try:
+                    checked_run([HDIUTIL, "detach", "-force", str(mountpoint)])
+                except Exception as exc:
+                    detach_errors.append(exc)
+        still_mounted = os.path.ismount(str(mountpoint))
+        try:
+            linked_after = os.lstat(str(pinned_image_path))
+        except OSError as exc:
+            primary_error = RetainedMountError(
+                "private DMG inspection link disappeared; retained root {}; "
+                "original={!r}".format(mountpoint.parent, primary_error),
+                mountpoint.parent,
+            )
+        else:
+            if not _same_inode(linked_after, pinned_image):
+                primary_error = RetainedMountError(
+                    "private DMG inspection link was replaced; retained root {}; "
+                    "original={!r}".format(mountpoint.parent, primary_error),
+                    mountpoint.parent,
+                )
+            elif not still_mounted:
+                try:
+                    pinned_image_path.unlink()
+                except BaseException as exc:
+                    primary_error = RetainedMountError(
+                        "private DMG inspection link could not be removed; "
+                        "retained root {}; unlink={!r}; original={!r}".format(
+                            mountpoint.parent, exc, primary_error
+                        ),
+                        mountpoint.parent,
+                    )
+        os.close(image_fd)
 
+    if still_mounted:
+        detail = "; ".join(repr(error) for error in detach_errors) or "unknown"
+        message = (
+            "DMG could not be detached; retained mount root {}: {}".format(
+                mountpoint.parent, detail
+            )
+        )
+        if primary_error is not None:
+            message = "{}; original validation error: {!r}".format(
+                message, primary_error
+            )
+        raise RetainedMountError(message, mountpoint.parent) from primary_error
     if primary_error is not None:
-        if detach_error is not None:
+        if detach_errors:
+            if isinstance(primary_error, RetainedMountError):
+                raise RetainedMountError(
+                    "{}; additionally failed to detach image: {}".format(
+                        primary_error,
+                        "; ".join(repr(error) for error in detach_errors),
+                    ),
+                    primary_error.retained_mount_root,
+                ) from primary_error
             raise PackageError(
                 "{}; additionally failed to detach image: {}".format(
-                    primary_error, detach_error
+                    primary_error,
+                    "; ".join(repr(error) for error in detach_errors),
                 )
             ) from primary_error
         raise primary_error
-    if detach_error is not None:
-        raise PackageError("failed to detach image: {}".format(detach_error)) from detach_error
+    if detach_errors:
+        raise PackageError(
+            "DMG required forced detach: {}".format(
+                "; ".join(repr(error) for error in detach_errors)
+            )
+        ) from detach_errors[0]
     return observed
 
 
@@ -820,14 +1262,37 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def package_local_dmg(app_value, output_value, require_universal=False):
+def package_local_dmg(
+    app_value,
+    output_value,
+    require_universal=False,
+    require_autoupdate=False,
+    sparkle_source_root=None,
+):
     """Create, verify, mount-inspect, and atomically place one local DMG."""
     require_system_tools()
     app = resolve_app_path(app_value)
     output = resolve_output_path(output_value)
     _require_output_outside_app(app, output)
-    source_report = validate_app(app)
-    if require_universal and source_report["architectures"] != list(ARCHITECTURE_ORDER):
+    if sparkle_source_root is not None and not require_autoupdate:
+        raise PackageError(
+            "--sparkle-source-root requires --require-autoupdate"
+        )
+    if require_autoupdate and sparkle_source_root is None:
+        raise PackageError(
+            "--require-autoupdate requires --sparkle-source-root"
+        )
+    if require_autoupdate:
+        source_report = validate_app(
+            app,
+            require_autoupdate=True,
+            sparkle_source_root=sparkle_source_root,
+        )
+    else:
+        source_report = validate_app(app)
+    if (require_universal or require_autoupdate) and source_report[
+        "architectures"
+    ] != list(ARCHITECTURE_ORDER):
         raise PackageError(
             "universal DMG requires main executable architectures arm64+x86_64; got {}".format(
                 ",".join(source_report["architectures"])
@@ -849,7 +1314,14 @@ def package_local_dmg(app_value, output_value, require_universal=False):
             checked_run([DITTO, str(app), str(staged_app)])
             os.symlink("/Applications", str(staging / "Applications"))
 
-            staged_report = validate_app(staged_app)
+            if require_autoupdate:
+                staged_report = validate_app(
+                    staged_app,
+                    require_autoupdate=True,
+                    sparkle_source_root=sparkle_source_root,
+                )
+            else:
+                staged_report = validate_app(staged_app)
             _require_same_app(source_report, staged_report, "staged")
 
             candidate = temporary_root / "FocusBrowser-local.dmg"
@@ -872,7 +1344,13 @@ def package_local_dmg(app_value, output_value, require_universal=False):
 
             mountpoint = temporary_root / "mounted"
             mountpoint.mkdir()
-            mounted_report = inspect_mounted_image(candidate, mountpoint, source_report)
+            mounted_report = inspect_mounted_image(
+                candidate,
+                mountpoint,
+                source_report,
+                require_autoupdate=require_autoupdate,
+                sparkle_source_root=sparkle_source_root,
+            )
             _require_same_app(source_report, mounted_report, "mounted")
 
             size = candidate.stat().st_size
@@ -900,6 +1378,12 @@ def package_local_dmg(app_value, output_value, require_universal=False):
                 "executable": source_report["executable"],
                 "architectures": source_report["architectures"],
                 "require_universal": bool(require_universal),
+                "require_autoupdate": bool(require_autoupdate),
+                "sparkle_source_root": (
+                    str(Path(sparkle_source_root).expanduser().resolve())
+                    if sparkle_source_root is not None
+                    else None
+                ),
                 "format": "UDZO",
                 "size_bytes": size,
                 "sha256": digest,
@@ -913,13 +1397,16 @@ def package_local_dmg(app_value, output_value, require_universal=False):
             retained_quarantine = getattr(
                 active_error, "retained_quarantine", None
             ) or getattr(active_error, "quarantine_path", None)
-            if retained_quarantine is not None:
+            retained_mount_root = getattr(
+                active_error, "retained_mount_root", None
+            )
+            if retained_quarantine is not None or retained_mount_root is not None:
                 # Recursive TemporaryDirectory cleanup would destroy the rival
-                # that the quarantine protocol intentionally preserved.
+                # or live mount that the safety protocol intentionally preserved.
                 temporary_manager._finalizer.detach()  # pylint: disable=protected-access
                 temporary_cleanup_warning = (
-                    "private quarantine retained at {}".format(
-                        retained_quarantine
+                    "private state retained at {}".format(
+                        retained_quarantine or retained_mount_root
                     )
                 )
             else:
@@ -959,6 +1446,21 @@ def main(argv=None):
         action="store_true",
         help="reject thin apps; require both arm64 and x86_64",
     )
+    parser.add_argument(
+        "--require-autoupdate",
+        action="store_true",
+        help=(
+            "fail closed unless source, staged, and mounted apps pass the full "
+            "universal Sparkle contract"
+        ),
+    )
+    parser.add_argument(
+        "--sparkle-source-root",
+        help=(
+            "completed acquire_sparkle.py root used to prove the embedded "
+            "Sparkle.framework subtree"
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="emit JSON instead of text")
     args = parser.parse_args(argv)
     try:
@@ -966,6 +1468,8 @@ def main(argv=None):
             args.app,
             args.output,
             require_universal=args.require_universal,
+            require_autoupdate=args.require_autoupdate,
+            sparkle_source_root=args.sparkle_source_root,
         )
     except (OSError, PackageError, plistlib.InvalidFileException) as exc:
         print("ERROR: {}".format(exc), file=sys.stderr)

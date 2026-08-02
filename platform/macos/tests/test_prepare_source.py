@@ -1142,10 +1142,16 @@ class PrepareSourceTests(unittest.TestCase):
             prepare_source.atomic_publish_text(destination, "replacement\n")
         self.assertEqual("complete\n", destination.read_text(encoding="utf-8"))
 
-    def test_complete_patch_plan_is_321_common_then_3_platform(self):
+    def test_complete_patch_plan_is_321_common_then_5_platform(self):
         plan = prepare_source.build_patch_plan()
-        self.assertEqual(324, len(plan))
-        self.assertTrue(str(plan[-1]).endswith("native-incognito-contract.patch"))
+        self.assertEqual(326, prepare_source.FULL_PATCH_PLAN_COUNT)
+        self.assertEqual(prepare_source.FULL_PATCH_PLAN_COUNT, len(plan))
+        self.assertTrue(
+            str(plan[-2]).endswith("focus-macos-icon-precedence.patch")
+        )
+        self.assertTrue(
+            str(plan[-1]).endswith("focus-sparkle-autoupdate.patch")
+        )
         self.assertNotIn(
             "windows-first-run-locale.patch", "\n".join(str(path) for path in plan)
         )
@@ -1451,7 +1457,7 @@ class PrepareSourceTests(unittest.TestCase):
                 "chrome_version_sha256": (
                     prepare_source.POST_VERSION_CHROME_VERSION_SHA256
                 ),
-                "focus_version": "1.0.5.0",
+                "focus_version": "1.0.6.0",
                 "onboarding_baseline_sha256": (
                     prepare_source.ONBOARDING_STRINGS_BASELINE_SHA256
                 ),
@@ -1493,11 +1499,35 @@ class PrepareSourceTests(unittest.TestCase):
         version.write_text(
             "MAJOR=150\nMINOR=0\nBUILD=7871\nPATCH=128\n", encoding="utf-8"
         )
-        self.assertEqual("1.0.5.0", prepare_source.append_focus_version_once(source))
+        self.assertEqual("1.0.6.0", prepare_source.append_focus_version_once(source))
         text = version.read_text(encoding="utf-8")
-        self.assertEqual(1, text.count("FOCUS_MAJOR="))
+        self.assertEqual(
+            [
+                "FOCUS_MAJOR=1",
+                "FOCUS_MINOR=0",
+                "FOCUS_PATCH=6",
+                "FOCUS_PLATFORM=0",
+            ],
+            text.splitlines()[-4:],
+        )
         with self.assertRaises(ValueError):
             prepare_source.append_focus_version_once(source)
+
+    def test_macos_version_is_separate_from_repository_release_inputs(self):
+        repository_parts = prepare_source.focus_version.get_version_parts(
+            prepare_source.REPO_ROOT / "focus-chromium",
+            prepare_source.REPO_ROOT,
+        )
+        self.assertEqual(
+            prepare_source.REPOSITORY_FOCUS_VERSION_PARTS,
+            repository_parts,
+        )
+        self.assertEqual("1.0.6", prepare_source.MACOS_FOCUS_SHORT_VERSION)
+        self.assertEqual("1.0.6.0", prepare_source.MACOS_FOCUS_VERSION)
+        self.assertNotEqual(
+            repository_parts,
+            prepare_source.MACOS_FOCUS_VERSION_PARTS,
+        )
 
     def test_icns_install_requires_build_path_and_focus_branding(self):
         source = self.root / "src"
@@ -1924,7 +1954,7 @@ class PrepareSourceTests(unittest.TestCase):
         ), mock.patch.object(
             prepare_source, "apply_overlay", return_value={}
         ), mock.patch.object(
-            prepare_source, "append_focus_version_once", return_value="1.0.5.0"
+            prepare_source, "append_focus_version_once", return_value="1.0.6.0"
         ), mock.patch.object(
             prepare_source, "parse_resource_plan", return_value=[]
         ), mock.patch.object(
@@ -1947,7 +1977,7 @@ class PrepareSourceTests(unittest.TestCase):
                 "dependency staging",
                 "dependency merge",
                 "file-only binary pruning",
-                "324-patch batch",
+                "326-patch batch",
                 "domain/name/i18n transformations",
                 "filtered overlay and cleanup",
                 "Focus version append",
@@ -2112,7 +2142,7 @@ class PrepareSourceTests(unittest.TestCase):
             },
             prepare_source.expected_resume_dependency_tree(324),
         )
-        for value in (0, 97, 99, 137, 139, 323, 325):
+        for value in (0, 97, 99, 137, 139, 323, 325, 326):
             with self.subTest(value=value), self.assertRaisesRegex(
                 prepare_source.PreparationError, "only audited"
             ):
@@ -2123,7 +2153,7 @@ class PrepareSourceTests(unittest.TestCase):
         patch_root = repository / "patches"
         patch_root.mkdir(parents=True)
         patch_plan = []
-        for position in range(1, 325):
+        for position in range(1, prepare_source.FULL_PATCH_PLAN_COUNT + 1):
             path = patch_root / "{:03d}.patch".format(position)
             path.write_text("# fixture {}\n".format(position), encoding="utf-8")
             patch_plan.append(path)
@@ -2149,8 +2179,8 @@ class PrepareSourceTests(unittest.TestCase):
             execution = {
                 "mode": "resume_exact_prefix",
                 "initial_applied_patch_count": 138,
-                "patches_applied_this_run": 186,
-                "total_patches": 324,
+                "patches_applied_this_run": 188,
+                "total_patches": prepare_source.FULL_PATCH_PLAN_COUNT,
                 "resume_checkpoint": {
                     "git_head": prepare_source.ACQUISITION_CHROMIUM_COMMIT,
                     "working_tree": prepare_source.expected_resume_working_tree(138),
@@ -2194,14 +2224,14 @@ class PrepareSourceTests(unittest.TestCase):
                 )
         self.assertEqual(138, prefix["count"])
         self.assertEqual(138, prefix["last_position"])
-        self.assertEqual(186, execution["patches_applied_this_run"])
+        self.assertEqual(188, execution["patches_applied_this_run"])
 
-    def test_checkpoint_324_full_prefix_and_receipt_execution_validate(self):
+    def test_checkpoint_324_legacy_prefix_and_receipt_execution_validate(self):
         repository = self.root / "full-prefix-repository"
         patch_root = repository / "patches"
         patch_root.mkdir(parents=True)
         patch_plan = []
-        for position in range(1, 325):
+        for position in range(1, prepare_source.FULL_PATCH_PLAN_COUNT + 1):
             path = patch_root / "{:03d}.patch".format(position)
             path.write_text("# fixture {}\n".format(position), encoding="utf-8")
             patch_plan.append(path)
@@ -2209,20 +2239,26 @@ class PrepareSourceTests(unittest.TestCase):
         source = self.root / "full-prefix-boundary"
         source.mkdir()
         (source / "value.txt").write_text("after-324\n", encoding="utf-8")
-        patch_plan[-1].write_text(
+        patch_plan[323].write_text(
             "--- a/value.txt\n+++ b/value.txt\n"
             "@@ -1 +1 @@\n-before-324\n+after-324\n",
             encoding="utf-8",
         )
-        prepare_source.check_patch_boundary(source, patch_plan[-1], reverse=True)
+        patch_plan[324].write_text(
+            "--- a/value.txt\n+++ b/value.txt\n"
+            "@@ -1 +1 @@\n-after-324\n+after-325\n",
+            encoding="utf-8",
+        )
+        prepare_source.check_patch_boundary(source, patch_plan[323], reverse=True)
+        prepare_source.check_patch_boundary(source, patch_plan[324], reverse=False)
 
         with mock.patch.object(prepare_source, "REPO_ROOT", repository.resolve()):
             prefix = prepare_source.patch_slice_inventory(patch_plan, 0, 324)
             execution = {
                 "mode": "resume_exact_prefix",
                 "initial_applied_patch_count": 324,
-                "patches_applied_this_run": 0,
-                "total_patches": 324,
+                "patches_applied_this_run": 2,
+                "total_patches": prepare_source.FULL_PATCH_PLAN_COUNT,
                 "resume_checkpoint": {
                     "git_head": prepare_source.ACQUISITION_CHROMIUM_COMMIT,
                     "working_tree": prepare_source.expected_resume_working_tree(324),
@@ -2242,11 +2278,16 @@ class PrepareSourceTests(unittest.TestCase):
                     "applied_prefix": prefix,
                     "last_applied_patch": {
                         "position": 324,
-                        "path": str(patch_plan[-1]),
-                        "sha256": prepare_source.sha256_file(patch_plan[-1]),
+                        "path": str(patch_plan[323]),
+                        "sha256": prepare_source.sha256_file(patch_plan[323]),
                         "reverse_applicable": True,
                     },
-                    "next_patch": None,
+                    "next_patch": {
+                        "position": 325,
+                        "path": str(patch_plan[324]),
+                        "sha256": prepare_source.sha256_file(patch_plan[324]),
+                        "forward_applicable": True,
+                    },
                 },
             }
             with mock.patch.object(
@@ -2257,12 +2298,7 @@ class PrepareSourceTests(unittest.TestCase):
                     prepare_source.validate_preparation_execution_report(execution),
                 )
                 tampered = json.loads(json.dumps(execution))
-                tampered["resume_checkpoint"]["next_patch"] = {
-                    "position": 325,
-                    "path": "impossible.patch",
-                    "sha256": "0" * 64,
-                    "forward_applicable": True,
-                }
+                tampered["resume_checkpoint"]["next_patch"] = None
                 with self.assertRaisesRegex(
                     prepare_source.PreparationError, "next patch"
                 ):
@@ -2270,7 +2306,7 @@ class PrepareSourceTests(unittest.TestCase):
         self.assertEqual(324, prefix["count"])
         self.assertEqual(1, prefix["first_position"])
         self.assertEqual(324, prefix["last_position"])
-        self.assertEqual(0, execution["patches_applied_this_run"])
+        self.assertEqual(2, execution["patches_applied_this_run"])
 
     def test_checkpoint_324_preflight_rejects_completion_artifacts(self):
         source = self.root / "artifact-source"
@@ -2323,7 +2359,7 @@ class PrepareSourceTests(unittest.TestCase):
                     prepare_source.resume_preflight_exact(source, cache, 324)
                 artifact.unlink()
 
-    def test_checkpoint_324_preflight_has_only_last_reverse_boundary(self):
+    def test_checkpoint_324_preflight_has_reverse_and_next_forward_boundaries(self):
         repository = self.root / "preflight-repository"
         patch_root = repository / "patches"
         source = self.root / "preflight-source"
@@ -2333,7 +2369,7 @@ class PrepareSourceTests(unittest.TestCase):
         cache.mkdir()
         (source / "chrome/VERSION").write_text("MAJOR=150\n", encoding="utf-8")
         patch_plan = []
-        for position in range(1, 325):
+        for position in range(1, prepare_source.FULL_PATCH_PLAN_COUNT + 1):
             path = patch_root / "{:03d}.patch".format(position)
             path.write_text("# fixture {}\n".format(position), encoding="utf-8")
             patch_plan.append(path)
@@ -2349,7 +2385,7 @@ class PrepareSourceTests(unittest.TestCase):
         }
         repository_report = {
             "shared_series": {"planned_entries": 321},
-            "platform_patches": [{}, {}, {}],
+            "platform_patches": [{}, {}, {}, {}, {}],
         }
         args_plan = OrderedDict(
             (
@@ -2484,14 +2520,23 @@ class PrepareSourceTests(unittest.TestCase):
             )
             report = prepare_source.resume_preflight_exact(source, cache, 324)
 
-        boundary.assert_called_once_with(source.resolve(), patch_plan[-1], reverse=True)
+        self.assertEqual(
+            [
+                mock.call(source.resolve(), patch_plan[323], reverse=True),
+                mock.call(source.resolve(), patch_plan[324], reverse=False),
+            ],
+            boundary.call_args_list,
+        )
         execution = report["preparation_execution"]
-        self.assertEqual(0, execution["patches_applied_this_run"])
-        self.assertIsNone(execution["resume_checkpoint"]["next_patch"])
+        self.assertEqual(2, execution["patches_applied_this_run"])
+        self.assertEqual(
+            str(patch_plan[324]),
+            execution["resume_checkpoint"]["next_patch"]["path"],
+        )
         self.assertEqual(324, execution["resume_checkpoint"]["applied_prefix"]["count"])
-        self.assertEqual(0, report["patches"]["remaining"])
+        self.assertEqual(2, report["patches"]["remaining"])
 
-    def test_checkpoint_324_mutation_skips_empty_patch_batch(self):
+    def test_checkpoint_324_mutation_applies_two_new_patches(self):
         source = self.root / "mutation-source"
         cache = self.root / "mutation-cache"
         source.mkdir()
@@ -2510,7 +2555,10 @@ class PrepareSourceTests(unittest.TestCase):
             "pruning": {},
             "dependency_install": {},
         }
-        patch_plan = [self.root / "{:03d}.patch".format(value) for value in range(1, 325)]
+        patch_plan = [
+            self.root / "{:03d}.patch".format(value)
+            for value in range(1, prepare_source.FULL_PATCH_PLAN_COUNT + 1)
+        ]
         with contextlib.ExitStack() as stack:
             stack.enter_context(
                 mock.patch.object(
@@ -2542,7 +2590,11 @@ class PrepareSourceTests(unittest.TestCase):
                 mock.patch.object(prepare_source, "check_patch_boundary")
             )
             patch_apply = stack.enter_context(
-                mock.patch.object(prepare_source, "apply_patch_plan")
+                mock.patch.object(
+                    prepare_source,
+                    "apply_patch_plan",
+                    return_value=["icon-precedence", "sparkle"],
+                )
             )
             transformations = stack.enter_context(
                 mock.patch.object(
@@ -2561,7 +2613,7 @@ class PrepareSourceTests(unittest.TestCase):
                 mock.patch.object(
                     prepare_source,
                     "append_focus_version_once",
-                    return_value="1.0.5.0",
+                    return_value="1.0.6.0",
                 )
             )
             stack.enter_context(
@@ -2592,11 +2644,18 @@ class PrepareSourceTests(unittest.TestCase):
             )
             report = prepare_source.resume_patch_failure(source, cache, 324)
 
-        boundary.assert_not_called()
-        patch_apply.assert_not_called()
+        boundary.assert_called_once_with(
+            source, patch_plan[324], reverse=False
+        )
+        patch_apply.assert_called_once_with(
+            source,
+            patch_plan[324:],
+            base_position=324,
+            total_patches=prepare_source.FULL_PATCH_PLAN_COUNT,
+        )
         transformations.assert_called_once_with(source, workers=None)
-        self.assertEqual(0, report["patches_applied_this_run"])
-        self.assertEqual("remaining 0-patch batch", report["disk_gates"][1]["phase"])
+        self.assertEqual(2, report["patches_applied_this_run"])
+        self.assertEqual("remaining 2-patch batch", report["disk_gates"][1]["phase"])
 
     def test_post_version_finalizer_skips_completed_mutation_phases(self):
         source = self.root / "post-version-source"
@@ -2942,7 +3001,7 @@ class PrepareSourceTests(unittest.TestCase):
         self.assertTrue(snapshot_root.is_dir())
         self.assertEqual("recoverable bytes\n", sentinel.read_text(encoding="utf-8"))
 
-    def test_split_recovery_requires_full_patch_prefix_execution(self):
+    def test_split_recovery_requires_legacy_324_prefix_execution(self):
         full = prepare_source.expected_resume_execution_report(324)
         earlier = prepare_source.expected_resume_execution_report(138)
         recovery = {"phase": "fixture"}
@@ -2953,7 +3012,7 @@ class PrepareSourceTests(unittest.TestCase):
                 prepare_source.validate_recovery_execution_link(full, recovery)
             )
             with self.assertRaisesRegex(
-                prepare_source.PreparationError, "exact full-prefix"
+                prepare_source.PreparationError, "exact legacy 324-prefix"
             ):
                 prepare_source.validate_recovery_execution_link(earlier, recovery)
             self.assertTrue(
@@ -2972,10 +3031,14 @@ class PrepareSourceTests(unittest.TestCase):
         full = prepare_source.expected_resume_execution_report(
             324, path_projector=projector
         )
-        expected_last = projector(prepare_source.build_patch_plan()[-1])
+        expected_last = projector(prepare_source.build_patch_plan()[323])
         self.assertEqual(
             str(expected_last),
             full["resume_checkpoint"]["last_applied_patch"]["path"],
+        )
+        self.assertEqual(
+            str(projector(prepare_source.build_patch_plan()[324])),
+            full["resume_checkpoint"]["next_patch"]["path"],
         )
         self.assertEqual(
             full,
@@ -3007,8 +3070,8 @@ class PrepareSourceTests(unittest.TestCase):
                 tampered, path_projector=projector
             )
 
-        rival = self.root / prepare_source.build_patch_plan()[-1].name
-        rival.write_bytes(prepare_source.build_patch_plan()[-1].read_bytes())
+        rival = self.root / prepare_source.build_patch_plan()[323].name
+        rival.write_bytes(prepare_source.build_patch_plan()[323].read_bytes())
         with self.assertRaisesRegex(
             prepare_source.PreparationError, "changed patch identity"
         ):
@@ -3219,18 +3282,21 @@ class PrepareSourceTests(unittest.TestCase):
         for base_position, expected_position in ((98, 99), (138, 139)):
             with self.subTest(base_position=base_position), self.assertRaisesRegex(
                 prepare_source.PreparationError,
-                r"\({}/324\)".format(expected_position),
+                r"\({}/326\)".format(expected_position),
             ):
                 prepare_source.apply_patch_plan(
                     source,
                     [patch],
                     base_position=base_position,
-                    total_patches=324,
+                    total_patches=prepare_source.FULL_PATCH_PLAN_COUNT,
                 )
         self.assertEqual(
             [],
             prepare_source.apply_patch_plan(
-                source, [], base_position=324, total_patches=324
+                source,
+                [],
+                base_position=prepare_source.FULL_PATCH_PLAN_COUNT,
+                total_patches=prepare_source.FULL_PATCH_PLAN_COUNT,
             ),
         )
 
@@ -3238,7 +3304,7 @@ class PrepareSourceTests(unittest.TestCase):
         report = prepare_source.fresh_preparation_execution_report()
         prepare_source.validate_preparation_execution_report(report)
         changed = dict(report)
-        changed["patches_applied_this_run"] = 323
+        changed["patches_applied_this_run"] = 325
         with self.assertRaisesRegex(prepare_source.PreparationError, "counts"):
             prepare_source.validate_preparation_execution_report(changed)
 

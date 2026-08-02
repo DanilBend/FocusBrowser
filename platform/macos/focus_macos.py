@@ -136,11 +136,31 @@ MACOS_FLAGS = {
     "arm64": MACOS_DIR / "flags.arm64.gn",
     "x64": MACOS_DIR / "flags.x64.gn",
 }
+AUTOUPDATE_MACOS_FLAGS = {
+    "arm64": MACOS_DIR / "flags.arm64.autoupdate.gn",
+    "x64": MACOS_DIR / "flags.x64.autoupdate.gn",
+}
+AUTOUPDATE_FEED_URL = (
+    "https://danilbend.github.io/FocusBrowser/appcast-macos.xml"
+)
+AUTOUPDATE_PUBLIC_KEY = (
+    "NcOw/DDSWLfV+kG111aN6fO8b0K4v3dygU7nYlLkkD0="
+)
 DEFAULT_OUT_DIRS = {
     "arm64": "out/FocusMacArm64",
     "x64": "out/FocusMacX64",
     "universal": "out/FocusMacUniversal",
 }
+AUTOUPDATE_OUT_DIRS = {
+    "arm64": "out/FocusMacArm64Auto",
+    "x64": "out/FocusMacX64Auto",
+    "universal": "out/FocusMacUnsignedUniversalAuto",
+}
+AUTOUPDATE_STAGING_OUT_DIR = "out/FocusMacAutoStaging"
+AUTOUPDATE_SIGNED_OUT_DIR = "out/FocusMacSignedUniversalAuto"
+AUTOUPDATE_NINJA_TARGETS = ("chrome", "chrome/installer/mac:copies")
+AUTOUPDATE_RELEASE_MERGE_STAGES = ("prepare-auto", "seal", "stage", "merge")
+AUTOUPDATE_RELEASE_DRIVER = MACOS_DIR / "autoupdate_release.py"
 CHROMIUM_MAC_SDK_GNI = "build/config/mac/mac_sdk.gni"
 CHROMIUM_UNIVERSALIZER = "chrome/installer/mac/universalizer.py"
 COMMON_SERIES = REPO_ROOT / "focus-chromium" / "patches" / "series"
@@ -162,6 +182,14 @@ EXPECTED_PATCHES = (
     (
         Path("platform/macos/patches/native-incognito-contract.patch"),
         "7b537baeb77019270aa183908529ba2236e9ba5bda436c3562b6f7c4173cd199",
+    ),
+    (
+        Path("platform/macos/patches/focus-macos-icon-precedence.patch"),
+        "d23eeccb3c34b68be4dfeaab1e0cbe7d72310b0af0ff70f4a10227c788689505",
+    ),
+    (
+        Path("platform/macos/patches/focus-sparkle-autoupdate.patch"),
+        "61fee12c5560f5c3f2166f6e881da87d681d29325f2912ce21dba32ef1248c04",
     ),
 )
 
@@ -2068,7 +2096,7 @@ def validate_i18n_catalogs():
     source = load_json_list(source_path, {"name", "source", "context", "message"})
     en_gb = load_json_list(en_path, {"name", "source", "message"})
     ru = load_json_list(ru_path, {"name", "source", "message"})
-    expected_counts = {"source": 267, "en-GB": 165, "ru": 189}
+    expected_counts = {"source": 270, "en-GB": 165, "ru": 190}
     actual_counts = {"source": len(source), "en-GB": len(en_gb), "ru": len(ru)}
     if actual_counts != expected_counts:
         raise ContractError(
@@ -2078,13 +2106,7 @@ def validate_i18n_catalogs():
         )
 
     source_references = {(item["name"], item["message"]) for item in source}
-    allowed_ru_source_gaps = {
-        ("IDS_SETTINGS_FOCUS_BROWSER_UPDATES", "Automatically update Focus Browser"),
-        (
-            "IDS_SETTINGS_FOCUS_BROWSER_UPDATES_DESCRIPTION",
-            "Check for signed browser updates and install them automatically",
-        ),
-    }
+    allowed_ru_source_gaps = set()
     missing_by_locale = {}
     for locale, entries, allowed_gaps in (
         ("en-GB", en_gb, set()),
@@ -2131,6 +2153,24 @@ def validate_i18n_catalogs():
             "Smooth interface animations",
             None,
             "Плавные анимации интерфейса",
+        ),
+        (
+            "IDS_SETTINGS_FOCUS_BROWSER_UPDATES",
+            "Automatically update Focus Browser",
+            None,
+            "Автоматически обновлять Focus Browser",
+        ),
+        (
+            "IDS_SETTINGS_FOCUS_BROWSER_UPDATES_DESCRIPTION",
+            "Check for signed browser updates and install them automatically",
+            None,
+            "Проверять подписанные обновления браузера и устанавливать их автоматически",
+        ),
+        (
+            "IDS_SETTINGS_ABOUT_UPGRADE_DEFERRED",
+            "Update postponed. Focus Browser will continue checking automatically.",
+            None,
+            "Обновление отложено. Focus Browser продолжит автоматически проверять обновления.",
         ),
     )
     validated_contracts = []
@@ -2415,11 +2455,11 @@ def parse_gn_assignments(paths, expected_target_cpu="arm64", include_values=Fals
     return composed, sorted(assignments)
 
 
-def validate_gn_profiles():
-    """Validate both Mac slices and require exact non-CPU assignment parity."""
+def _validate_gn_profile_set(flags):
+    """Validate one pair of Mac slices and exact non-CPU assignment parity."""
     profiles = {}
     value_maps = {}
-    for architecture, flags_path in MACOS_FLAGS.items():
+    for architecture, flags_path in flags.items():
         gn_text, gn_names, gn_values = parse_gn_assignments(
             (COMMON_FLAGS, flags_path),
             expected_target_cpu=architecture,
@@ -2461,6 +2501,39 @@ def validate_gn_profiles():
         "profiles_equal_except_target_cpu": True,
         "minimum_macos": PINNED_MACOS_MINIMUM,
     }
+
+
+def validate_gn_profiles():
+    """Validate the preserved manual-update arm64 and x64 profiles."""
+    return _validate_gn_profile_set(MACOS_FLAGS)
+
+
+def validate_autoupdate_gn_profiles():
+    """Validate both opt-in Sparkle profiles and their pinned update channel."""
+    report = _validate_gn_profile_set(AUTOUPDATE_MACOS_FLAGS)
+    expected = {
+        "enable_updater": "false",
+        "enable_focus_macos_sparkle": "true",
+        "focus_macos_sparkle_feed_url": '"{}"'.format(AUTOUPDATE_FEED_URL),
+        "focus_macos_sparkle_public_key": '"{}"'.format(AUTOUPDATE_PUBLIC_KEY),
+    }
+    for architecture, flags_path in AUTOUPDATE_MACOS_FLAGS.items():
+        _, _, values = parse_gn_assignments(
+            (COMMON_FLAGS, flags_path),
+            expected_target_cpu=architecture,
+            include_values=True,
+        )
+        for name, expected_value in expected.items():
+            if values.get(name) != expected_value:
+                raise ContractError(
+                    "auto-update GN contract changed for {} on {}".format(
+                        name, architecture
+                    )
+                )
+    report["update_mode"] = "sparkle"
+    report["feed_url"] = AUTOUPDATE_FEED_URL
+    report["public_key"] = AUTOUPDATE_PUBLIC_KEY
+    return report
 
 
 def validate_legal_inventory():
@@ -2690,17 +2763,22 @@ def disk_gate(path, minimum_free_gib):
     return report
 
 
-def validate(source_root, developer_dir, minimum_free_gib=None):
+def validate(source_root, developer_dir, minimum_free_gib=None, update_mode="manual"):
     """Build a complete read-only validation report."""
+    if update_mode not in ("manual", "autoupdate"):
+        raise ContractError("unsupported macOS update mode: {}".format(update_mode))
     host = validate_host()
     root, version = resolve_source_root(source_root)
     toolchain = validate_xcode_toolchain(developer_dir)
     macos_build = validate_chromium_macos_build_contract(root)
     repository = validate_repository_contract()
+    if update_mode == "autoupdate":
+        repository["gn"] = validate_autoupdate_gn_profiles()
     incognito_source = validate_chromium_incognito_source(root)
     return {
         "command": "validate",
         "dry_run": True,
+        "update_mode": update_mode,
         "host": host,
         "source": {
             "root": str(root),
@@ -2722,25 +2800,36 @@ def normalise_out_dir(value):
     return pure.as_posix()
 
 
-def plan(source_root, developer_dir, minimum_free_gib):
+def plan(source_root, developer_dir, minimum_free_gib, update_mode="manual"):
     """Return, but never execute, the pinned macOS build pipeline and commands."""
-    report = validate(source_root, developer_dir, minimum_free_gib)
+    report = validate(
+        source_root, developer_dir, minimum_free_gib, update_mode=update_mode
+    )
     root = Path(report["source"]["root"])
     developer_assignment = "DEVELOPER_DIR={}".format(
         report["toolchain"]["developer_dir"]
     )
     command_prefix = ["/usr/bin/env", developer_assignment]
+    out_dirs = (
+        AUTOUPDATE_OUT_DIRS if update_mode == "autoupdate" else DEFAULT_OUT_DIRS
+    )
+    ninja_targets = (
+        list(AUTOUPDATE_NINJA_TARGETS)
+        if update_mode == "autoupdate"
+        else ["chrome"]
+    )
     slices = {}
     commands = []
     for architecture in ("arm64", "x64"):
-        relative_out = normalise_out_dir(DEFAULT_OUT_DIRS[architecture])
+        relative_out = normalise_out_dir(out_dirs[architecture])
         args_destination = root / Path(relative_out) / "args.gn"
         gn_profile = report["repository"]["gn"]["profiles"][architecture]
         gn_text = gn_profile.pop("args_gn")
         slice_commands = [
             command_prefix
             + ["gn", "gen", relative_out, "--fail-on-unused-args"],
-            command_prefix + ["autoninja", "-C", relative_out, "chrome"],
+            command_prefix
+            + ["autoninja", "-C", relative_out, *ninja_targets],
         ]
         commands.extend(slice_commands)
         slices[architecture] = {
@@ -2750,46 +2839,81 @@ def plan(source_root, developer_dir, minimum_free_gib):
             "app": str(PurePosixPath(relative_out) / "Focus Browser.app"),
             "args_gn_destination": str(args_destination),
             "args_gn": gn_text,
-            "ninja_targets": ["chrome"],
+            "ninja_targets": list(ninja_targets),
             "commands": slice_commands,
             "executed": False,
         }
 
-    universal_out = normalise_out_dir(DEFAULT_OUT_DIRS["universal"])
-    universal_app = str(PurePosixPath(universal_out) / "Focus Browser.app")
     universal_inputs = [slices["x64"]["app"], slices["arm64"]["app"]]
-    universal_parent_command = command_prefix + ["/bin/mkdir", "-p", universal_out]
-    universal_command = command_prefix + [
-        "python3",
-        CHROMIUM_UNIVERSALIZER,
-        universal_inputs[0],
-        universal_inputs[1],
-        universal_app,
-    ]
-    commands.extend((universal_parent_command, universal_command))
+    universal_out = normalise_out_dir(out_dirs["universal"])
+    universal_app = str(PurePosixPath(universal_out) / "Focus Browser.app")
+    if update_mode == "autoupdate":
+        release_commands = []
+        for stage in AUTOUPDATE_RELEASE_MERGE_STAGES:
+            base = command_prefix + [
+                "python3",
+                str(AUTOUPDATE_RELEASE_DRIVER),
+                stage,
+                "--source-root",
+                str(root),
+            ]
+            release_commands.extend(
+                (base + ["--json"], base + ["--execute", "--json"])
+            )
+        commands.extend(release_commands)
+        universal = {
+            "tool": str(AUTOUPDATE_RELEASE_DRIVER),
+            "inputs": universal_inputs,
+            "input_order": ["x64", "arm64"],
+            "staging_out_dir": normalise_out_dir(AUTOUPDATE_STAGING_OUT_DIR),
+            "out_dir": universal_out,
+            "output": universal_app,
+            "signed_out_dir": normalise_out_dir(AUTOUPDATE_SIGNED_OUT_DIR),
+            "release_stages": list(AUTOUPDATE_RELEASE_MERGE_STAGES),
+            "commands": release_commands,
+            "parent_directory_command": None,
+            "command": release_commands[-1],
+            "strict_release_pipeline": True,
+            "assembly_executed": False,
+            "signing_executed": False,
+            "runtime_verified": False,
+        }
+    else:
+        universal_parent_command = command_prefix + [
+            "/bin/mkdir", "-p", universal_out
+        ]
+        universal_command = command_prefix + [
+            "python3",
+            CHROMIUM_UNIVERSALIZER,
+            universal_inputs[0],
+            universal_inputs[1],
+            universal_app,
+        ]
+        commands.extend((universal_parent_command, universal_command))
+        universal = {
+            "tool": CHROMIUM_UNIVERSALIZER,
+            "inputs": universal_inputs,
+            "input_order": ["x64", "arm64"],
+            "out_dir": universal_out,
+            "output": universal_app,
+            "parent_directory_command": universal_parent_command,
+            "command": universal_command,
+            "assembly_executed": False,
+            "signing_executed": False,
+            "runtime_verified": False,
+        }
     report.update(
         {
             "command": "plan",
             "build": {
                 "architectures": ["arm64", "x64"],
-                "configuration": "official-release-unsigned",
+                "configuration": "official-release-unsigned-{}".format(update_mode),
                 "minimum_macos": PINNED_MACOS_MINIMUM,
                 "working_directory": str(root),
                 "slices": slices,
-                "ninja_targets": ["chrome"],
+                "ninja_targets": list(ninja_targets),
                 "commands": commands,
-                "universal": {
-                    "tool": CHROMIUM_UNIVERSALIZER,
-                    "inputs": universal_inputs,
-                    "input_order": ["x64", "arm64"],
-                    "out_dir": universal_out,
-                    "output": universal_app,
-                    "parent_directory_command": universal_parent_command,
-                    "command": universal_command,
-                    "assembly_executed": False,
-                    "signing_executed": False,
-                    "runtime_verified": False,
-                },
+                "universal": universal,
                 "executed": False,
                 "signing_executed": False,
                 "runtime_verified": False,
@@ -2811,6 +2935,19 @@ def plan(source_root, developer_dir, minimum_free_gib):
             ],
         }
     )
+    if update_mode == "autoupdate":
+        report["pipeline"].insert(
+            8,
+            "acquire exact Sparkle 2.9.4 framework and verify every universal product",
+        )
+        report["pipeline"][9:] = [
+            "write each canonical Auto args.gn with the reviewed no-overwrite writer",
+            "run displayed GN/Ninja commands for both slices and both seal targets",
+            "bind completed thin graphs through prepare-auto and seal dry-run/execute pairs",
+            "stage then merge only through autoupdate_release.py dry-run/execute pairs",
+            "ad-hoc sign and run native/Rosetta Incognito acceptance through the release driver",
+            "create and verify the exact local Auto DMG through the release driver",
+        ]
     return report
 
 
@@ -2855,6 +2992,7 @@ def emit_human(report):
             repository["overlay"]["excluded_count"],
         )
     )
+    print("Update mode: {}".format(report["update_mode"]))
     if report["command"] == "plan":
         for architecture in ("arm64", "x64"):
             print(
@@ -2877,6 +3015,9 @@ def build_parser():
     validate_parser.add_argument("--source-root", required=True)
     validate_parser.add_argument("--developer-dir", required=True)
     validate_parser.add_argument("--min-free-gib", type=positive_decimal)
+    validate_parser.add_argument(
+        "--update-mode", choices=("manual", "autoupdate"), default="manual"
+    )
     validate_parser.add_argument("--dry-run", action="store_true")
     validate_parser.add_argument("--json", action="store_true")
 
@@ -2886,6 +3027,9 @@ def build_parser():
     plan_parser.add_argument("--source-root", required=True)
     plan_parser.add_argument("--developer-dir", required=True)
     plan_parser.add_argument("--min-free-gib", type=positive_decimal, required=True)
+    plan_parser.add_argument(
+        "--update-mode", choices=("manual", "autoupdate"), default="manual"
+    )
     plan_parser.add_argument("--dry-run", action="store_true")
     plan_parser.add_argument("--json", action="store_true")
     return parser
@@ -2896,9 +3040,19 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == "validate":
-            report = validate(args.source_root, args.developer_dir, args.min_free_gib)
+            report = validate(
+                args.source_root,
+                args.developer_dir,
+                args.min_free_gib,
+                update_mode=args.update_mode,
+            )
         else:
-            report = plan(args.source_root, args.developer_dir, args.min_free_gib)
+            report = plan(
+                args.source_root,
+                args.developer_dir,
+                args.min_free_gib,
+                update_mode=args.update_mode,
+            )
     except (ContractError, OSError, ValueError, json.JSONDecodeError) as exc:
         if getattr(args, "json", False):
             print(json.dumps({"ok": False, "error": str(exc)}, sort_keys=True))

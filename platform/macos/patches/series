@@ -4,3 +4,7 @@
 ../../../patches/focus/windows/focusyoutube-native-popup.patch
 # Final macOS-only private-window safety and disclosure contract.
 native-incognito-contract.patch
+# Ensure macOS selects the canonical Focus ICNS instead of Chromium Assets.car.
+focus-macos-icon-precedence.patch
+# Focus-owned Sparkle 2 updater; ChromiumUpdater/Keystone remain disabled.
+focus-sparkle-autoupdate.patch

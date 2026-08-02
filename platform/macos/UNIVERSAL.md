@@ -48,6 +48,21 @@ Do not replace Chromium's universalizer with a recursive hand-written `lipo`
 loop. It handles parallel bundle trees, property-list differences, symlinks,
 permissions, and Mach-O alignment rules expected by Chromium.
 
+Those paths describe the preserved updater-free/manual build, including the
+historical `1.0.5` artifact. The `1.0.6` Auto build uses separate
+`out/FocusMacArm64Auto` and `out/FocusMacX64Auto` thin trees and the staged
+`autoupdate_release.py` `prepare-auto` -> `seal` -> `stage` -> `merge` ->
+`sign` -> `accept` -> `package`
+receipt chain. It must not reuse the manual output roots or receipts. Package
+is unreachable until `accept` records the full Sparkle-provenance release gate,
+exact per-slice signing/entitlement matrix, and passing native-arm64 plus
+Rosetta-x86_64 offline Incognito-write/normal-read localStorage isolation
+smokes. The addendum preserves the historical preparation receipt, while the
+seal requires both completed pinned-Ninja graphs to report no work for the
+exact `chrome` and `chrome/installer/mac:copies` targets. The same
+x64-first/arm64-second
+universalization and nested-signature acceptance rules apply.
+
 ## Runtime matrix
 
 At minimum, release acceptance requires a native Apple Silicon run and a native
@@ -59,9 +74,40 @@ physical Intel and macOS 12 runs remain separate compatibility evidence.
 
 The word "universal" proves that the accepted application contains both native
 Mach-O slices; it does not claim testing on every Mac model or macOS release.
-The macOS application updater is disabled in both slices. Any future GitHub
-Release update is a manual DMG download and replacement, not an appcast or
-Sparkle flow.
+
+There are now two deliberately distinct update profiles:
+
+- the preserved `1.0.5` manual profile disables the application updater in
+  both slices; updating that artifact means downloading and replacing the DMG;
+- the `1.0.6.0` Auto profile embeds pinned Sparkle `2.9.4` in both slices and
+  reads only
+  `https://danilbend.github.io/FocusBrowser/appcast-macos.xml`. Its first
+  installation is manual, after which Sparkle can perform the configured
+  automatic and About-page checks.
+
+The Auto candidate requires `autoupdate_contract.py` plus the complete
+`package_local_dmg.py --require-universal --require-autoupdate` source,
+staging, mounted-DMG, provenance, architecture, and deep/strict-signature
+gates. It remains ad-hoc signed and non-notarized. Its prospective release is
+the separate, non-Latest prerelease `v1.0.6-macos`; stable `v1.0.5` is not
+mutated and the plain `v1.0.6` tag remains reserved for a future coordinated
+stable release. This document records neither a final DMG size/hash nor a
+published release or feed.
+
+The Auto chain executes Chromium's universalizer and signer with the pinned
+CIPD CPython 3.11.8 in isolated `-I -B` mode, authenticates its complete CIPD
+manifest/runtime tree, and verifies the entire generated signing package before
+and after every copy/execution boundary. The exact DMG candidate repeats both
+runtime smokes from a read-only mount opened through an owner-only,
+descriptor-verified pathname. The runtime gate prefers a same-inode hard link
+and uses a fsynced read-only byte-for-byte private copy only when an allowlisted
+filesystem limitation prevents linking; the packaging helper's earlier mount
+uses its own same-inode private hard link. The original and mount inputs are
+rebound before and after use. The accept receipt, app, Python tree, package
+driver and candidate are rebound immediately before durable placement, and
+final inode/size/hash are rebound around receipt commit. A detach that cannot
+be proven retains the private candidate, and a post-commit failure never
+removes the verified final DMG.
 
 The exact upstream references are:
 

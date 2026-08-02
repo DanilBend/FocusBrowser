@@ -1,0 +1,34 @@
+# Focus Browser native macOS auto-update profile (Apple Silicon slice).
+# ChromiumUpdater stays disabled; Sparkle uses the signed GitHub appcast.
+
+target_os="mac"
+target_cpu="arm64"
+mac_deployment_target="12.0"
+mac_min_system_version="12.0"
+use_system_xcode=true
+
+is_clang=true
+is_component_build=false
+is_debug=false
+is_official_build=true
+dcheck_always_on=false
+enable_updater=false
+enable_focus_macos_sparkle=true
+focus_macos_sparkle_feed_url="https://danilbend.github.io/FocusBrowser/appcast-macos.xml"
+focus_macos_sparkle_public_key="NcOw/DDSWLfV+kG111aN6fO8b0K4v3dygU7nYlLkkD0="
+include_branded_entitlements=false
+use_siso=false
+use_remoteexec=false
+
+enable_rust=true
+enable_swiftshader=false
+# Local build configuration only. Redistribution remains blocked until codec
+# patent/licensing rights and the selected FFmpeg configuration are reviewed.
+ffmpeg_branding="Chrome"
+proprietary_codecs=true
+enable_mse_mpeg2ts_stream_parser=true
+
+blink_symbol_level=0
+v8_symbol_level=0
+symbol_level=0
+use_thin_lto=false

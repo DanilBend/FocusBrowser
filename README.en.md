@@ -45,9 +45,9 @@ Macs.
   normal tab without an embedded player.
 - Built-in password manager, compatible extension installation, proprietary
   media codecs and DRM integration hooks.
-- **Non-disruptive Windows updates** — a discovered update is offered on the
-  next launch, with options to update now, remind later or skip that exact
-  version. Application updates are manual on the macOS port.
+- **Signed updates** — Windows uses its separate WinSparkle channel, while the
+  universal macOS build uses Sparkle 2 and a separate Ed25519-signed appcast.
+  macOS checks once per day and retains a manual check on the About page.
 
 ## Download and installation
 
@@ -69,17 +69,18 @@ temporarily unavailable, use a manual GitHub Releases installation.
 
 ### macOS
 
-The current public Releases list contains no macOS assets. The separate macOS
-port produces a local, ad-hoc-signed universal DMG for Apple Silicon and 64-bit
-Intel Macs running macOS 12 or later. It is not Apple-notarized and is not
-currently published.
+The separate macOS port produces an ad-hoc-signed universal DMG for Apple
+Silicon and 64-bit Intel Macs running macOS 12 or later. It is not
+Apple-notarized.
 
-The macOS build has no automatic application updater, appcast, or Sparkle.
-After a verified DMG appears in a future official
-[GitHub Release](https://github.com/DanilBend/FocusBrowser/releases), updating
-will be manual: quit Focus Browser, download the new DMG, verify its published
-SHA-256, and replace `Focus Browser.app`. See
-[Focus Browser for macOS](docs/MACOS.md#english) for the current status and
+The new build embeds Sparkle 2.9.4, never ChromiumUpdater or Keystone. The
+archive and appcast require a dedicated Ed25519 signature, and the feed is
+pinned to `https://danilbend.github.io/FocusBrowser/appcast-macos.xml`. The
+previously accepted manual DMG remains a fallback. Because that older build
+does not contain Sparkle, the first move to the updater-capable build must be a
+manual installation from its specific
+[GitHub Release](https://github.com/DanilBend/FocusBrowser/releases). See
+[Focus Browser for macOS](docs/MACOS.md#english) for current status and
 local-DMG limitations.
 
 ## Privacy and external services

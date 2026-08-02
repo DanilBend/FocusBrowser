@@ -1,0 +1,792 @@
+--- a/build/apple/tweak_info_plist.py
++++ b/build/apple/tweak_info_plist.py
+@@ -21,6 +21,8 @@
+ #
+ 
+ 
++import base64
++import binascii
+ import optparse
+ import os
+ import plistlib
+@@ -28,11 +30,72 @@ import re
+ import subprocess
+ import sys
+ import tempfile
++import urllib.parse
+ 
+ TOP = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+ 
+ assert sys.version_info.major >= 3, "Requires python 3.0 or higher."
+ 
++_FOCUS_SPARKLE_KEYS = (
++    'SUFeedURL',
++    'SUPublicEDKey',
++    'SUEnableAutomaticChecks',
++    'SUAutomaticallyUpdate',
++    'SUAllowsAutomaticUpdates',
++    'SUScheduledCheckInterval',
++    'SUVerifyUpdateBeforeExtraction',
++    'SURequireSignedFeed',
++    'SUSignedFeedFailureExpirationInterval',
++    'SUEnableJavaScript',
++    'SUEnableSystemProfiling',
++)
++
++
++def _SetFocusSparkleKeys(plist, feed_url, public_key):
++  """Adds a fail-closed Sparkle configuration or removes every Sparkle key."""
++  if not feed_url and not public_key:
++    _RemoveKeys(plist, *_FOCUS_SPARKLE_KEYS)
++    return True
++  if not feed_url or not public_key:
++    return False
++  try:
++    parsed = urllib.parse.urlsplit(feed_url)
++    parsed.port
++  except ValueError:
++    return False
++  if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or
++      parsed.password or parsed.fragment):
++    return False
++  try:
++    decoded_key = base64.b64decode(public_key, validate=True)
++  except (binascii.Error, ValueError):
++    return False
++  if len(decoded_key) != 32 or base64.b64encode(decoded_key).decode() != public_key:
++    return False
++  version = plist.get('CFBundleVersion')
++  if not isinstance(version, str):
++    return False
++  version_parts = version.split('.')
++  if (len(version_parts) != 4 or version_parts[-1] != '0' or
++      any(not part.isdecimal() or part != str(int(part))
++          for part in version_parts)):
++    return False
++  plist['CFBundleShortVersionString'] = '.'.join(version_parts[:3])
++  plist.update({
++      'SUFeedURL': feed_url,
++      'SUPublicEDKey': public_key,
++      'SUEnableAutomaticChecks': True,
++      'SUAutomaticallyUpdate': True,
++      'SUAllowsAutomaticUpdates': True,
++      'SUScheduledCheckInterval': 86400,
++      'SUVerifyUpdateBeforeExtraction': True,
++      'SURequireSignedFeed': True,
++      'SUSignedFeedFailureExpirationInterval': 0,
++      'SUEnableJavaScript': False,
++      'SUEnableSystemProfiling': False,
++  })
++  return True
++
+ 
+ def _WritePlistIfChanged(plist, output_path, fmt):
+   """Write a plist file.
+@@ -384,6 +447,18 @@ def Main(argv):
+                     type='string',
+                     default=None,
+                     help='The id of the privileged helper executable.')
++  parser.add_option('--focus-sparkle-feed-url',
++                    dest='focus_sparkle_feed_url',
++                    action='store',
++                    type='string',
++                    default='',
++                    help='HTTPS appcast URL for the Focus macOS updater.')
++  parser.add_option('--focus-sparkle-public-key',
++                    dest='focus_sparkle_public_key',
++                    action='store',
++                    type='string',
++                    default='',
++                    help='Base64 Ed25519 public key for the Focus updater.')
+   (options, args) = parser.parse_args(argv)
+ 
+   if len(args) > 0:
+@@ -488,6 +563,11 @@ def Main(argv):
+   else:
+     _RemovePrivilegedHelperId(plist)
+ 
++  if not _SetFocusSparkleKeys(plist, options.focus_sparkle_feed_url,
++                              options.focus_sparkle_public_key):
++    print('Invalid Focus Sparkle feed URL or public key.', file=sys.stderr)
++    return 1
++
+   _SetDirectLaunchUrlScheme(plist, options.bundle_identifier)
+ 
+   output_path = options.plist_path
+--- a/chrome/BUILD.gn
++++ b/chrome/BUILD.gn
+@@ -509,6 +509,14 @@ if (is_win) {
+     } else {
+       args += [ "--keystone=0" ]
+     }
++    if (enable_focus_macos_sparkle) {
++      assert(focus_macos_sparkle_feed_url != "")
++      assert(focus_macos_sparkle_public_key != "")
++      args += [
++        "--focus-sparkle-feed-url=$focus_macos_sparkle_feed_url",
++        "--focus-sparkle-public-key=$focus_macos_sparkle_public_key",
++      ]
++    }
+   }
+ 
+   mac_app_bundle("chrome_app") {
+@@ -535,6 +543,10 @@ if (is_win) {
+       "//chrome/common:version_header",
+     ]
+ 
++    if (enable_focus_macos_sparkle) {
++      deps += [ ":focus_sparkle_framework" ]
++    }
++
+     if (enable_updater) {
+       deps += [ ":chromium_updater_privileged_helper" ]
+     }
+@@ -681,6 +693,15 @@ if (is_win) {
+     }
+   }
+ 
++  if (enable_focus_macos_sparkle) {
++    bundle_data("focus_sparkle_framework") {
++      sources = [ "//third_party/sparkle/Sparkle.framework" ]
++      outputs = [
++        "{{bundle_contents_dir}}/Frameworks/{{source_file_part}}",
++      ]
++    }
++  }
++
+   if (enable_updater) {
+     bundle_data("chromium_updater_privileged_helper") {
+       sources = [ "$root_out_dir/$privileged_helper_name" ]
+@@ -1230,6 +1251,9 @@ if (is_win) {
+       "-current_version",
+       chrome_dylib_version,
+     ]
++    if (enable_focus_macos_sparkle) {
++      ldflags += [ "-Wl,-rpath,@loader_path/../../.." ]
++    }
+ 
+     if (!is_component_build) {
+       # Specify a sensible install_name for static builds. The library is
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -92,6 +92,7 @@ if (is_win) {
+ buildflag_header("buildflags") {
+   header = "buildflags.h"
+   flags = [
++    "ENABLE_FOCUS_MACOS_SPARKLE=$enable_focus_macos_sparkle",
+     "ENABLE_UPDATER=$enable_updater",
+     "ENABLE_UPDATE_NOTIFICATIONS=$enable_update_notifications",
+     "USE_MINIKIN_HYPHENATION=$use_minikin_hyphenation",
+--- a/chrome/browser/buildflags.gni
++++ b/chrome/browser/buildflags.gni
+@@ -18,4 +18,17 @@ declare_args() {
+   # Detect updates and notify the user for Google Chrome across all platforms.
+   # Chromium does not use an auto-updater.
+   enable_update_notifications = is_chrome_branded
++
++  # Focus Browser uses Sparkle for its GitHub Releases based macOS update
++  # channel. This is deliberately independent from ChromiumUpdater/Keystone.
++  enable_focus_macos_sparkle = false
++
++  # These values are only consumed when enable_focus_macos_sparkle is true.
++  focus_macos_sparkle_feed_url = ""
++  focus_macos_sparkle_public_key = ""
+ }
++
++assert(!enable_focus_macos_sparkle || is_mac,
++       "Focus Sparkle updates are supported on macOS only")
++assert(!enable_focus_macos_sparkle || !enable_updater,
++       "Sparkle and ChromiumUpdater must never be enabled together")
+--- a/chrome/browser/updater/updater.h
++++ b/chrome/browser/updater/updater.h
+@@ -20,6 +20,11 @@ class Version;
+ // updater (ChromiumUpdater) on Windows / macOS / Linux.
+ namespace updater {
+ 
++// Synthetic bridge error used when an update cycle ended normally but the
++// update was deferred. UpdateService::UpdateState has no deferred state, while
++// VersionUpdater needs to distinguish this outcome from a failed update.
++inline constexpr int kUpdateDeferredErrorCode = -10001;
++
+ // Triggers an on-demand update, reporting status updates to the callback. Must
+ // be called on a sequenced task runner. `callback` will be
+ // run on the same sequence with status updates.
+--- a/chrome/browser/updater/BUILD.gn
++++ b/chrome/browser/updater/BUILD.gn
+@@ -15,7 +15,16 @@ source_set("updater") {
+ 
+   friend = [ "//chrome/test:unit_tests" ]
+ 
+-  if (enable_updater && (is_mac || is_win)) {
++  if (enable_focus_macos_sparkle) {
++    assert(is_mac)
++    sources = [ "focus_sparkle_updater_mac.mm" ]
++    deps = [ "//base" ]
++    framework_dirs = [ "//third_party/sparkle" ]
++    frameworks = [
++      "AppKit.framework",
++      "Sparkle.framework",
++    ]
++  } else if (enable_updater && (is_mac || is_win)) {
+     sources = [
+       "browser_updater_client.cc",
+       "browser_updater_client.h",
+--- a/chrome/browser/ui/webui/help/version_updater_mac.mm
++++ b/chrome/browser/ui/webui/help/version_updater_mac.mm
+@@ -77,6 +77,9 @@ void UpdateStatus(VersionUpdater::StatusCallback status_callback,
+       break;
+     case updater::UpdateService::UpdateState::State::kUpdateError:
+       switch (update_state.error_code) {
++        case updater::kUpdateDeferredErrorCode:
++          status = VersionUpdater::Status::DEFERRED;
++          break;
+         case updater::GOOPDATE_E_APP_UPDATE_DISABLED_BY_POLICY:
+           status = VersionUpdater::Status::DISABLED_BY_ADMIN;
+           err_message =
+--- a/chrome/browser/upgrade_detector/installed_version_poller.cc
++++ b/chrome/browser/upgrade_detector/installed_version_poller.cc
+@@ -10,5 +10,6 @@
+ #include <vector>
+ 
++#include "base/check.h"
+ #include "base/command_line.h"
+ #include "base/functional/bind.h"
+ #include "base/location.h"
+@@ -18,6 +19,10 @@
+ #include "base/strings/string_number_conversions.h"
+ #include "base/task/sequenced_task_runner.h"
+ #include "base/task/thread_pool.h"
++#include "base/version.h"
++#include "build/build_config.h"
++#include "build/buildflag.h"
++#include "chrome/browser/buildflags.h"
+ #include "chrome/browser/upgrade_detector/build_state.h"
+ #include "chrome/browser/upgrade_detector/get_installed_version.h"
+ #include "chrome/browser/upgrade_detector/installed_version_monitor.h"
+@@ -34,5 +39,15 @@ constexpr uint32_t kSimulateUpgrade = 0x01;
+ constexpr uint32_t kSimulateCriticalUpdate = 0x02;
+ 
++base::Version RunningVersionForUpgradeDetection() {
++#if BUILDFLAG(IS_MAC) && BUILDFLAG(ENABLE_FOCUS_MACOS_SPARKLE)
++  base::Version focus_version{version_info::GetFocusVersionNumber()};
++  CHECK(focus_version.IsValid());
++  return focus_version;
++#else
++  return version_info::GetVersion();
++#endif
++}
++
+ // Returns a bitfield of the testing options that are selected via command line
+ // switches, or 0 if no options are selected.
+ uint32_t GetTestingOptions() {
+@@ -55,7 +71,8 @@ void SimulateGetInstalledVersion(uint32_t testing_options,
+                                  InstalledVersionCallback callback) {
+   DCHECK_NE(0U, testing_options);
+ 
+-  std::vector<uint32_t> components = version_info::GetVersion().components();
++  std::vector<uint32_t> components =
++      RunningVersionForUpgradeDetection().components();
+   components[3] += 2;
+ 
+   InstalledAndCriticalVersion result((base::Version(components)));
+@@ -177,7 +194,8 @@ void InstalledVersionPoller::OnInstalledVersion(
+   // Consider either an invalid version or a higher version a normal update.
+   BuildState::UpdateType update_type = BuildState::UpdateType::kNormalUpdate;
+   if (versions.installed_version.IsValid()) {
+-    switch (versions.installed_version.CompareTo(version_info::GetVersion())) {
++    switch (versions.installed_version.CompareTo(
++        RunningVersionForUpgradeDetection())) {
+       case -1:
+         update_type = BuildState::UpdateType::kEnterpriseRollback;
+         break;
+--- a/chrome/app/settings_strings.grdp
++++ b/chrome/app/settings_strings.grdp
+@@ -44,7 +44,10 @@
+       </message>
+     </if>
+ 
+     <!-- About Page -->
++    <message name="IDS_SETTINGS_ABOUT_UPGRADE_DEFERRED" desc="Status label: The browser update was postponed and automatic checks continue">
++      Update postponed. Focus Browser will continue checking automatically.
++    </message>
+     <message name="IDS_SETTINGS_ABOUT_PAGE_BROWSER_VERSION" desc="The text label describing the version of the browser, example: Version 57.0.2937.0-r123456 (Developer Build) unknown (64-bit). The suffix of the version (eg. '-r123456') exists only in limited cases.)">
+       Version <ph name="FOCUS_PRODUCT_VERSION">$1<ex>0.0.0.0</ex></ph> (<ph name="PRODUCT_CHANNEL">$4<ex>Developer Build</ex></ph>, <ph name="CHROMIUM_NAME">$7</ph> <ph name="PRODUCT_VERSION">$2<ex>15.0.865.0</ex></ph><ph name="PRODUCT_VERSION_SUFFIX">$3<ex>-r123456</ex></ph>) <ph name="PRODUCT_MODIFIER">$5</ph> <ph name="PRODUCT_VERSION_BITS">$6</ph>
+     </message>
+--- a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
++++ b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+@@ -315,7 +315,8 @@ void AddAboutStrings(content::WebUIDataSource* html_source, Profile* profile) {
+       {"aboutPrivacyPolicy", IDS_SETTINGS_ABOUT_PAGE_PRIVACY_POLICY},
+ #endif
+       {"aboutRelaunch", IDS_SETTINGS_ABOUT_PAGE_RELAUNCH},
+       {"aboutUpgradeCheckStarted", IDS_SETTINGS_ABOUT_UPGRADE_CHECK_STARTED},
++      {"aboutUpgradeDeferred", IDS_SETTINGS_ABOUT_UPGRADE_DEFERRED},
+       {"aboutUpgradeRelaunch", IDS_SETTINGS_UPGRADE_SUCCESSFUL_RELAUNCH},
+       {"aboutUpgradeUpdating", IDS_SETTINGS_UPGRADE_UPDATING},
+       {"aboutUpgradeUpdatingPercent", IDS_SETTINGS_UPGRADE_UPDATING_PERCENT},
+--- a/chrome/browser/resources/settings/about_page/about_page_browser_proxy.ts
++++ b/chrome/browser/resources/settings/about_page/about_page_browser_proxy.ts
+@@ -22,6 +22,7 @@ export enum UpdateStatus {
+   FAILED_DOWNLOAD = 'failed_download',
+   DISABLED = 'disabled',
+   DISABLED_BY_ADMIN = 'disabled_by_admin',
++  DEFERRED = 'deferred',
+   NEED_PERMISSION_TO_UPDATE = 'need_permission_to_update',
+ }
+ 
+--- a/chrome/browser/resources/settings/about_page/about_page.ts
++++ b/chrome/browser/resources/settings/about_page/about_page.ts
+@@ -256,5 +256,7 @@ export class SettingsAboutPageElement extends SettingsAboutPageElementBase
+       case UpdateStatus.NEARLY_UPDATED:
+         return this.i18nAdvanced('aboutUpgradeRelaunch');
++      case UpdateStatus.DEFERRED:
++        return this.i18nAdvanced('aboutUpgradeDeferred');
+       case UpdateStatus.UPDATED:
+         return this.i18nAdvanced('aboutUpgradeUpToDate');
+       case UpdateStatus.UPDATING:
+@@ -297,7 +299,9 @@ export class SettingsAboutPageElement extends SettingsAboutPageElementBase
+     switch (this.currentUpdateStatusEvent_!.status) {
+       case UpdateStatus.DISABLED_BY_ADMIN:
+         return 'cr20:domain';
++      case UpdateStatus.DEFERRED:
++        return 'cr:schedule';
+       case UpdateStatus.FAILED:
+         return 'cr:error';
+       case UpdateStatus.UPDATED:
+       case UpdateStatus.NEARLY_UPDATED:
+--- a/chrome/test/data/webui/settings/about_page_test.ts
++++ b/chrome/test/data/webui/settings/about_page_test.ts
+@@ -127,9 +127,16 @@ suite('AllBuilds', function() {
+     fireStatusChanged(UpdateStatus.NEARLY_UPDATED);
+     await assertSpinnerVisible(false);
+     assertEquals('cr:check-circle', icon.icon);
+     assertNotEquals(previousMessageText, statusMessageEl.textContent);
+     previousMessageText = statusMessageEl.textContent;
+ 
++    fireStatusChanged(UpdateStatus.DEFERRED);
++    await assertSpinnerVisible(false);
++    assertEquals('cr:schedule', icon.icon);
++    assertEquals(
++        loadTimeData.getString('aboutUpgradeDeferred'),
++        statusMessageEl.textContent.trim());
++
+     fireStatusChanged(UpdateStatus.DISABLED_BY_ADMIN);
+     await assertSpinnerVisible(false);
+     assertEquals('cr20:domain', icon.icon);
+--- /dev/null
++++ b/chrome/browser/updater/focus_sparkle_updater_mac.mm
+@@ -0,0 +1,415 @@
++// Copyright 2026 The Focus Authors
++// Use of this source code is governed by the GPL-3.0 license.
++
++#include "chrome/browser/updater/updater.h"
++
++#import <AppKit/AppKit.h>
++#import <Sparkle/Sparkle.h>
++
++#include <memory>
++#include <optional>
++#include <utility>
++#include <vector>
++
++#include "base/apple/bundle_locations.h"
++#include "base/apple/foundation_util.h"
++#include "base/check.h"
++#include "base/command_line.h"
++#include "base/files/file_path.h"
++#include "base/functional/bind.h"
++#include "base/functional/callback.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/no_destructor.h"
++#include "base/strings/sys_string_conversions.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/task/single_thread_task_runner.h"
++#include "base/task/task_traits.h"
++#include "base/threading/scoped_blocking_call.h"
++#include "base/version.h"
++#include "chrome/updater/mojom/updater_service.mojom.h"
++
++namespace {
++
++using UpdateCallback =
++    base::RepeatingCallback<void(const updater::mojom::UpdateState&)>;
++
++struct ManualUpdateRequest {
++  scoped_refptr<base::SequencedTaskRunner> origin_task_runner;
++  UpdateCallback callback;
++};
++
++std::unique_ptr<ManualUpdateRequest>& CurrentManualUpdateRequest() {
++  static base::NoDestructor<std::unique_ptr<ManualUpdateRequest>> request;
++  return *request;
++}
++
++void RunUpdateCallback(UpdateCallback callback,
++                       updater::mojom::UpdateState::State state,
++                       int error_code,
++                       int extra_code) {
++  updater::mojom::UpdateState update_state;
++  update_state.state = state;
++  update_state.error_code = error_code;
++  update_state.extra_code1 = extra_code;
++  callback.Run(update_state);
++}
++
++void ReportManualState(updater::mojom::UpdateState::State state,
++                       int error_code = 0,
++                       int extra_code = 0) {
++  if (!CurrentManualUpdateRequest()) {
++    return;
++  }
++  CurrentManualUpdateRequest()->origin_task_runner->PostTask(
++      FROM_HERE,
++      base::BindOnce(&RunUpdateCallback, CurrentManualUpdateRequest()->callback,
++                     state, error_code, extra_code));
++}
++
++void FinishManualUpdateRequest(updater::mojom::UpdateState::State state,
++                               int error_code = 0,
++                               int extra_code = 0) {
++  ReportManualState(state, error_code, extra_code);
++  CurrentManualUpdateRequest().reset();
++}
++
++bool IsNoUpdateError(NSError* error) {
++  return error != nil &&
++         [error.domain isEqualToString:SUSparkleErrorDomain] &&
++         error.code == SUNoUpdateError;
++}
++
++bool IsAuthorizationDeferredError(NSError* error) {
++  return error != nil &&
++         [error.domain isEqualToString:SUSparkleErrorDomain] &&
++         (error.code == SUInstallationAuthorizeLaterError ||
++          error.code == SUInstallationCanceledError);
++}
++
++}  // namespace
++
++@interface FocusSparkleUpdaterDelegate : NSObject <SPUUpdaterDelegate>
++@end
++
++@implementation FocusSparkleUpdaterDelegate
++
++- (void)updater:(SPUUpdater*)updater
++    didFindValidUpdate:(SUAppcastItem*)item {
++  ReportManualState(updater::mojom::UpdateState::State::kUpdateAvailable);
++}
++
++- (void)updater:(SPUUpdater*)updater
++    willDownloadUpdate:(SUAppcastItem*)item
++            withRequest:(NSMutableURLRequest*)request {
++  ReportManualState(updater::mojom::UpdateState::State::kDownloading);
++}
++
++- (void)updater:(SPUUpdater*)updater
++    didDownloadUpdate:(SUAppcastItem*)item {
++  ReportManualState(updater::mojom::UpdateState::State::kDecompressing);
++}
++
++- (void)updater:(SPUUpdater*)updater
++    willExtractUpdate:(SUAppcastItem*)item {
++  ReportManualState(updater::mojom::UpdateState::State::kDecompressing);
++}
++
++- (void)updater:(SPUUpdater*)updater
++    didExtractUpdate:(SUAppcastItem*)item {
++  ReportManualState(updater::mojom::UpdateState::State::kPatching);
++}
++
++- (void)updater:(SPUUpdater*)updater
++    willInstallUpdate:(SUAppcastItem*)item {
++  ReportManualState(updater::mojom::UpdateState::State::kInstalling);
++}
++
++- (BOOL)updater:(SPUUpdater*)updater
++    willInstallUpdateOnQuit:(SUAppcastItem*)item
++    immediateInstallationBlock:(void (^)(void))immediateInstallHandler {
++  FinishManualUpdateRequest(
++      updater::mojom::UpdateState::State::kUpdated);
++  return NO;
++}
++
++- (void)updater:(SPUUpdater*)updater
++    didFinishUpdateCycleForUpdateCheck:(SPUUpdateCheck)updateCheck
++                                 error:(NSError*)error {
++  if (!CurrentManualUpdateRequest()) {
++    return;
++  }
++  // Sparkle may focus an update from a background cycle instead of starting a
++  // new manual cycle. Whichever cycle the manual request attached to must
++  // therefore deliver its terminal result.
++  if (IsNoUpdateError(error)) {
++    FinishManualUpdateRequest(
++        updater::mojom::UpdateState::State::kNoUpdate);
++  } else if (IsAuthorizationDeferredError(error)) {
++    FinishManualUpdateRequest(
++        updater::mojom::UpdateState::State::kUpdateError,
++        updater::kUpdateDeferredErrorCode, static_cast<int>(error.code));
++  } else if (error != nil) {
++    FinishManualUpdateRequest(
++        updater::mojom::UpdateState::State::kUpdateError,
++        static_cast<int>(error.code));
++  } else {
++    // A nil Sparkle error means the cycle ended normally. If no earlier
++    // terminal callback completed this request, the user dismissed/skipped the
++    // update or deferred installation; do not leave About stuck on "Checking".
++    FinishManualUpdateRequest(
++        updater::mojom::UpdateState::State::kUpdateError,
++        updater::kUpdateDeferredErrorCode);
++  }
++}
++
++@end
++
++namespace updater {
++namespace {
++
++FocusSparkleUpdaterDelegate* g_delegate = nil;
++SPUStandardUpdaterController* g_controller = nil;
++id g_launch_observer = nil;
++bool g_application_did_finish_launching = false;
++
++using StartCompletion = base::OnceCallback<void(int)>;
++
++std::vector<StartCompletion>& PendingStartCompletions() {
++  static base::NoDestructor<std::vector<StartCompletion>> completions;
++  return *completions;
++}
++
++void AssertOnMainSequence() {
++  DCHECK(base::SingleThreadTaskRunner::GetMainThreadDefault()
++             ->RunsTasksInCurrentSequence());
++}
++
++int StartUpdaterOnMainSequence() {
++  AssertOnMainSequence();
++  if (g_controller != nil) {
++    return 0;
++  }
++
++  FocusSparkleUpdaterDelegate* delegate =
++      [[FocusSparkleUpdaterDelegate alloc] init];
++  SPUStandardUpdaterController* controller =
++      [[SPUStandardUpdaterController alloc]
++      initWithStartingUpdater:NO
++              updaterDelegate:delegate
++           userDriverDelegate:nil];
++  NSError* error = nil;
++  if (controller == nil || ![controller.updater startUpdater:&error]) {
++    const int error_code =
++        error != nil ? static_cast<int>(error.code) : 0;
++    return error_code != 0 ? error_code
++                           : static_cast<int>(SUInvalidUpdaterError);
++  }
++
++  g_delegate = delegate;
++  g_controller = controller;
++  return 0;
++}
++
++void CompletePendingStartsOnMainSequence(int error_code) {
++  AssertOnMainSequence();
++  std::vector<StartCompletion> completions =
++      std::move(PendingStartCompletions());
++  PendingStartCompletions().clear();
++  for (StartCompletion& completion : completions) {
++    std::move(completion).Run(error_code);
++  }
++}
++
++void StartUpdaterAndCompletePendingRequestsOnMainSequence() {
++  AssertOnMainSequence();
++  CompletePendingStartsOnMainSequence(StartUpdaterOnMainSequence());
++}
++
++bool ApplicationDidFinishLaunching() {
++  return g_application_did_finish_launching ||
++         (NSApp != nil && NSApp.isRunning);
++}
++
++void EnsureUpdaterStartedAfterLaunchOnMainSequence(StartCompletion completion) {
++  AssertOnMainSequence();
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("headless")) {
++    if (!completion.is_null()) {
++      std::move(completion).Run(
++          static_cast<int>(SUIncorrectAPIUsageError));
++    }
++    return;
++  }
++  if (!completion.is_null()) {
++    PendingStartCompletions().push_back(std::move(completion));
++  }
++
++  if (ApplicationDidFinishLaunching()) {
++    StartUpdaterAndCompletePendingRequestsOnMainSequence();
++    return;
++  }
++  if (g_launch_observer != nil) {
++    return;
++  }
++
++  g_launch_observer = [[NSNotificationCenter defaultCenter]
++      addObserverForName:NSApplicationDidFinishLaunchingNotification
++                  object:nil
++                   queue:[NSOperationQueue mainQueue]
++              usingBlock:^(NSNotification* /*notification*/) {
++                g_application_did_finish_launching = true;
++                id observer = g_launch_observer;
++                g_launch_observer = nil;
++                if (observer != nil) {
++                  [[NSNotificationCenter defaultCenter]
++                      removeObserver:observer];
++                }
++                StartUpdaterAndCompletePendingRequestsOnMainSequence();
++              }];
++}
++
++void BeginManualUpdateCheckOnMainSequence(
++    scoped_refptr<base::SequencedTaskRunner> origin_task_runner,
++    UpdateCallback callback,
++    int start_error_code) {
++  AssertOnMainSequence();
++  ManualUpdateRequest request{std::move(origin_task_runner),
++                              std::move(callback)};
++  if (start_error_code != 0) {
++    request.origin_task_runner->PostTask(
++        FROM_HERE,
++        base::BindOnce(&RunUpdateCallback, request.callback,
++                       mojom::UpdateState::State::kUpdateError,
++                       start_error_code, 0));
++    return;
++  }
++  if (CurrentManualUpdateRequest() || g_controller == nil ||
++      !g_controller.updater.canCheckForUpdates) {
++    request.origin_task_runner->PostTask(
++        FROM_HERE,
++        base::BindOnce(&RunUpdateCallback, request.callback,
++                       mojom::UpdateState::State::kUpdateError,
++                       static_cast<int>(SUIncorrectAPIUsageError), 0));
++    return;
++  }
++
++  CurrentManualUpdateRequest() =
++      std::make_unique<ManualUpdateRequest>(std::move(request));
++  ReportManualState(mojom::UpdateState::State::kCheckingForUpdates);
++  [g_controller.updater checkForUpdates];
++}
++
++void PostToMainSequence(base::OnceClosure task) {
++  base::SingleThreadTaskRunner::GetMainThreadDefault()->PostTask(
++      FROM_HERE, std::move(task));
++}
++
++}  // namespace
++
++base::Version CurrentlyInstalledVersion() {
++  // Read the outer bundle on every poll: Sparkle may already have replaced it
++  // while this older process is still running. The four-component
++  // CFBundleVersion is the same namespace used by sparkle:version.
++  base::ScopedBlockingCall blocks(FROM_HERE, base::BlockingType::WILL_BLOCK);
++  const base::FilePath plist_path = base::apple::OuterBundlePath()
++                                        .Append("Contents")
++                                        .Append("Info.plist");
++  NSDictionary* info_plist = [NSDictionary
++      dictionaryWithContentsOfFile:base::apple::FilePathToNSString(plist_path)];
++  NSString* version =
++      base::apple::ObjCCast<NSString>(info_plist[@"CFBundleVersion"]);
++  return version == nil
++             ? base::Version()
++             : base::Version(base::SysNSStringToUTF8(version));
++}
++
++void EnsureUpdater(base::TaskPriority /*priority*/,
++                   base::OnceClosure /*prompt*/,
++                   base::OnceClosure complete) {
++  scoped_refptr<base::SequencedTaskRunner> origin_task_runner =
++      base::SequencedTaskRunner::GetCurrentDefault();
++  PostToMainSequence(base::BindOnce(
++      [](scoped_refptr<base::SequencedTaskRunner> reply_task_runner,
++         base::OnceClosure completion) {
++        EnsureUpdaterStartedAfterLaunchOnMainSequence(base::BindOnce(
++            [](scoped_refptr<base::SequencedTaskRunner> task_runner,
++               base::OnceClosure reply, int /*error_code*/) {
++              task_runner->PostTask(FROM_HERE, std::move(reply));
++            },
++            std::move(reply_task_runner), std::move(completion)));
++      },
++      std::move(origin_task_runner), std::move(complete)));
++}
++
++void SetUpSystemUpdater() {}
++
++void CheckForUpdate(UpdateCallback callback) {
++  scoped_refptr<base::SequencedTaskRunner> origin_task_runner =
++      base::SequencedTaskRunner::GetCurrentDefault();
++  PostToMainSequence(base::BindOnce(
++      [](scoped_refptr<base::SequencedTaskRunner> task_runner,
++         UpdateCallback update_callback) {
++        EnsureUpdaterStartedAfterLaunchOnMainSequence(base::BindOnce(
++            &BeginManualUpdateCheckOnMainSequence, std::move(task_runner),
++            std::move(update_callback)));
++      },
++      std::move(origin_task_runner), std::move(callback)));
++}
++
++void SchedulePeriodicTasks(base::RepeatingClosure /*prompt*/) {
++  PostToMainSequence(base::BindOnce(
++      &EnsureUpdaterStartedAfterLaunchOnMainSequence, StartCompletion()));
++}
++
++std::optional<mojom::UpdateState> GetLastOnDemandUpdateState() {
++  return std::nullopt;
++}
++
++std::optional<mojom::AppState> GetLastKnownBrowserRegistration() {
++  return std::nullopt;
++}
++
++std::optional<mojom::AppState> GetLastKnownUpdaterRegistration() {
++  return std::nullopt;
++}
++
++void GetSystemUpdaterState(
++    base::OnceCallback<void(const mojom::UpdaterState&)> callback) {
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(std::move(callback), mojom::UpdaterState{}));
++}
++
++void GetUserUpdaterState(
++    base::OnceCallback<void(const mojom::UpdaterState&)> callback) {
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(std::move(callback), mojom::UpdaterState{}));
++}
++
++void GetSystemPoliciesJson(
++    base::OnceCallback<void(const std::string&)> callback) {
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(std::move(callback), std::string{}));
++}
++
++void GetUserPoliciesJson(
++    base::OnceCallback<void(const std::string&)> callback) {
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(std::move(callback), std::string{}));
++}
++
++void GetSystemUpdaterAppStates(
++    base::OnceCallback<void(const std::vector<mojom::AppState>&)> callback) {
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce(std::move(callback), std::vector<mojom::AppState>{}));
++}
++
++void GetUserUpdaterAppStates(
++    base::OnceCallback<void(const std::vector<mojom::AppState>&)> callback) {
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce(std::move(callback), std::vector<mojom::AppState>{}));
++}
++
++void SetActive() {}
++
++}  // namespace updater

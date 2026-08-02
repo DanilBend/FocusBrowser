@@ -6,7 +6,9 @@ macOS port. `focus_macos.py` itself is strictly read-only: it does
 **not** download Chromium, patch or copy into a Chromium tree, invoke
 Xcode/GN/Ninja, publish artifacts, sign code, notarize an app, or configure an
 updater. `generate_icns.py --generate` is a separate explicit small write that
-creates only the fixed local `.icns`; `package_local_dmg.py` is a separate
+creates only the fixed local `.icns`;
+`write_autoupdate_args.py --execute` is the separate no-overwrite writer for
+one canonical arm64 or x64 Auto `args.gn`; `package_local_dmg.py` is a separate
 fail-closed packager that accepts only an already-built, already-signed app and
 creates one new local DMG without overwriting. The Windows build remains
 outside this workflow.
@@ -14,7 +16,8 @@ outside this workflow.
 See `INCOGNITO.md` for the native private-mode contract and runtime acceptance
 matrix, `UNIVERSAL.md` for Intel/Apple Silicon and macOS 12+ compatibility,
 `LOCAL-DMG.md` for the local ad-hoc `.app`/DMG boundary, and
-`BUILD-PIPELINE.md` for the exact executable stage order.
+`BUILD-PIPELINE.md` for the exact executable stage order. `AUTOUPDATE.md`
+documents the separate Sparkle profile, signed appcast, and release order.
 The user-facing download status and manual-update instructions are kept in
 [`docs/MACOS.md`](../../docs/MACOS.md); that page does not announce a download
 until an accepted DMG is separately published.
@@ -84,9 +87,10 @@ a missing, tampered, or stale-tool marker before its first source-tree mutation.
   Branding, versioning, uBlock/Focus services and FocusBlock native-service
   patches have independent position and content-hash pins. An authoritative
   manifest hashes the complete bodies of all 321 planned common patches; a
-  59-item private-mode-sensitive subset is an additional diagnostic. The three
-  platform patches (FocusBlock, FocusYoutube, native Incognito safety) are
-  separately syntax-checked, hash-pinned, and ordered.
+  59-item private-mode-sensitive subset is an additional diagnostic. The five
+  platform patches (FocusBlock, FocusYoutube, native Incognito safety, macOS
+  icon precedence, and the opt-in Sparkle integration) are separately
+  syntax-checked, hash-pinned, and ordered.
 - The root Windows `patches/series`, `downloads.ini`, `flags.windows.gn`,
   `installer/`, and `resources/platform_resources.txt` are never part of this
   plan. The filtered overlay omits every prefix in `overlay-excludes.txt`; an
@@ -95,10 +99,13 @@ a missing, tampered, or stale-tool marker before its first source-tree mutation.
 - GN flags use a strict full-line typed assignment grammar; trailing text,
   inline comments on assignments, duplicate names, altered architecture, or
   altered macOS 12 release values fail closed for both profiles.
-- App updater integration, Developer ID signing, provisioning, notarization,
-  publishing, and App Store distribution are deliberately off.
-  This branch targets only local Intel, Apple Silicon, or universal `.app`
-  bundles and an optional local DMG.
+- The preserved manual profiles keep application updating off. The separate
+  `*.autoupdate.gn` profiles enable only the Focus-owned Sparkle 2.9.4 path,
+  pin the production HTTPS feed and Ed25519 public key, and continue to disable
+  ChromiumUpdater/Keystone. Developer ID signing, provisioning, notarization,
+  and App Store distribution remain off.
+  This branch targets Intel, Apple Silicon, or universal `.app` bundles and a
+  drag-and-drop DMG.
   A paid Apple Developer membership is not required: the eventual local binary
   may use ad-hoc signing. The DMG packager is implemented but cannot run until
   a real Chromium checkout produces the complete accepted app bundle. Required
@@ -136,6 +143,14 @@ python3 platform/macos/focus_macos.py plan \
   --source-root /absolute/path/to/chromium/src \
   --developer-dir /Users/danilbuga/Downloads/Xcode-beta.app/Contents/Developer \
   --min-free-gib 180 \
+  --json
+
+# Sparkle variant: same read-only plan, separate output directories.
+python3 platform/macos/focus_macos.py plan \
+  --source-root /absolute/path/to/chromium/src \
+  --developer-dir /Users/danilbuga/Downloads/Xcode-beta.app/Contents/Developer \
+  --min-free-gib 70 \
+  --update-mode autoupdate \
   --json
 ```
 
@@ -189,6 +204,11 @@ link before atomically placing the output and reporting its size and SHA-256.
 Omit `--require-universal` only for an explicitly architecture-specific local
 test image.
 
+For the updater-capable release profile, add `--require-autoupdate` and
+`--sparkle-source-root /absolute/path/to/sparkle-2.9.4`. That fail-closed mode
+repeats the complete universal Sparkle, provenance, and deep/strict codesign
+contract on the source app, staged copy, and read-only mounted DMG payload.
+
 ## Executable production pipeline
 
 The implemented order is:
@@ -199,8 +219,9 @@ The implemented order is:
 2. `build_pipeline.py bootstrap-tools`: clean-revision proof and Chromium hooks
    before any source pruning.
 3. `prepare_source.py`: offline cache extraction, file-only pruning, 321 common
-   plus three macOS patches, substitutions, RU/EN, filtered overlay, resources,
-   Focus 1.0.5.0 metadata, ICNS, deterministic onboarding `strings.ts`, and
+   plus five macOS patches, substitutions, RU/EN, filtered overlay, resources,
+   macOS-specific Focus 1.0.6.0 metadata, ICNS, deterministic onboarding
+   `strings.ts`, and
    both `args.gn` files. The exact ten-entry cache marker, pre-patch archive
    union, and final transformed dependency tree are bound into the receipt.
 4. `build_pipeline.py`: hash-pinned Xcode compatibility stages (including the

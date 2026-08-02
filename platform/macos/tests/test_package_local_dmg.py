@@ -29,6 +29,7 @@ class LocalDmgPackagerTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.app = self.make_app(self.root / package_local_dmg.APP_BUNDLE_NAME)
+        (self.root / "image.dmg").write_bytes(b"image fixture")
         self.commands = []
         self.staging = None
 
@@ -102,6 +103,12 @@ class LocalDmgPackagerTests(unittest.TestCase):
             return ""
 
         return run
+
+    def mounted_until_detach(self, _path):
+        return not any(
+            command[:2] == [package_local_dmg.HDIUTIL, "detach"]
+            for command in self.commands
+        )
 
     def publish_fixture(self, payload=b"accepted DMG payload"):
         private_root = self.root / "private-candidate"
@@ -264,6 +271,14 @@ class LocalDmgPackagerTests(unittest.TestCase):
         self.assertEqual("arm64\n", output)
         self.assertEqual(False, run.call_args.kwargs["shell"])
         self.assertEqual(subprocess.DEVNULL, run.call_args.kwargs["stdin"])
+        self.assertEqual(
+            package_local_dmg.TOOL_TIMEOUT_SECONDS,
+            run.call_args.kwargs["timeout"],
+        )
+        self.assertEqual(
+            "/usr/bin:/bin:/usr/sbin:/sbin",
+            run.call_args.kwargs["env"]["PATH"],
+        )
         with self.assertRaises(package_local_dmg.PackageError):
             package_local_dmg.checked_run("/usr/bin/lipo -archs app")
 
@@ -288,7 +303,13 @@ class LocalDmgPackagerTests(unittest.TestCase):
         observed = self.report(mounted_app, ["arm64", "x86_64"])
         with mock.patch.object(package_local_dmg, "checked_run", side_effect=run), mock.patch.object(
             package_local_dmg, "validate_app", return_value=observed
-        ) as validate, mock.patch("os.path.ismount", return_value=True), mock.patch(
+        ) as validate, mock.patch(
+            "os.path.ismount",
+            side_effect=lambda _path: not any(
+                command[:2] == [package_local_dmg.HDIUTIL, "detach"]
+                for command in commands
+            ),
+        ), mock.patch(
             "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
         ):
             result = package_local_dmg.inspect_mounted_image(
@@ -311,7 +332,11 @@ class LocalDmgPackagerTests(unittest.TestCase):
             return ""
 
         with mock.patch.object(package_local_dmg, "checked_run", side_effect=run), mock.patch(
-            "os.path.ismount", return_value=True
+            "os.path.ismount",
+            side_effect=lambda _path: not any(
+                command[:2] == [package_local_dmg.HDIUTIL, "detach"]
+                for command in commands
+            ),
         ), mock.patch("os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)):
             with self.assertRaisesRegex(package_local_dmg.PackageError, "Applications symlink"):
                 package_local_dmg.inspect_mounted_image(
@@ -331,7 +356,11 @@ class LocalDmgPackagerTests(unittest.TestCase):
             return ""
 
         with mock.patch.object(package_local_dmg, "checked_run", side_effect=run), mock.patch(
-            "os.path.ismount", return_value=True
+            "os.path.ismount",
+            side_effect=lambda _path: not any(
+                command[:2] == [package_local_dmg.HDIUTIL, "detach"]
+                for command in commands
+            ),
         ), mock.patch("os.statvfs", return_value=SimpleNamespace(f_flag=0)):
             with self.assertRaisesRegex(package_local_dmg.PackageError, "not read-only"):
                 package_local_dmg.inspect_mounted_image(
@@ -339,12 +368,207 @@ class LocalDmgPackagerTests(unittest.TestCase):
                 )
         self.assertEqual("detach", commands[-1][1])
 
+    def test_inspection_forces_failed_normal_detach_and_fails_closed(self):
+        mountpoint = self.root / "forced-mount"
+        mountpoint.mkdir()
+        mounted_app = self.make_app(mountpoint / package_local_dmg.APP_BUNDLE_NAME)
+        (mountpoint / "Applications").symlink_to("/Applications")
+        commands = []
+        mounted = True
+
+        def run(command):
+            nonlocal mounted
+            commands.append(list(command))
+            if command[:2] == [package_local_dmg.HDIUTIL, "detach"]:
+                if "-force" not in command:
+                    raise package_local_dmg.PackageError("normal detach failed")
+                mounted = False
+            return ""
+
+        with mock.patch.object(
+            package_local_dmg, "checked_run", side_effect=run
+        ), mock.patch.object(
+            package_local_dmg,
+            "validate_app",
+            return_value=self.report(mounted_app),
+        ), mock.patch(
+            "os.path.ismount", side_effect=lambda _path: mounted
+        ), mock.patch(
+            "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
+        ), self.assertRaisesRegex(
+            package_local_dmg.PackageError, "required forced detach"
+        ):
+            package_local_dmg.inspect_mounted_image(
+                self.root / "image.dmg",
+                mountpoint,
+                self.report(self.app),
+            )
+        self.assertFalse(mounted)
+        self.assertIn("-force", commands[-1])
+
+    def test_unprovable_detach_retains_mount_root(self):
+        mountpoint = self.root / "retained-mount/mounted"
+        mountpoint.mkdir(parents=True)
+        mounted_app = self.make_app(mountpoint / package_local_dmg.APP_BUNDLE_NAME)
+        (mountpoint / "Applications").symlink_to("/Applications")
+
+        def run(command):
+            if command[:2] == [package_local_dmg.HDIUTIL, "detach"]:
+                raise package_local_dmg.PackageError("detach failed")
+            return ""
+
+        with mock.patch.object(
+            package_local_dmg, "checked_run", side_effect=run
+        ), mock.patch.object(
+            package_local_dmg,
+            "validate_app",
+            return_value=self.report(mounted_app),
+        ), mock.patch(
+            "os.path.ismount", return_value=True
+        ), mock.patch(
+            "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
+        ), self.assertRaisesRegex(
+            package_local_dmg.RetainedMountError, "retained mount root"
+        ) as raised:
+            package_local_dmg.inspect_mounted_image(
+                self.root / "image.dmg",
+                mountpoint,
+                self.report(self.app),
+            )
+        self.assertEqual(str(mountpoint.parent), raised.exception.retained_mount_root)
+
+    def test_interrupt_with_unprovable_detach_retains_mount_root(self):
+        mountpoint = self.root / "interrupted-mount/mounted"
+        mountpoint.mkdir(parents=True)
+        mounted_app = self.make_app(
+            mountpoint / package_local_dmg.APP_BUNDLE_NAME
+        )
+        (mountpoint / "Applications").symlink_to("/Applications")
+
+        def run(command):
+            if command[:2] == [package_local_dmg.HDIUTIL, "detach"]:
+                raise package_local_dmg.PackageError("detach failed")
+            return ""
+
+        with mock.patch.object(
+            package_local_dmg, "checked_run", side_effect=run
+        ), mock.patch.object(
+            package_local_dmg,
+            "validate_app",
+            side_effect=KeyboardInterrupt("synthetic interruption"),
+        ), mock.patch(
+            "os.path.ismount", return_value=True
+        ), mock.patch(
+            "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
+        ), self.assertRaisesRegex(
+            package_local_dmg.RetainedMountError,
+            "original validation error: KeyboardInterrupt",
+        ) as raised:
+            package_local_dmg.inspect_mounted_image(
+                self.root / "image.dmg",
+                mountpoint,
+                self.report(mounted_app),
+            )
+        self.assertEqual(str(mountpoint.parent), raised.exception.retained_mount_root)
+
+    def test_private_inspection_pin_unlink_failure_retains_typed_mount_root(self):
+        mountpoint = self.root / "retained-pin/mounted"
+        mountpoint.mkdir(parents=True)
+        mounted_app = self.make_app(
+            mountpoint / package_local_dmg.APP_BUNDLE_NAME
+        )
+        (mountpoint / "Applications").symlink_to("/Applications")
+        commands = []
+        real_unlink = Path.unlink
+
+        def run(command):
+            commands.append(list(command))
+            return ""
+
+        def reject_private_pin(path, *args, **kwargs):
+            if path.name.startswith(".focus-image-inspect-"):
+                raise OSError("synthetic private pin unlink failure")
+            return real_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(
+            package_local_dmg, "checked_run", side_effect=run
+        ), mock.patch.object(
+            package_local_dmg,
+            "validate_app",
+            return_value=self.report(mounted_app),
+        ), mock.patch(
+            "os.path.ismount",
+            side_effect=lambda _path: not any(
+                command[:2] == [package_local_dmg.HDIUTIL, "detach"]
+                for command in commands
+            ),
+        ), mock.patch(
+            "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
+        ), mock.patch.object(
+            Path, "unlink", new=reject_private_pin
+        ), self.assertRaisesRegex(
+            package_local_dmg.RetainedMountError,
+            "inspection link could not be removed",
+        ) as raised:
+            package_local_dmg.inspect_mounted_image(
+                self.root / "image.dmg",
+                mountpoint,
+                self.report(self.app),
+            )
+
+        self.assertEqual(str(mountpoint.parent), raised.exception.retained_mount_root)
+        pins = list(mountpoint.parent.glob(".focus-image-inspect-*.dmg"))
+        self.assertEqual(1, len(pins))
+        self.assertEqual((self.root / "image.dmg").read_bytes(), pins[0].read_bytes())
+        real_unlink(pins[0])
+
+    def test_retained_mount_error_stays_typed_when_detach_also_fails(self):
+        mountpoint = self.root / "typed-retention/mounted"
+        mountpoint.mkdir(parents=True)
+        mounted_app = self.make_app(
+            mountpoint / package_local_dmg.APP_BUNDLE_NAME
+        )
+        (mountpoint / "Applications").symlink_to("/Applications")
+        original_retained_root = self.root / "original-retained-state"
+
+        def run(command):
+            if command[:2] == [package_local_dmg.HDIUTIL, "detach"]:
+                raise package_local_dmg.PackageError("synthetic detach failure")
+            return ""
+
+        with mock.patch.object(
+            package_local_dmg, "checked_run", side_effect=run
+        ), mock.patch.object(
+            package_local_dmg,
+            "validate_app",
+            side_effect=package_local_dmg.RetainedMountError(
+                "synthetic retained validation",
+                original_retained_root,
+            ),
+        ), mock.patch(
+            "os.path.ismount", side_effect=(True, False, False)
+        ), mock.patch(
+            "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
+        ), self.assertRaisesRegex(
+            package_local_dmg.RetainedMountError,
+            "additionally failed to detach",
+        ) as raised:
+            package_local_dmg.inspect_mounted_image(
+                self.root / "image.dmg",
+                mountpoint,
+                self.report(mounted_app),
+            )
+
+        self.assertEqual(
+            str(original_retained_root), raised.exception.retained_mount_root
+        )
+
     def test_complete_package_is_verified_then_atomically_placed(self):
         output = self.root / "FocusBrowser-local.dmg"
         runner = self.command_runner()
         with mock.patch.object(package_local_dmg, "require_system_tools"), mock.patch.object(
             package_local_dmg, "checked_run", side_effect=runner
-        ), mock.patch("os.path.ismount", return_value=True), mock.patch(
+        ), mock.patch("os.path.ismount", side_effect=self.mounted_until_detach), mock.patch(
             "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
         ):
             report = package_local_dmg.package_local_dmg(self.app, output)
@@ -371,13 +595,23 @@ class LocalDmgPackagerTests(unittest.TestCase):
         verbs = [command[1] for command in self.commands if command[0] == package_local_dmg.HDIUTIL]
         self.assertEqual(["create", "verify", "attach", "detach"], verbs)
 
+    def test_same_app_requires_exact_descriptor_tree_equality(self):
+        expected = self.report(self.app)
+        observed = self.report(self.app)
+        expected["exact_tree"] = {"sha256": "a" * 64, "entries": 3}
+        observed["exact_tree"] = {"sha256": "b" * 64, "entries": 3}
+        with self.assertRaisesRegex(
+            package_local_dmg.PackageError, "exact descriptor-pinned tree changed"
+        ):
+            package_local_dmg._require_same_app(expected, observed, "staged")
+
     def test_default_package_allows_thin_app(self):
         output = self.root / "thin-intel.dmg"
         with mock.patch.object(package_local_dmg, "require_system_tools"), mock.patch.object(
             package_local_dmg,
             "checked_run",
             side_effect=self.command_runner(architectures="x86_64"),
-        ), mock.patch("os.path.ismount", return_value=True), mock.patch(
+        ), mock.patch("os.path.ismount", side_effect=self.mounted_until_detach), mock.patch(
             "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
         ):
             report = package_local_dmg.package_local_dmg(self.app, output)
@@ -407,7 +641,7 @@ class LocalDmgPackagerTests(unittest.TestCase):
             package_local_dmg,
             "checked_run",
             side_effect=self.command_runner(architectures="arm64 x86_64"),
-        ), mock.patch("os.path.ismount", return_value=True), mock.patch(
+        ), mock.patch("os.path.ismount", side_effect=self.mounted_until_detach), mock.patch(
             "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
         ):
             report = package_local_dmg.package_local_dmg(
@@ -418,6 +652,180 @@ class LocalDmgPackagerTests(unittest.TestCase):
         self.assertEqual(["arm64", "x86_64"], report["architectures"])
         self.assertTrue(report["require_universal"])
         self.assertTrue(output.is_file())
+
+    def test_require_autoupdate_validates_source_staged_and_mounted(self):
+        output = self.root / "autoupdate.dmg"
+        sparkle_root = self.root / "sparkle-source"
+        sparkle_root.mkdir()
+
+        def contract(app, **kwargs):
+            self.assertEqual(sparkle_root, kwargs["sparkle_source_root"])
+            return {"passed": True, "app": str(app)}
+
+        with mock.patch.object(
+            package_local_dmg, "require_system_tools"
+        ), mock.patch.object(
+            package_local_dmg,
+            "checked_run",
+            side_effect=self.command_runner(architectures="arm64 x86_64"),
+        ), mock.patch(
+            "os.path.ismount", side_effect=self.mounted_until_detach
+        ), mock.patch(
+            "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
+        ), mock.patch.object(
+            package_local_dmg.autoupdate_contract,
+            "validate_release_bundle",
+            side_effect=contract,
+        ) as validate_contract:
+            report = package_local_dmg.package_local_dmg(
+                self.app,
+                output,
+                require_autoupdate=True,
+                sparkle_source_root=sparkle_root,
+            )
+
+        self.assertEqual(3, validate_contract.call_count)
+        validated_apps = [Path(call.args[0]) for call in validate_contract.call_args_list]
+        self.assertEqual(self.app.resolve(), validated_apps[0])
+        self.assertIn("staging", validated_apps[1].parts)
+        self.assertIn("mounted", validated_apps[2].parts)
+        self.assertTrue(report["require_autoupdate"])
+        self.assertEqual(str(sparkle_root.resolve()), report["sparkle_source_root"])
+        self.assertTrue(output.is_file())
+
+    def test_require_autoupdate_source_failure_stops_before_staging(self):
+        output = self.root / "autoupdate-source-failed.dmg"
+        with mock.patch.object(
+            package_local_dmg, "require_system_tools"
+        ), mock.patch.object(
+            package_local_dmg,
+            "checked_run",
+            side_effect=self.command_runner(architectures="arm64 x86_64"),
+        ), mock.patch.object(
+            package_local_dmg.autoupdate_contract,
+            "validate_release_bundle",
+            side_effect=package_local_dmg.autoupdate_contract.AutoupdateContractError(
+                "source rejected"
+            ),
+        ), self.assertRaisesRegex(
+            package_local_dmg.PackageError, "source rejected"
+        ):
+            package_local_dmg.package_local_dmg(
+                self.app,
+                output,
+                require_autoupdate=True,
+                sparkle_source_root=self.root / "sparkle-source",
+            )
+        self.assertFalse(output.exists())
+        self.assertFalse(any(command[0] == package_local_dmg.DITTO for command in self.commands))
+
+    def test_require_autoupdate_staged_failure_stops_before_dmg_creation(self):
+        output = self.root / "autoupdate-staged-failed.dmg"
+        results = [
+            {"passed": True},
+            package_local_dmg.autoupdate_contract.AutoupdateContractError(
+                "staged rejected"
+            ),
+        ]
+
+        def contract(_app, **_kwargs):
+            result = results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        with mock.patch.object(
+            package_local_dmg, "require_system_tools"
+        ), mock.patch.object(
+            package_local_dmg,
+            "checked_run",
+            side_effect=self.command_runner(architectures="arm64 x86_64"),
+        ), mock.patch.object(
+            package_local_dmg.autoupdate_contract,
+            "validate_release_bundle",
+            side_effect=contract,
+        ), self.assertRaisesRegex(
+            package_local_dmg.PackageError, "staged rejected"
+        ):
+            package_local_dmg.package_local_dmg(
+                self.app,
+                output,
+                require_autoupdate=True,
+                sparkle_source_root=self.root / "sparkle-source",
+            )
+        self.assertFalse(output.exists())
+        self.assertFalse(
+            any(
+                command[:2] == [package_local_dmg.HDIUTIL, "create"]
+                for command in self.commands
+            )
+        )
+
+    def test_require_autoupdate_mounted_failure_always_detaches(self):
+        output = self.root / "autoupdate-mounted-failed.dmg"
+        call_count = 0
+
+        def contract(_app, **_kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 3:
+                raise package_local_dmg.autoupdate_contract.AutoupdateContractError(
+                    "mounted rejected"
+                )
+            return {"passed": True}
+
+        with mock.patch.object(
+            package_local_dmg, "require_system_tools"
+        ), mock.patch.object(
+            package_local_dmg,
+            "checked_run",
+            side_effect=self.command_runner(architectures="arm64 x86_64"),
+        ), mock.patch(
+            "os.path.ismount", side_effect=self.mounted_until_detach
+        ), mock.patch(
+            "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
+        ), mock.patch.object(
+            package_local_dmg.autoupdate_contract,
+            "validate_release_bundle",
+            side_effect=contract,
+        ), self.assertRaisesRegex(
+            package_local_dmg.PackageError, "mounted rejected"
+        ):
+            package_local_dmg.package_local_dmg(
+                self.app,
+                output,
+                require_autoupdate=True,
+                sparkle_source_root=self.root / "sparkle-source",
+            )
+        self.assertEqual(3, call_count)
+        self.assertFalse(output.exists())
+        self.assertEqual(
+            [package_local_dmg.HDIUTIL, "detach"], self.commands[-1][:2]
+        )
+
+    def test_sparkle_source_root_cannot_be_silently_ignored(self):
+        with mock.patch.object(package_local_dmg, "require_system_tools"), \
+                self.assertRaisesRegex(
+                    package_local_dmg.PackageError,
+                    "requires --require-autoupdate",
+                ):
+            package_local_dmg.package_local_dmg(
+                self.app,
+                self.root / "ignored-source.dmg",
+                sparkle_source_root=self.root / "sparkle-source",
+            )
+
+    def test_require_autoupdate_cannot_omit_sparkle_provenance(self):
+        with mock.patch.object(package_local_dmg, "require_system_tools"), \
+                self.assertRaisesRegex(
+                    package_local_dmg.PackageError,
+                    "requires --sparkle-source-root",
+                ):
+            package_local_dmg.package_local_dmg(
+                self.app,
+                self.root / "missing-provenance.dmg",
+                require_autoupdate=True,
+            )
 
     def test_verify_failure_leaves_no_output(self):
         output = self.root / "failed.dmg"
@@ -442,7 +850,7 @@ class LocalDmgPackagerTests(unittest.TestCase):
         output = self.root / "bad-mounted.dmg"
         with mock.patch.object(package_local_dmg, "require_system_tools"), mock.patch.object(
             package_local_dmg, "checked_run", side_effect=self.command_runner(bad_link=True)
-        ), mock.patch("os.path.ismount", return_value=True), mock.patch(
+        ), mock.patch("os.path.ismount", side_effect=self.mounted_until_detach), mock.patch(
             "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
         ):
             with self.assertRaisesRegex(package_local_dmg.PackageError, "unexpected target"):
@@ -452,14 +860,18 @@ class LocalDmgPackagerTests(unittest.TestCase):
 
     def test_atomic_output_race_never_overwrites_or_removes_rival(self):
         output = self.root / "race.dmg"
+        real_link = os.link
 
-        def rival_link(*_args, **_kwargs):
-            output.write_bytes(b"rival")
-            raise FileExistsError(str(output))
+        def rival_link(source, destination, *args, **kwargs):
+            destination_name = kwargs.get("dst_dir_fd") and destination or str(destination)
+            if Path(destination_name).name == output.name:
+                output.write_bytes(b"rival")
+                raise FileExistsError(str(output))
+            return real_link(source, destination, *args, **kwargs)
 
         with mock.patch.object(package_local_dmg, "require_system_tools"), mock.patch.object(
             package_local_dmg, "checked_run", side_effect=self.command_runner()
-        ), mock.patch("os.path.ismount", return_value=True), mock.patch(
+        ), mock.patch("os.path.ismount", side_effect=self.mounted_until_detach), mock.patch(
             "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
         ), mock.patch("os.link", side_effect=rival_link):
             with self.assertRaisesRegex(package_local_dmg.PackageError, "overwrite"):
@@ -718,7 +1130,7 @@ class LocalDmgPackagerTests(unittest.TestCase):
 
         with mock.patch.object(package_local_dmg, "require_system_tools"), mock.patch.object(
             package_local_dmg, "checked_run", side_effect=runner
-        ), mock.patch("os.path.ismount", return_value=True), mock.patch(
+        ), mock.patch("os.path.ismount", side_effect=self.mounted_until_detach), mock.patch(
             "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
         ), mock.patch.object(
             package_local_dmg,
@@ -759,7 +1171,7 @@ class LocalDmgPackagerTests(unittest.TestCase):
 
         with mock.patch.object(package_local_dmg, "require_system_tools"), mock.patch.object(
             package_local_dmg, "checked_run", side_effect=runner
-        ), mock.patch("os.path.ismount", return_value=True), mock.patch(
+        ), mock.patch("os.path.ismount", side_effect=self.mounted_until_detach), mock.patch(
             "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
         ), mock.patch.object(
             package_local_dmg,
@@ -798,7 +1210,7 @@ class LocalDmgPackagerTests(unittest.TestCase):
 
         with mock.patch.object(package_local_dmg, "require_system_tools"), mock.patch.object(
             package_local_dmg, "checked_run", side_effect=runner
-        ), mock.patch("os.path.ismount", return_value=True), mock.patch(
+        ), mock.patch("os.path.ismount", side_effect=self.mounted_until_detach), mock.patch(
             "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
         ), mock.patch.object(
             package_local_dmg,
@@ -851,7 +1263,7 @@ class LocalDmgPackagerTests(unittest.TestCase):
 
         with mock.patch.object(package_local_dmg, "require_system_tools"), mock.patch.object(
             package_local_dmg, "checked_run", side_effect=runner
-        ), mock.patch("os.path.ismount", return_value=True), mock.patch(
+        ), mock.patch("os.path.ismount", side_effect=self.mounted_until_detach), mock.patch(
             "os.statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)
         ), mock.patch.object(
             package_local_dmg,
@@ -930,6 +1342,33 @@ class LocalDmgPackagerTests(unittest.TestCase):
             str(self.app),
             report["output"],
             require_universal=True,
+            require_autoupdate=False,
+            sparkle_source_root=None,
+        )
+
+        stdout = io.StringIO()
+        with mock.patch.object(
+            package_local_dmg, "package_local_dmg", return_value=report
+        ) as packager, redirect_stdout(stdout):
+            result = package_local_dmg.main(
+                [
+                    "--app",
+                    str(self.app),
+                    "--output",
+                    report["output"],
+                    "--require-autoupdate",
+                    "--sparkle-source-root",
+                    str(self.root / "sparkle-source"),
+                    "--json",
+                ]
+            )
+        self.assertEqual(0, result)
+        packager.assert_called_once_with(
+            str(self.app),
+            report["output"],
+            require_universal=False,
+            require_autoupdate=True,
+            sparkle_source_root=str(self.root / "sparkle-source"),
         )
 
         stderr = io.StringIO()

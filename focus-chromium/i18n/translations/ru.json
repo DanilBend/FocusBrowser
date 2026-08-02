@@ -935,6 +935,11 @@
     "message": "Проверять подписанные обновления браузера и устанавливать их автоматически"
   },
   {
+    "name": "IDS_SETTINGS_ABOUT_UPGRADE_DEFERRED",
+    "source": "Update postponed. Focus Browser will continue checking automatically.",
+    "message": "Обновление отложено. Focus Browser продолжит автоматически проверять обновления."
+  },
+  {
     "name": "IDS_SETTINGS_FOCUS_MOTION",
     "source": "Smooth interface animations",
     "message": "Плавные анимации интерфейса"

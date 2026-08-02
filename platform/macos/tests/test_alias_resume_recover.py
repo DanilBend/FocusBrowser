@@ -1,10 +1,15 @@
 import copy
 import os
 import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+
+PLATFORM_DIR = Path(__file__).resolve().parent.parent
+if str(PLATFORM_DIR) not in sys.path:
+    sys.path.insert(0, str(PLATFORM_DIR))
 
 import alias_resume_recover as recover
 

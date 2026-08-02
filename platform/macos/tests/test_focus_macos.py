@@ -277,12 +277,16 @@ class FocusMacPlannerTests(unittest.TestCase):
 
     def test_i18n_catalogs_have_semantic_ru_en_contracts(self):
         report = focus_macos.validate_i18n_catalogs()
-        self.assertEqual({"source": 267, "en-GB": 165, "ru": 189}, report["catalog_counts"])
+        self.assertEqual({"source": 270, "en-GB": 165, "ru": 190}, report["catalog_counts"])
         self.assertTrue(report["placeholder_contracts"])
         self.assertEqual([], report["source_reference_gaps"]["en-GB"])
-        self.assertEqual(2, len(report["source_reference_gaps"]["ru"]))
+        self.assertEqual([], report["source_reference_gaps"]["ru"])
         self.assertIn(
             "IDS_SETTINGS_FOCUS_SERVICES_TOGGLE",
+            report["required_message_contracts"],
+        )
+        self.assertIn(
+            "IDS_SETTINGS_ABOUT_UPGRADE_DEFERRED",
             report["required_message_contracts"],
         )
 
@@ -343,11 +347,134 @@ class FocusMacPlannerTests(unittest.TestCase):
                 "patches/focus/windows/focusblock-location-bar-shield.patch",
                 "patches/focus/windows/focusyoutube-native-popup.patch",
                 "platform/macos/patches/native-incognito-contract.patch",
+                "platform/macos/patches/focus-macos-icon-precedence.patch",
+                "platform/macos/patches/focus-sparkle-autoupdate.patch",
             ],
             [item["path"] for item in patches],
         )
-        self.assertEqual([1, 2, 3], [item["order"] for item in patches])
-        self.assertEqual(4, patches[-1]["target_count"])
+        self.assertEqual([1, 2, 3, 4, 5], [item["order"] for item in patches])
+        self.assertEqual(3, patches[-2]["target_count"])
+        self.assertEqual(14, patches[-1]["target_count"])
+
+    def test_sparkle_manual_cycle_has_terminal_deferred_contract(self):
+        patch = (
+            PLATFORM_DIR / "patches" / "focus-sparkle-autoupdate.patch"
+        ).read_text(encoding="utf-8")
+        for required in (
+            "+++ b/chrome/browser/updater/updater.h",
+            "inline constexpr int kUpdateDeferredErrorCode = -10001;",
+            "SUInstallationAuthorizeLaterError",
+            "SUInstallationCanceledError",
+            "IsAuthorizationDeferredError(error)",
+            "updater::kUpdateDeferredErrorCode, static_cast<int>(error.code)",
+            "+++ b/chrome/browser/ui/webui/help/version_updater_mac.mm",
+            "status = VersionUpdater::Status::DEFERRED;",
+            "+++ b/chrome/app/settings_strings.grdp",
+            "IDS_SETTINGS_ABOUT_UPGRADE_DEFERRED",
+            "+++ b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc",
+            '{"aboutUpgradeDeferred", IDS_SETTINGS_ABOUT_UPGRADE_DEFERRED}',
+            "+++ b/chrome/browser/resources/settings/about_page/about_page_browser_proxy.ts",
+            "DEFERRED = 'deferred'",
+            "+++ b/chrome/browser/resources/settings/about_page/about_page.ts",
+            "return this.i18nAdvanced('aboutUpgradeDeferred')",
+            "return 'cr:schedule'",
+            "+++ b/chrome/test/data/webui/settings/about_page_test.ts",
+            "loadTimeData.getString('aboutUpgradeDeferred')",
+            "the user dismissed/skipped the",
+            "Whichever cycle the manual request attached to must",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, patch)
+        self.assertNotIn("updateCheck != SPUUpdateCheckUpdates", patch)
+
+    def test_sparkle_upgrade_detection_uses_one_focus_version_namespace(self):
+        patch = (
+            PLATFORM_DIR / "patches" / "focus-sparkle-autoupdate.patch"
+        ).read_text(encoding="utf-8")
+        implementation = patch.split(
+            "+base::Version CurrentlyInstalledVersion() {", 1
+        )[1].split("+}", 1)[0]
+        self.assertIn("base::apple::OuterBundlePath()", implementation)
+        self.assertIn('info_plist[@"CFBundleVersion"]', implementation)
+        self.assertIn("version == nil", implementation)
+        self.assertNotIn("CFBundleShortVersionString", implementation)
+
+        poller = patch.split(
+            "+++ b/chrome/browser/upgrade_detector/installed_version_poller.cc",
+            1,
+        )[1].split("--- a/chrome/app/settings_strings.grdp", 1)[0]
+        self.assertIn(
+            "#if BUILDFLAG(IS_MAC) && "
+            "BUILDFLAG(ENABLE_FOCUS_MACOS_SPARKLE)",
+            poller,
+        )
+        self.assertIn(
+            "base::Version focus_version{version_info::GetFocusVersionNumber()};",
+            poller,
+        )
+        self.assertNotIn(
+            "base::Version focus_version(version_info::GetFocusVersionNumber());",
+            poller,
+        )
+        self.assertIn("return version_info::GetVersion();", poller)
+        self.assertIn(
+            "RunningVersionForUpgradeDetection().components()", poller
+        )
+        self.assertIn(
+            "RunningVersionForUpgradeDetection()))", poller
+        )
+
+    def test_sparkle_updater_target_declares_only_its_direct_base_dependency(self):
+        patch = (
+            PLATFORM_DIR / "patches" / "focus-sparkle-autoupdate.patch"
+        ).read_text(encoding="utf-8")
+        target = patch.split(
+            "+++ b/chrome/browser/updater/BUILD.gn", 1
+        )[1].split(
+            "--- a/chrome/browser/ui/webui/help/version_updater_mac.mm", 1
+        )[0]
+        self.assertIn('+    deps = [ "//base" ]', target)
+        self.assertNotIn("//components/version_info", target)
+        self.assertNotIn("//chrome/browser:buildflags", target)
+
+    def test_sparkle_update_strings_have_english_source_and_russian_translation(self):
+        source = json.loads(
+            (focus_macos.REPO_ROOT / "focus-chromium/i18n/source.gen.json")
+            .read_text(encoding="utf-8")
+        )
+        russian = json.loads(
+            (focus_macos.REPO_ROOT / "focus-chromium/i18n/translations/ru.json")
+            .read_text(encoding="utf-8")
+        )
+        source_keys = {(item["name"], item["message"]) for item in source}
+        russian_by_key = {
+            (item["name"], item["source"]): item["message"]
+            for item in russian
+            if item
+        }
+        expected_sources = {
+            (
+                "IDS_SETTINGS_FOCUS_BROWSER_UPDATES",
+                "Automatically update Focus Browser",
+            ),
+            (
+                "IDS_SETTINGS_FOCUS_BROWSER_UPDATES_DESCRIPTION",
+                "Check for signed browser updates and install them automatically",
+            ),
+            (
+                "IDS_SETTINGS_ABOUT_UPGRADE_DEFERRED",
+                "Update postponed. Focus Browser will continue checking automatically.",
+            ),
+        }
+        self.assertTrue(expected_sources.issubset(source_keys))
+        deferred_key = (
+            "IDS_SETTINGS_ABOUT_UPGRADE_DEFERRED",
+            "Update postponed. Focus Browser will continue checking automatically.",
+        )
+        self.assertEqual(
+            "Обновление отложено. Focus Browser продолжит автоматически проверять обновления.",
+            russian_by_key[deferred_key],
+        )
 
     def test_incognito_contract_covers_native_ui_services_and_honest_copy(self):
         report = focus_macos.validate_incognito_repository_contract()
@@ -891,6 +1018,66 @@ class FocusMacPlannerTests(unittest.TestCase):
         self.assertFalse(universal["signing_executed"])
         self.assertFalse(universal["runtime_verified"])
 
+    def test_autoupdate_plan_uses_both_seal_targets_and_strict_release_merge(self):
+        before = sorted(
+            (path.relative_to(self.source_root).as_posix(), path.stat().st_mtime_ns)
+            for path in self.source_root.rglob("*")
+        )
+        with self.pinned_source_hashes(), mock.patch.object(
+            focus_macos,
+            "validate_host",
+            return_value={"system": "Darwin", "machine": "arm64"},
+        ), mock.patch.object(
+            focus_macos.shutil, "disk_usage", return_value=self.disk_usage()
+        ):
+            report = focus_macos.plan(
+                str(self.source_root),
+                str(self.developer_dir),
+                focus_macos.Decimal("180"),
+                update_mode="autoupdate",
+            )
+        after = sorted(
+            (path.relative_to(self.source_root).as_posix(), path.stat().st_mtime_ns)
+            for path in self.source_root.rglob("*")
+        )
+        self.assertEqual(before, after)
+        expected_targets = ["chrome", "chrome/installer/mac:copies"]
+        self.assertEqual(expected_targets, report["build"]["ninja_targets"])
+        for architecture in ("arm64", "x64"):
+            current = report["build"]["slices"][architecture]
+            self.assertEqual(expected_targets, current["ninja_targets"])
+            self.assertEqual(expected_targets, current["commands"][1][-2:])
+
+        universal = report["build"]["universal"]
+        self.assertTrue(universal["strict_release_pipeline"])
+        self.assertEqual(
+            ["prepare-auto", "seal", "stage", "merge"],
+            universal["release_stages"],
+        )
+        self.assertEqual("out/FocusMacAutoStaging", universal["staging_out_dir"])
+        self.assertEqual(
+            "out/FocusMacUnsignedUniversalAuto/Focus Browser.app",
+            universal["output"],
+        )
+        self.assertEqual(
+            "out/FocusMacSignedUniversalAuto", universal["signed_out_dir"]
+        )
+        self.assertIsNone(universal["parent_directory_command"])
+        self.assertEqual(8, len(universal["commands"]))
+        for index, stage in enumerate(universal["release_stages"]):
+            dry_run = universal["commands"][index * 2]
+            execute = universal["commands"][index * 2 + 1]
+            self.assertIn("autoupdate_release.py", dry_run[3])
+            self.assertEqual(stage, dry_run[4])
+            self.assertNotIn("--execute", dry_run)
+            self.assertIn("--execute", execute)
+            self.assertEqual(dry_run[:-1], execute[:-2])
+            self.assertEqual("--json", dry_run[-1])
+            self.assertEqual(["--execute", "--json"], execute[-2:])
+        commands = json.dumps(report["build"]["commands"])
+        self.assertNotIn("FocusMacUniversalAuto", commands)
+        self.assertNotIn("chrome/installer/mac/universalizer.py", commands)
+
     def test_plan_fails_closed_when_disk_gate_is_too_high(self):
         with self.pinned_source_hashes(), mock.patch.object(
             focus_macos, "validate_host", return_value={"system": "Darwin", "machine": "arm64"}
@@ -1039,6 +1226,30 @@ class FocusMacPlannerTests(unittest.TestCase):
                 self.assertEqual("false", values["include_branded_entitlements"])
                 self.assertEqual("false", values["use_siso"])
                 self.assertEqual("false", values["use_remoteexec"])
+
+    def test_repository_autoupdate_profiles_pin_sparkle_and_disable_chromium_updater(self):
+        report = focus_macos.validate_autoupdate_gn_profiles()
+        self.assertEqual("sparkle", report["update_mode"])
+        self.assertEqual(focus_macos.AUTOUPDATE_FEED_URL, report["feed_url"])
+        self.assertEqual(focus_macos.AUTOUPDATE_PUBLIC_KEY, report["public_key"])
+        self.assertTrue(report["profiles_equal_except_target_cpu"])
+        for architecture, flags_path in focus_macos.AUTOUPDATE_MACOS_FLAGS.items():
+            with self.subTest(architecture=architecture):
+                _, _, values = focus_macos.parse_gn_assignments(
+                    (focus_macos.COMMON_FLAGS, flags_path),
+                    expected_target_cpu=architecture,
+                    include_values=True,
+                )
+                self.assertEqual("false", values["enable_updater"])
+                self.assertEqual("true", values["enable_focus_macos_sparkle"])
+                self.assertEqual(
+                    '"{}"'.format(focus_macos.AUTOUPDATE_FEED_URL),
+                    values["focus_macos_sparkle_feed_url"],
+                )
+                self.assertEqual(
+                    '"{}"'.format(focus_macos.AUTOUPDATE_PUBLIC_KEY),
+                    values["focus_macos_sparkle_public_key"],
+                )
 
     def test_validate_parser_requires_explicit_source_root(self):
         parser = focus_macos.build_parser()

@@ -65,6 +65,26 @@ CHROME_BUILD_GN_SHA256 = "3851bd31f3f9bc123395dbd966557885d62911f4e1359bca47390b
 INSTALLER_MAC_BUILD_GN = "chrome/installer/mac/BUILD.gn"
 INSTALLER_MAC_BUILD_GN_SHA256 = "e620eb87d619dc384c050e041bc9d524037f7ff3f5255f39b5e034025351bd4d"
 PREPARATION_RECEIPT = "out/FocusMacPreparation.json"
+REPOSITORY_FOCUS_VERSION_PARTS = OrderedDict(
+    (
+        ("FOCUS_MAJOR", "1"),
+        ("FOCUS_MINOR", "0"),
+        ("FOCUS_PATCH", "5"),
+        ("FOCUS_PLATFORM", "0"),
+    )
+)
+MACOS_FOCUS_VERSION_PARTS = OrderedDict(
+    (
+        ("FOCUS_MAJOR", "1"),
+        ("FOCUS_MINOR", "0"),
+        ("FOCUS_PATCH", "6"),
+        ("FOCUS_PLATFORM", "0"),
+    )
+)
+MACOS_FOCUS_VERSION = ".".join(MACOS_FOCUS_VERSION_PARTS.values())
+MACOS_FOCUS_SHORT_VERSION = ".".join(
+    tuple(MACOS_FOCUS_VERSION_PARTS.values())[:3]
+)
 PRUNING_LIST = REPO_ROOT / "focus-chromium" / "pruning.list"
 PRUNING_LIST_SHA256 = "bd08456aebb271572261a9c387cc4c8d4944264cfd8044c3f165b82e3a31b5d1"
 PRUNING_ENTRY_COUNT = 13800
@@ -281,20 +301,23 @@ RESUME_SECOND_DEPENDENCY_LOGICAL_BYTES = 527367518
 RESUME_SECOND_DEPENDENCY_SHA256 = (
     "38ebf05e4f17c4e8c2545bf9a93b446c0e182404d8e86617f0f811b60d8da0db"
 )
-RESUME_FULL_PATCH_SET_APPLIED = 324
-RESUME_FULL_PATCH_SET_STATUS_COUNT = 5293
-RESUME_FULL_PATCH_SET_STATUS_SHA256 = (
+# The audited recovery snapshot predates the icon-precedence and Sparkle
+# patches. It remains a valid exact prefix, but is no longer a complete plan.
+RESUME_LEGACY_PATCH_SET_APPLIED = 324
+FULL_PATCH_PLAN_COUNT = 326
+RESUME_LEGACY_PATCH_SET_STATUS_COUNT = 5293
+RESUME_LEGACY_PATCH_SET_STATUS_SHA256 = (
     "7225019e77e7eecddeaeaece124ccbf30957fa2a965b9020c56ec60d8664639e"
 )
-RESUME_FULL_DEPENDENCY_REGULAR_FILES = 13217
-RESUME_FULL_DEPENDENCY_LOGICAL_BYTES = 527368134
-RESUME_FULL_DEPENDENCY_SHA256 = (
+RESUME_LEGACY_DEPENDENCY_REGULAR_FILES = 13217
+RESUME_LEGACY_DEPENDENCY_LOGICAL_BYTES = 527368134
+RESUME_LEGACY_DEPENDENCY_SHA256 = (
     "b6d7bc835bed4516a353590dc51da263acb2fa92a8970c35e8353856d6c35eeb"
 )
 RESUME_AUDITED_PATCH_CHECKPOINTS = (
     RESUME_PATCH_FAILURE_APPLIED,
     RESUME_SECOND_PATCH_FAILURE_APPLIED,
-    RESUME_FULL_PATCH_SET_APPLIED,
+    RESUME_LEGACY_PATCH_SET_APPLIED,
 )
 RESUME_PATCH_FAILURE_IGNORED_COUNT = 23138
 RESUME_PATCH_FAILURE_IGNORED_REGULAR_FILES = 23080
@@ -331,7 +354,7 @@ POST_VERSION_DEPENDENCY_SHA256 = (
 )
 POST_VERSION_CHROME_VERSION_BYTES = 98
 POST_VERSION_CHROME_VERSION_SHA256 = (
-    "8536f0e864abdb194deb1145c6b496b4f194ba0072f6e47144939d4a0fda34c7"
+    "5022bb9910dc9125cf334f10734fe0ce4be7991d95abcfec60567cfbb42a5783"
 )
 POST_VERSION_RESOURCE_INVENTORY_COUNT = 58
 POST_VERSION_RESOURCE_INVENTORY_BYTES = 7568
@@ -745,7 +768,7 @@ def validate_recovery_checkpoint_report(
         raise PreparationError("recovery artifact checkpoint schema mismatch")
     if (
         artifacts["chrome_version_sha256"] != POST_VERSION_CHROME_VERSION_SHA256
-        or artifacts["focus_version"] != "1.0.5.0"
+        or artifacts["focus_version"] != MACOS_FOCUS_VERSION
         or artifacts["onboarding_baseline_sha256"]
         != ONBOARDING_STRINGS_BASELINE_SHA256
         or artifacts["upstream_icns_sha256"] != POST_VERSION_UPSTREAM_ICNS_SHA256
@@ -770,11 +793,12 @@ def validate_recovery_execution_link(
     validate_recovery_checkpoint_report(recovery_checkpoint)
     if recovery_checkpoint is not None and execution_report != (
         expected_resume_execution_report(
-            RESUME_FULL_PATCH_SET_APPLIED, path_projector=path_projector
+            RESUME_LEGACY_PATCH_SET_APPLIED, path_projector=path_projector
         )
     ):
         raise PreparationError(
-            "post-version recovery requires the exact full-prefix execution report"
+            "post-version recovery requires the exact legacy 324-prefix "
+            "execution report"
         )
     return True
 
@@ -1812,10 +1836,10 @@ def expected_resume_working_tree(applied_patches):
             "sha256": RESUME_SECOND_PATCH_FAILURE_STATUS_SHA256,
             "status_counts": {" D": 3189, " M": 766, "??": 825},
         }
-    if applied_patches == RESUME_FULL_PATCH_SET_APPLIED:
+    if applied_patches == RESUME_LEGACY_PATCH_SET_APPLIED:
         return {
-            "records": RESUME_FULL_PATCH_SET_STATUS_COUNT,
-            "sha256": RESUME_FULL_PATCH_SET_STATUS_SHA256,
+            "records": RESUME_LEGACY_PATCH_SET_STATUS_COUNT,
+            "sha256": RESUME_LEGACY_PATCH_SET_STATUS_SHA256,
             "status_counts": {" M": 1219, " D": 3189, "??": 885},
         }
     raise PreparationError(
@@ -1838,12 +1862,12 @@ def expected_resume_dependency_tree(applied_patches):
             "installed_symlinks": 0,
             "installed_special_files": 0,
         }
-    if applied_patches == RESUME_FULL_PATCH_SET_APPLIED:
+    if applied_patches == RESUME_LEGACY_PATCH_SET_APPLIED:
         return {
             "ownership_roots": list(DEPENDENCY_OWNERSHIP_ROOTS),
-            "regular_files": RESUME_FULL_DEPENDENCY_REGULAR_FILES,
-            "logical_bytes": RESUME_FULL_DEPENDENCY_LOGICAL_BYTES,
-            "sha256": RESUME_FULL_DEPENDENCY_SHA256,
+            "regular_files": RESUME_LEGACY_DEPENDENCY_REGULAR_FILES,
+            "logical_bytes": RESUME_LEGACY_DEPENDENCY_LOGICAL_BYTES,
+            "sha256": RESUME_LEGACY_DEPENDENCY_SHA256,
             "installed_symlinks": 0,
             "installed_special_files": 0,
         }
@@ -2298,7 +2322,7 @@ def validate_completed_pruning(source_root):
 
 
 def build_patch_plan():
-    """Return the validated filtered common order followed by three Mac patches."""
+    """Return the validated filtered common order followed by five Mac patches."""
     focus_macos.validate_repository_contract()
     common_entries = focus_macos.read_series(focus_macos.COMMON_SERIES)
     excluded = set(focus_macos.SHARED_SERIES_EXCLUSIONS)
@@ -2316,8 +2340,12 @@ def build_patch_plan():
                 REPO_ROOT, relative.as_posix(), "macOS platform patch"
             )
         )
-    if len(plan) != 324:
-        raise PreparationError("complete macOS patch plan must contain 324 patches")
+    if len(plan) != FULL_PATCH_PLAN_COUNT:
+        raise PreparationError(
+            "complete macOS patch plan must contain {} patches".format(
+                FULL_PATCH_PLAN_COUNT
+            )
+        )
     return plan
 
 
@@ -2938,7 +2966,7 @@ def copy_common_resources(source_root, resource_plan):
 
 
 def append_focus_version_once(source_root):
-    """Append the repository-derived four-part Focus version exactly once."""
+    """Append the macOS four-part Focus version exactly once."""
     version_path = require_regular_in_tree(source_root, "chrome/VERSION", "Chromium VERSION")
     for path in (
         REPO_ROOT / "focus-chromium" / "version.txt",
@@ -2948,21 +2976,20 @@ def append_focus_version_once(source_root):
     ):
         if path.is_symlink() or not path.is_file():
             raise PreparationError("Focus version input is not a regular file: {}".format(path))
-    version_parts = focus_version.get_version_parts(
+    repository_version_parts = focus_version.get_version_parts(
         REPO_ROOT / "focus-chromium", REPO_ROOT
     )
-    if tuple(version_parts) != (
-        "FOCUS_MAJOR",
-        "FOCUS_MINOR",
-        "FOCUS_PATCH",
-        "FOCUS_PLATFORM",
-    ) or any(not value.isdigit() for value in version_parts.values()):
-        raise PreparationError("invalid Focus version contract: {!r}".format(version_parts))
+    if repository_version_parts != REPOSITORY_FOCUS_VERSION_PARTS:
+        raise PreparationError(
+            "repository Focus version contract changed: {!r}".format(
+                repository_version_parts
+            )
+        )
     focus_version.check_existing_version(version_path)
     with version_path.open("a", encoding="utf-8") as stream:
-        for name, value in version_parts.items():
+        for name, value in MACOS_FOCUS_VERSION_PARTS.items():
             focus_version.append_version(stream, name, value)
-    return ".".join(version_parts.values())
+    return MACOS_FOCUS_VERSION
 
 
 def validate_icon_destination(source_root, require_upstream_hash=False):
@@ -3072,7 +3099,7 @@ def write_args_gn(source_root, plan=None):
     return {architecture: str(destination) for architecture, destination, _ in destinations}
 
 
-def fresh_preparation_execution_report(total_patches=324):
+def fresh_preparation_execution_report(total_patches=FULL_PATCH_PLAN_COUNT):
     """Describe a normal preparation that starts from the pristine source."""
     return {
         "mode": "fresh",
@@ -3174,7 +3201,7 @@ def validate_preparation_execution_report(report, path_projector=None):
     }
     if not isinstance(report, dict) or set(report) != required:
         raise PreparationError("preparation execution report schema mismatch")
-    if report["total_patches"] != 324 or (
+    if report["total_patches"] != FULL_PATCH_PLAN_COUNT or (
         report["initial_applied_patch_count"] + report["patches_applied_this_run"]
         != report["total_patches"]
     ):
@@ -3187,7 +3214,8 @@ def validate_preparation_execution_report(report, path_projector=None):
     if (
         report["mode"] != "resume_exact_prefix"
         or initial_applied not in RESUME_AUDITED_PATCH_CHECKPOINTS
-        or report["patches_applied_this_run"] != 324 - initial_applied
+        or report["patches_applied_this_run"]
+        != FULL_PATCH_PLAN_COUNT - initial_applied
     ):
         raise PreparationError("resume preparation execution report mismatch")
     checkpoint = report["resume_checkpoint"]
@@ -3741,7 +3769,7 @@ def validate_post_version_artifacts(source_root):
     expected_focus_lines = (
         "FOCUS_MAJOR=1",
         "FOCUS_MINOR=0",
-        "FOCUS_PATCH=5",
+        "FOCUS_PATCH=6",
         "FOCUS_PLATFORM=0",
     )
     if any(version_text.splitlines().count(line) != 1 for line in expected_focus_lines):
@@ -3800,7 +3828,7 @@ def validate_post_version_artifacts(source_root):
         raise PreparationError("preparation receipt already exists: {}".format(receipt))
     return {
         "chrome_version_sha256": POST_VERSION_CHROME_VERSION_SHA256,
-        "focus_version": "1.0.5.0",
+        "focus_version": MACOS_FOCUS_VERSION,
         "onboarding_baseline_sha256": ONBOARDING_STRINGS_BASELINE_SHA256,
         "upstream_icns_sha256": POST_VERSION_UPSTREAM_ICNS_SHA256,
         "onboarding_node": node,
@@ -3837,7 +3865,7 @@ def resume_post_version_preflight(source_root, cache_root):
     patch_plan = build_patch_plan()
     validate_patch_tool()
     check_patch_boundary(source, patch_plan[-1], reverse=True)
-    execution = expected_resume_execution_report(RESUME_FULL_PATCH_SET_APPLIED)
+    execution = expected_resume_execution_report(RESUME_LEGACY_PATCH_SET_APPLIED)
     validate_preparation_execution_report(execution)
 
     overlay_files, cleanup_paths, _ = build_overlay_plan()
@@ -3876,7 +3904,7 @@ def resume_post_version_preflight(source_root, cache_root):
             "common_filtered": repository["shared_series"]["planned_entries"],
             "platform": len(repository["platform_patches"]),
             "total": len(patch_plan),
-            "initially_applied": RESUME_FULL_PATCH_SET_APPLIED,
+            "initially_applied": RESUME_LEGACY_PATCH_SET_APPLIED,
             "remaining": 0,
         },
         "preparation_execution": execution,
@@ -4099,7 +4127,7 @@ def resume_post_version_failure(source_root, cache_root):
     report.update(
         {
             "prepared": True,
-            "patches_applied": RESUME_FULL_PATCH_SET_APPLIED,
+            "patches_applied": FULL_PATCH_PLAN_COUNT,
             "patches_applied_this_run": 0,
             "recovery_phase": "post_version_pre_resources",
             "resources_copied": resource_count,
@@ -4238,7 +4266,7 @@ def prepare(source_root, cache_root, workers=None):
         source, prune_plan, expected_absent_paths=expected_absent_pruning
     )
     patch_plan = build_patch_plan()
-    gate("324-patch batch")
+    gate("{}-patch batch".format(FULL_PATCH_PLAN_COUNT))
     applied = apply_patch_plan(source, patch_plan)
     gate("domain/name/i18n transformations")
     transformations = apply_common_transformations(source, workers=workers)

@@ -4,8 +4,8 @@
 
 <p align="right"><strong>Русский</strong> · <a href="#english">English</a></p>
 
-> **Статус:** сборка для macOS пока не опубликована. В текущем публичном
-> списке GitHub Releases нет файлов для macOS.
+> **Статус:** прежняя ручная DMG принята локально; новая universal-сборка со
+> Sparkle версии 1.0.6 проходит отдельную приёмку перед публикацией.
 
 Focus Browser для macOS — нативная Chromium/Views-сборка, а не мобильный порт
 или WebKit-обёртка. Один universal DMG предназначен для Apple Silicon и
@@ -15,7 +15,8 @@ Focus Browser для macOS — нативная Chromium/Views-сборка, а 
 
 | Поле | Значение |
 | --- | --- |
-| GitHub Release | **не опубликован** |
+| GitHub Release с автообновлением | **ожидает финальной приёмки** |
+| Целевой DMG с автообновлением | `FocusBrowser-macOS-1.0.6-universal-autoupdate.dmg` |
 | Локальный принятый DMG | `FocusBrowser-macOS-1.0.5-universal.dmg` |
 | Размер | `278 163 247` байт |
 | SHA-256 | `5f5e3755276fbd8a622c9d759e801a0e17c9c876114501d538912fe29a1d2eb0` |
@@ -25,10 +26,11 @@ Focus Browser для macOS — нативная Chromium/Views-сборка, а 
 официальной загрузки macOS нет. Не используйте кнопку `releases/latest` как
 ссылку на macOS: сейчас она ведёт на Windows-выпуск.
 
-Локальная приёмка прошла на Apple Silicon Mac: приложение и смонтированный
+Приёмка резервной ручной сборки прошла на Apple Silicon Mac: приложение и смонтированный
 только для чтения DMG запускались как нативно в `arm64`, так и через Rosetta в
 `x86_64`, каждый раз с новым профилем и в Incognito. Проверены ad-hoc подпись,
-RU/EN, FocusBlock, FocusYoutube и отсутствие компонентов автообновления.
+RU/EN, FocusBlock, FocusYoutube и отсутствие компонентов автообновления. Это
+относится только к указанной выше резервной DMG, а не к новой Sparkle-сборке.
 
 После публикации файл нужно скачивать только из официального списка
 [GitHub Releases](https://github.com/DanilBend/FocusBrowser/releases) и сверять
@@ -47,23 +49,34 @@ Gatekeeper может потребовать ручное разрешение �
 управляемого Mac может полностью запретить запуск. Разрешайте запуск только для
 файла, полученного из официального Release и совпавшего по SHA-256.
 
-## Ручные обновления
+## Обновления приложения
 
-Автоматического обновления приложения в macOS-сборке нет. В ней отключён
-Chromium app updater, отсутствуют appcast, Sparkle, update helper, фоновая
-загрузка и автоматический перезапуск.
+Новая macOS-сборка использует Sparkle 2.9.4. ChromiumUpdater, Keystone и Google
+Updater остаются отключены. Браузер проверяет отдельный macOS-feed раз в сутки,
+может безопасно установить найденную версию и также поддерживает ручную
+проверку на странице «О браузере»:
 
-Чтобы обновить Focus Browser после появления нового macOS-выпуска:
+`https://danilbend.github.io/FocusBrowser/appcast-macos.xml`
 
-1. Закройте все окна Focus Browser и дождитесь завершения его helper-процессов.
-2. Скачайте новый universal DMG из конкретного официального GitHub Release.
-3. Сверьте размер и SHA-256 нового файла.
-4. Откройте DMG и вручную замените существующий `Focus Browser.app`.
-5. После запуска проверьте отображаемую версию браузера.
+DMG-пакет и сам appcast обязаны иметь корректную Ed25519-подпись выделенным
+macOS-ключом. Закрытый ключ хранится только в macOS Keychain и не находится в
+репозитории или приложении. Feed не публикуется раньше проверенного GitHub
+Release, а системное профилирование и JavaScript Sparkle отключены.
 
-Windows-сборки используют отдельный подписанный Ed25519 WinSparkle-канал. Он
-не используется macOS-портом. Обновления отдельных
-компонентов Chromium, если они доступны, также не являются обновлением самого
+Первая сборка с автообновлением имеет отдельную macOS-версию `1.0.6.0`
+(показывается как `1.0.6`). Версии Windows и Android этим не изменяются.
+Планируемый канал — отдельный неизменяемый prerelease `v1.0.6-macos`, который
+не помечается как Latest. Текущий стабильный Windows-выпуск остаётся
+`v1.0.5`, а простой тег `v1.0.6` зарезервирован для будущего согласованного
+стабильного выпуска.
+
+Прежняя DMG `FocusBrowser-macOS-1.0.5-universal.dmg` не умеет обновляться сама.
+Для первого перехода с неё установите новую Sparkle-сборку вручную из
+конкретного Release. Ручная замена приложения из DMG остаётся резервным способом
+на случай недоступности feed.
+
+Windows использует другой ключ и `appcast-x64.xml`; эти каналы не смешиваются.
+Обновления компонентов Chromium также не являются обновлением самого
 `Focus Browser.app`.
 
 ## Совместимость и границы
@@ -80,7 +93,8 @@ Universal-бинарник подтверждает наличие обеих а
 
 Технические сведения: [локальный DMG](../platform/macos/LOCAL-DMG.md),
 [universal-совместимость](../platform/macos/UNIVERSAL.md) и
-[macOS build pipeline](../platform/macos/README.md).
+[macOS build pipeline](../platform/macos/README.md),
+[контракт автообновления](../platform/macos/AUTOUPDATE.md).
 
 <a id="english"></a>
 
@@ -88,8 +102,9 @@ Universal-бинарник подтверждает наличие обеих а
 
 <p align="right"><a href="#russian">Русский</a> · <strong>English</strong></p>
 
-> **Status:** the macOS build is not published yet. The current public GitHub
-> Releases list contains no macOS assets.
+> **Status:** the previous manual DMG passed local acceptance; the new
+> Sparkle-enabled 1.0.6 universal build is undergoing separate release
+> acceptance.
 
 Focus Browser for macOS is a native Chromium/Views build, not a mobile port or
 WebKit wrapper. One universal DMG targets Apple Silicon and 64-bit Intel Macs
@@ -99,7 +114,8 @@ running macOS 12 Monterey or later.
 
 | Field | Value |
 | --- | --- |
-| GitHub Release | **not published** |
+| Auto-update GitHub Release | **awaiting final acceptance** |
+| Target auto-update DMG | `FocusBrowser-macOS-1.0.6-universal-autoupdate.dmg` |
 | Locally accepted DMG | `FocusBrowser-macOS-1.0.5-universal.dmg` |
 | Size | `278,163,247` bytes |
 | SHA-256 | `5f5e3755276fbd8a622c9d759e801a0e17c9c876114501d538912fe29a1d2eb0` |
@@ -109,11 +125,12 @@ The size and SHA-256 above belong to the locally accepted DMG from July 31,
 been published, there is no official macOS download. Do not use
 `releases/latest` as a macOS link: it currently points to the Windows release.
 
-Local acceptance passed on an Apple Silicon Mac. Both the signed application
+The fallback manual build passed local acceptance on an Apple Silicon Mac. Both the signed application
 and its read-only mounted DMG ran natively as `arm64` and through Rosetta as
 `x86_64`, each with a fresh Incognito profile. The gate also verified ad-hoc
 signing, RU/EN resources, FocusBlock, FocusYoutube, and the absence of automatic
-application-update components.
+application-update components. That last statement applies only to the fallback
+DMG above, not the new Sparkle build.
 
 After publication, download only from the official
 [GitHub Releases](https://github.com/DanilBend/FocusBrowser/releases) list and
@@ -133,23 +150,35 @@ may require manual approval in Privacy & Security, and managed-Mac policy may
 prohibit execution entirely. Approve only a file obtained from the official
 Release whose SHA-256 matches.
 
-## Manual updates
+## Application updates
 
-The macOS build has no automatic application updates. The Chromium app updater
-is disabled, with no appcast, Sparkle, update helper, background download, or
-automatic restart.
+The new macOS build uses Sparkle 2.9.4. ChromiumUpdater, Keystone, and Google
+Updater remain disabled. The browser checks a dedicated macOS feed once per
+day, can safely install a discovered version, and retains a manual check on the
+About page:
 
-After a newer macOS release becomes available:
+`https://danilbend.github.io/FocusBrowser/appcast-macos.xml`
 
-1. Quit all Focus Browser windows and wait for its helper processes to exit.
-2. Download the new universal DMG from its specific official GitHub Release.
-3. Verify the new file's size and SHA-256.
-4. Open the DMG and manually replace the existing `Focus Browser.app`.
-5. Launch it and verify the displayed browser version.
+The DMG payload and appcast must carry valid Ed25519 signatures from the dedicated
+macOS key. Its private key remains only in macOS Keychain and is never stored
+in the repository or application. The feed is published after the verified
+GitHub Release; Sparkle system profiling and JavaScript are disabled.
 
-Windows builds use their separate Ed25519-signed WinSparkle channel. That
-channel is not used by the macOS port. Chromium component updates, where
-available, are also not updates to `Focus Browser.app` itself.
+The first updater-capable build has a separate macOS version of `1.0.6.0`
+(displayed as `1.0.6`). This does not change the Windows or Android versions.
+Its intended channel is the separate immutable prerelease `v1.0.6-macos`,
+which is not marked Latest. The current stable Windows release remains
+`v1.0.5`, while plain `v1.0.6` is reserved for a future coordinated stable
+release.
+
+The previous `FocusBrowser-macOS-1.0.5-universal.dmg` cannot update itself. The
+first move from that build requires a manual installation of the new
+Sparkle-enabled build from its specific Release. Manual DMG replacement remains
+the fallback if the feed is unavailable.
+
+Windows uses a different key and `appcast-x64.xml`; the channels are never
+mixed. Chromium component updates are also not updates to
+`Focus Browser.app` itself.
 
 ## Compatibility and scope
 
@@ -165,4 +194,5 @@ be stated in the notes for each specific release.
 
 Technical details: [local DMG](../platform/macos/LOCAL-DMG.md),
 [universal compatibility](../platform/macos/UNIVERSAL.md), and the
-[macOS build pipeline](../platform/macos/README.md).
+[macOS build pipeline](../platform/macos/README.md), plus the
+[automatic-update contract](../platform/macos/AUTOUPDATE.md).
