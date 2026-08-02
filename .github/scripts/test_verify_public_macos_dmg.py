@@ -322,6 +322,35 @@ class VerifyPublicMacosDmgTests(unittest.TestCase):
         self.assertTrue(report["passed"])
         self.assertEqual([True], ctime_changed)
 
+    def test_private_dmg_copy_retains_same_size_content_tamper(self):
+        original_runner = self.runner
+
+        def runner(command, pass_fds=()):
+            if command[:2] == [verify.HDIUTIL, "attach"]:
+                Path(command[-1]).write_bytes(b"x" * self.dmg.stat().st_size)
+            return original_runner(command, pass_fds=pass_fds)
+
+        with self.assertRaisesRegex(
+            verify.PublicDmgError,
+            "private public-DMG pin was replaced; retained",
+        ) as raised:
+            verify.verify_public_dmg(
+                self.dmg,
+                sparkle_source_root=self.root / "sparkle",
+                sparkle_e2e_receipt=self.e2e_receipt,
+                sparkle_e2e_challenge=self.e2e_challenge,
+                runner=runner,
+                validator=lambda _app, **_kwargs: self.report(),
+                mount_checker=self.mount_checker,
+                statvfs_reader=lambda _path: SimpleNamespace(
+                    f_flag=os.ST_RDONLY
+                ),
+            )
+        retained = Path(
+            str(raised.exception).split("retained ", 1)[1].split(";", 1)[0]
+        )
+        self.assertTrue((retained / "pinned-public.dmg").is_file())
+
     def test_public_gate_requires_provenance_before_mounting(self):
         runner = mock.Mock()
         with self.assertRaisesRegex(verify.PublicDmgError, "requires Sparkle provenance"):
