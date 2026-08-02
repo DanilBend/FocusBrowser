@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -676,6 +677,18 @@ class AcquireSparkleTests(unittest.TestCase):
 
         self.assertEqual([], removed)
         self.assertTrue(final.is_dir())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission contract")
+    def test_receipt_mode_is_canonical_under_restrictive_umask(self):
+        root = self.root / "receipt-root"
+        root.mkdir()
+        previous_umask = os.umask(0o077)
+        try:
+            receipt_path = sparkle._write_receipt(root, {"schema_version": 2})
+        finally:
+            os.umask(previous_umask)
+
+        self.assertEqual(0o644, stat.S_IMODE(receipt_path.lstat().st_mode))
 
     def test_cli_defaults_to_read_only_preflight(self):
         destination = self.root / "sparkle-dependency"

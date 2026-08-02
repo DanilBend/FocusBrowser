@@ -1255,6 +1255,7 @@ def _write_receipt(root, report):
         stream.write(encoded)
         stream.flush()
         os.fsync(stream.fileno())
+    os.chmod(str(part), 0o644, follow_symlinks=False)
     os.replace(str(part), str(destination))
     return destination
 
