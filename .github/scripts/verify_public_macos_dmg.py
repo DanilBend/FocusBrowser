@@ -87,6 +87,21 @@ def _same_inode(left, right):
     return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
 
 
+def _stable_private_file_snapshot(value):
+    """Bind a private copy while allowing hdiutil's checksum-xattr ctime drift."""
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        getattr(value, "st_flags", 0),
+    )
+
+
 def load_sparkle_e2e_receipt(value, release_challenge):
     """Load a private same-run E2E receipt and bind it to this checkout."""
     if value is None:
@@ -302,14 +317,10 @@ def _validate_report(report):
                 "automatic-update signing slices are incomplete: {}".format(label)
             )
         is_loader = label in loaders
-        expected_flags = (
-            autoupdate_contract.LOADER_FLAGS
-            if is_loader
-            else (
-                autoupdate_contract.FULL_RUNTIME_FLAGS
-                if label in protected
-                else autoupdate_contract.DATA_ONLY_FLAGS
-            )
+        expected_flags = autoupdate_contract.LOADER_FLAGS if is_loader else (
+            autoupdate_contract.FULL_RUNTIME_FLAGS
+            if label == "crashpad"
+            else autoupdate_contract.DATA_ONLY_FLAGS
         )
         for architecture, state in slices.items():
             keys = state.get("entitlement_keys") if isinstance(state, dict) else None
@@ -488,6 +499,7 @@ def verify_public_dmg(
     else:
         os.close(copy_fd)
     pinned_image_stat = os.lstat(str(pinned_image))
+    pinned_image_snapshot = _stable_private_file_snapshot(pinned_image_stat)
     if (
         pinned_image_stat.st_size != pinned_dmg.st_size
         or copy_digest.hexdigest() != pinned_sha256
@@ -589,11 +601,12 @@ def verify_public_dmg(
                     )
                     private_now = os.fstat(private_fd)
                     private_valid = (
-                        _same_inode(linked, pinned_image_stat)
-                        and _same_inode(private_now, pinned_image_stat)
-                        and private_now.st_size == pinned_image_stat.st_size
-                        and private_now.st_mtime_ns == pinned_image_stat.st_mtime_ns
-                        and private_now.st_ctime_ns == pinned_image_stat.st_ctime_ns
+                        stat.S_ISREG(linked.st_mode)
+                        and stat.S_ISREG(private_now.st_mode)
+                        and _stable_private_file_snapshot(linked)
+                        == pinned_image_snapshot
+                        and _stable_private_file_snapshot(private_now)
+                        == pinned_image_snapshot
                         and _sha256_fd(private_fd) == pinned_sha256
                     )
                 except OSError:

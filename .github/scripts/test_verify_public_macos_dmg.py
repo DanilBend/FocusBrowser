@@ -149,7 +149,7 @@ class VerifyPublicMacosDmgTests(unittest.TestCase):
                 },
             }
         for label, flags in (
-            ("framework", verify.autoupdate_contract.FULL_RUNTIME_FLAGS),
+            ("framework", verify.autoupdate_contract.DATA_ONLY_FLAGS),
             ("crashpad", verify.autoupdate_contract.FULL_RUNTIME_FLAGS),
             ("dylib:libEGL.dylib", verify.autoupdate_contract.DATA_ONLY_FLAGS),
             ("dylib:libGLESv2.dylib", verify.autoupdate_contract.DATA_ONLY_FLAGS),
@@ -295,6 +295,32 @@ class VerifyPublicMacosDmgTests(unittest.TestCase):
             str(self.e2e_receipt.resolve()),
             report["sparkle_update_e2e"]["path"],
         )
+
+    def test_private_dmg_copy_allows_hdiutil_checksum_ctime_change(self):
+        original_runner = self.runner
+        ctime_changed = []
+
+        def runner(command, pass_fds=()):
+            if command[:2] == [verify.HDIUTIL, "attach"]:
+                image = Path(command[-1])
+                before = image.stat()
+                os.chmod(image, 0o600)
+                after = image.stat()
+                ctime_changed.append(after.st_ctime_ns != before.st_ctime_ns)
+            return original_runner(command, pass_fds=pass_fds)
+
+        report = verify.verify_public_dmg(
+            self.dmg,
+            sparkle_source_root=self.root / "sparkle",
+            sparkle_e2e_receipt=self.e2e_receipt,
+            sparkle_e2e_challenge=self.e2e_challenge,
+            runner=runner,
+            validator=lambda _app, **_kwargs: self.report(),
+            mount_checker=self.mount_checker,
+            statvfs_reader=lambda _path: SimpleNamespace(f_flag=os.ST_RDONLY),
+        )
+        self.assertTrue(report["passed"])
+        self.assertEqual([True], ctime_changed)
 
     def test_public_gate_requires_provenance_before_mounting(self):
         runner = mock.Mock()
@@ -449,6 +475,14 @@ class VerifyPublicMacosDmgTests(unittest.TestCase):
             "architectures"
         ]["arm64"]["flags"] = ["adhoc"]
         cases.append((wrong_flags, "signing state is invalid"))
+
+        wrong_framework_flags = self.report()
+        wrong_framework_flags["release_gate"]["adhoc_signing"]["products"][
+            "framework"
+        ]["architectures"]["arm64"]["flags"] = sorted(
+            verify.autoupdate_contract.FULL_RUNTIME_FLAGS
+        )
+        cases.append((wrong_framework_flags, "signing state is invalid"))
 
         wrong_minimum = self.report()
         wrong_minimum["release_gate"]["macho_minimum_system_versions"][
