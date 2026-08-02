@@ -32,6 +32,10 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: '3.12'
+    - name: Pin root-owned system Python provider
+      run: |
+        sudo xcode-select --switch /Library/Developer/CommandLineTools
+        test "$(xcode-select -p)" = "/Library/Developer/CommandLineTools"
     - name: Validate macOS release helpers
       run: |
         python -m unittest discover -s platform/macos/tests -p 'test_*.py'

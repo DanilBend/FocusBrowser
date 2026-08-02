@@ -2,6 +2,7 @@
 """Tests for the onboarding logical/physical root compatibility receipt."""
 
 import contextlib
+import ctypes
 import hashlib
 import io
 import json
@@ -27,6 +28,61 @@ BASELINE = REPO_ROOT / "source_overrides" / onboarding_alias_compat.SOURCE_RELAT
 
 
 class OnboardingAliasCompatTests(unittest.TestCase):
+    def _ensure_fixture_provenance(self, path):
+        """Give synthetic inputs the xattr required by the real transition."""
+        path_status = os.lstat(path)
+        flags = os.O_RDONLY
+        if stat.S_ISDIR(path_status.st_mode) and hasattr(os, "O_DIRECTORY"):
+            flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            self.assertEqual(
+                (path_status.st_dev, path_status.st_ino),
+                (opened.st_dev, opened.st_ino),
+            )
+            before = onboarding_alias_compat._fd_xattrs(descriptor)
+            provenance = [
+                value
+                for name, value in before
+                if name == b"com.apple.provenance"
+            ]
+            if provenance != [] and provenance != [b""]:
+                self.assertEqual(1, len(provenance))
+                return
+
+            # Non-system Python distributions may not attach the Apple
+            # provenance xattr that the real transition's system Python has.
+            # Install a valid, nonempty fixture value through the already-open,
+            # no-follow descriptor so these tests do not depend on interpreter
+            # provenance or race a path replacement.
+            payload = bytes.fromhex("010200464f435553434921")
+            payload_buffer = ctypes.create_string_buffer(payload, len(payload))
+            result = onboarding_alias_compat._LIBC.fsetxattr(
+                descriptor,
+                b"com.apple.provenance",
+                payload_buffer,
+                len(payload),
+                0,
+                0,
+            )
+            if result != 0:
+                onboarding_alias_compat._raise_xattr_error(
+                    "fixture provenance fsetxattr"
+                )
+            after = onboarding_alias_compat._fd_xattrs(descriptor)
+            provenance = [
+                value
+                for name, value in after
+                if name == b"com.apple.provenance"
+            ]
+            self.assertEqual(1, len(provenance))
+            self.assertTrue(provenance[0])
+        finally:
+            os.close(descriptor)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
@@ -171,9 +227,11 @@ class OnboardingAliasCompatTests(unittest.TestCase):
             patcher.start()
         self.trial["failed_build_evidence"]["sha256"] = onboarding_alias_compat.FAILURE_REPORT_SHA256
         self.target.write_bytes(self.postimage())
+        self._ensure_fixture_provenance(self.target)
         self.vite_temp = self.source / onboarding_alias_compat.VITE_TEMP_RELATIVE
         self.vite_temp.mkdir(parents=True)
         self.vite_temp.chmod(0o755)
+        self._ensure_fixture_provenance(self.vite_temp)
         self.transition = onboarding_alias_compat.prepare_home_alias_adoption(
             self.source,
             self.physical_home / "workspace",
@@ -246,8 +304,10 @@ class OnboardingAliasCompatTests(unittest.TestCase):
         if consumed.exists() or consumed.is_symlink():
             consumed.unlink()
         self.target.write_bytes(self.postimage())
+        self._ensure_fixture_provenance(self.target)
         self.vite_temp.mkdir(parents=True)
         self.vite_temp.chmod(0o755)
+        self._ensure_fixture_provenance(self.vite_temp)
 
     def numeric_json_mutations(self, value):
         mutations = []
@@ -1352,6 +1412,29 @@ class OnboardingAliasCompatTests(unittest.TestCase):
         self.assertEqual(
             Path(self.transition["path"]).stat().st_ino, consumed.stat().st_ino
         )
+
+    def test_directory_match_reports_missing_provenance_with_exact_scalars(self):
+        evidence = json.loads(json.dumps(self.transition["value"]["vite_temp"]))
+        evidence["xattrs"] = []
+        scalar_fields = (
+            "device_at_capture",
+            "inode",
+            "uid",
+            "gid",
+            "mode",
+            "birth_time_ns",
+            "mtime_ns",
+        )
+        snapshot = {field: evidence[field] for field in scalar_fields}
+        snapshot["xattrs"] = ()
+        self.assertTrue(
+            all(snapshot[field] == evidence[field] for field in scalar_fields)
+        )
+        with self.assertRaisesRegex(
+            onboarding_alias_compat.AliasCompatError,
+            r"^transition Vite temp provenance xattr is missing$",
+        ):
+            onboarding_alias_compat._directory_matches_evidence(snapshot, evidence)
 
     def test_transition_cli_executes_only_with_workspace_and_confirmation(self):
         self.reset_pending_transition()

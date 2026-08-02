@@ -377,10 +377,7 @@ def _directory_evidence(relative, snapshot):
 
 
 def _directory_matches_evidence(snapshot, evidence):
-    try:
-        recorded_xattrs = _validate_vite_temp_evidence(evidence)
-    except AliasCompatError:
-        return False
+    recorded_xattrs = _validate_vite_temp_evidence(evidence)
     return (
         snapshot["inode"] == evidence["inode"]
         and snapshot["uid"] == evidence["uid"]

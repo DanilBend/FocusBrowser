@@ -128,6 +128,58 @@ class DetachedLauncherTests(unittest.TestCase):
         self.assertTrue(image.is_absolute())
         self.assertGreater(info.st_size, 0)
 
+    def test_regular_system_accepts_root_owned_regular_0755(self):
+        info = types.SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o755,
+            st_uid=0,
+        )
+        with mock.patch.object(
+            launcher.os, "stat", return_value=info
+        ), mock.patch.object(Path, "is_symlink", return_value=False):
+            self.assertIs(
+                info,
+                launcher._regular_system("/usr/bin/python3", "system Python"),
+            )
+
+    def test_regular_system_rejects_user_owned_regular_file(self):
+        info = types.SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o755,
+            st_uid=501,
+        )
+        with mock.patch.object(
+            launcher.os, "stat", return_value=info
+        ), mock.patch.object(Path, "is_symlink", return_value=False):
+            with self.assertRaisesRegex(launcher.LaunchError, "unsafe system Python"):
+                launcher._regular_system("/usr/bin/python3", "system Python")
+
+    def test_regular_system_rejects_symlink(self):
+        info = types.SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o755,
+            st_uid=0,
+        )
+        with mock.patch.object(
+            launcher.os, "stat", return_value=info
+        ), mock.patch.object(Path, "is_symlink", return_value=True):
+            with self.assertRaisesRegex(launcher.LaunchError, "unsafe system Python"):
+                launcher._regular_system("/usr/bin/python3", "system Python")
+
+    def test_regular_system_rejects_group_or_world_writable_file(self):
+        for permissions in (0o775, 0o757):
+            with self.subTest(permissions=oct(permissions)):
+                info = types.SimpleNamespace(
+                    st_mode=stat.S_IFREG | permissions,
+                    st_uid=0,
+                )
+                with mock.patch.object(
+                    launcher.os, "stat", return_value=info
+                ), mock.patch.object(Path, "is_symlink", return_value=False):
+                    with self.assertRaisesRegex(
+                        launcher.LaunchError, "unsafe system Python"
+                    ):
+                        launcher._regular_system(
+                            "/usr/bin/python3", "system Python"
+                        )
+
     def test_handshake_token_rejects_suffix_smuggling(self):
         expected = str(Path("/bin/sh").resolve(strict=True))
         row = {
