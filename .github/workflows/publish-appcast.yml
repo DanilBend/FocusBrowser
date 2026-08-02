@@ -24,13 +24,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: focus-winsparkle-appcast-x64
+  group: focus-update-appcasts-pages
   cancel-in-progress: false
 
 jobs:
   verify-appcast:
     name: Verify immutable x64 release and appcast
-    if: github.ref == 'refs/heads/main'
     runs-on: windows-2022
     env:
       GH_TOKEN: ${{ github.token }}
@@ -44,7 +43,17 @@ jobs:
       APPCAST_NAME: appcast-x64.xml
       WINSPARKLE_ED_KEY: ${{ vars.WINSPARKLE_ED_KEY }}
       PRODUCTION_APPCAST_URL: https://danilbend.github.io/FocusBrowser/appcast-x64.xml
+      PRODUCTION_MACOS_APPCAST_URL: https://danilbend.github.io/FocusBrowser/appcast-macos.xml
     steps:
+      - name: Reject dispatches outside main
+        if: github.ref != 'refs/heads/main'
+        shell: pwsh
+        run: |
+          throw "This publication workflow must be dispatched from main"
+
+      - name: Check out Pages handoff gate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
       - name: Validate release inputs
         shell: pwsh
         run: |
@@ -477,8 +486,32 @@ jobs:
             }
           }
 
-          Copy-Item -LiteralPath $env:FOCUS_UPDATE_APPCAST `
-            -Destination (Join-Path $siteRoot 'appcast-x64.xml')
+          python .github/scripts/stage_public_appcast.py `
+            --source "$env:FOCUS_UPDATE_APPCAST" `
+            --feed-name appcast-x64.xml `
+            --destination-dir "$siteRoot"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Shared x64 appcast staging gate failed"
+          }
+
+          $previousMacExists = $false
+          try {
+            $macResponse = Invoke-WebRequest -UseBasicParsing -Method Head `
+              -Uri $env:PRODUCTION_MACOS_APPCAST_URL
+            if ([int]$macResponse.StatusCode -ne 200) {
+              throw "Unexpected success status for the production macOS appcast"
+            }
+            $previousMacExists = $true
+          } catch {
+            $failureResponse = $_.Exception.Response
+            if ($null -eq $failureResponse -or
+                [int]$failureResponse.StatusCode -ne 404) {
+              throw
+            }
+          }
+          if ($previousMacExists) {
+            throw "A production macOS appcast exists; use a future coordinated cross-platform Pages workflow that cryptographically revalidates and preserves both channels"
+          }
           [IO.File]::WriteAllText(
             (Join-Path $siteRoot '.nojekyll'),
             '',

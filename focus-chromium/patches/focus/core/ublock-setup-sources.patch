@@ -199,23 +199,35 @@
  			"https://ublockorigin.github.io/uAssetsCDN/filters/badlists.txt",
  			"https://ublockorigin.pages.dev/filters/badlists.txt",
  			"https://cdn.jsdelivr.net/gh/uBlockOrigin/uAssetsCDN@main/filters/badlists.txt"
-@@ -35,7 +32,6 @@
--		"title": "Focus filters – Annoyances",
+@@ -31,11 +28,10 @@
+-	"helium-annoyances": {
++	"focus-annoyances": {
+ 		"content": "filters",
+ 		"group": "default",
+-		"parent": "Helium filters",
+-		"title": "Helium filters – Annoyances",
++		"parent": "Focus filters",
 +		"title": "Focus Browser filters – Annoyances",
  		"tags": "annoyances",
  		"contentURL": [
--			"https://raw.githubusercontent.com/imputnet/focus-services/main/filters/focus-annoyances.txt",
- 			"assets/focus/annoyances.txt"
+-			"https://raw.githubusercontent.com/imputnet/helium-services/main/filters/helium-annoyances.txt",
+-			"assets/helium/annoyances.txt"
++			"assets/focus/annoyances.txt"
  		]
  	},
-@@ -45,7 +41,6 @@
--		"parent": "Focus filters",
+@@ -42,10 +38,9 @@
+-	"helium-unbreak": {
++	"focus-unbreak": {
+ 		"content": "filters",
+ 		"group": "default",
+-		"parent": "Helium filters",
+-		"title": "Helium filters – Unbreak",
 +		"parent": "Focus Browser filters",
--		"title": "Focus filters – Unbreak",
 +		"title": "Focus Browser filters – Unbreak",
  		"contentURL": [
--			"https://raw.githubusercontent.com/imputnet/focus-services/main/filters/focus-unbreak.txt",
- 			"assets/focus/unbreak.txt"
+-			"https://raw.githubusercontent.com/imputnet/helium-services/main/filters/helium-unbreak.txt",
+-			"assets/helium/unbreak.txt"
++			"assets/focus/unbreak.txt"
  		]
  	},
 @@ -56,16 +51,15 @@

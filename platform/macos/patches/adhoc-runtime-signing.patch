@@ -1,0 +1,274 @@
+diff --git a/chrome/installer/mac/signing/modification.py b/chrome/installer/mac/signing/modification.py
+index 3378e4bdfd..2367f157bc 100644
+--- a/chrome/installer/mac/signing/modification.py
++++ b/chrome/installer/mac/signing/modification.py
+@@ -17,6 +17,7 @@ _CF_BUNDLE_EXE = 'CFBundleExecutable'
+ _CF_BUNDLE_ID = 'CFBundleIdentifier'
+ _CF_BUNDLE_NAME = 'CFBundleName'
+ _ENT_APP_ID = 'com.apple.application-identifier'
++_ENT_DISABLE_LIBRARY_VALIDATION = 'com.apple.security.cs.disable-library-validation'
+ _ENT_GET_TASK_ALLOW = 'com.apple.security.get-task-allow'
+ _KS_BRAND_ID = 'KSBrandID'
+ _KS_CHANNEL_ID = 'KSChannelID'
+@@ -209,19 +210,31 @@ def _process_entitlements(paths, dist, config):
+     """
+     packaging_dir = paths.packaging_dir(config)
+ 
+-    entitlements_names = [
++    entitlements_names = {
+         part.entitlements
+         for part in parts.get_parts(config).values()
+         if part.entitlements
+-    ]
++    }
+     for entitlements_name in sorted(entitlements_names):
+         entitlements_file = os.path.join(paths.work, entitlements_name)
++        if entitlements_name == parts.ADHOC_FRAMEWORK_ENTITLEMENTS:
++            if config.identity != '-':
++                raise ValueError('ad-hoc entitlements require identity "-"')
++            commands.write_plist(
++                {_ENT_DISABLE_LIBRARY_VALIDATION: True}, entitlements_file,
++                'xml1')
++            continue
++
+         commands.copy_files(
+             os.path.join(packaging_dir, entitlements_name), entitlements_file)
+ 
+-        if dist.channel_customize or config.inject_get_task_allow_entitlement:
++        if (dist.channel_customize or
++                config.inject_get_task_allow_entitlement or
++                config.identity == '-'):
+             with commands.PlistContext(
+                     entitlements_file, rewrite=True) as entitlements:
++                if config.identity == '-':
++                    entitlements[_ENT_DISABLE_LIBRARY_VALIDATION] = True
+                 if dist.channel_customize and _ENT_APP_ID in entitlements:
+                     app_id = entitlements[_ENT_APP_ID]
+                     entitlements[_ENT_APP_ID] = app_id.replace(
+diff --git a/chrome/installer/mac/signing/modification_test.py b/chrome/installer/mac/signing/modification_test.py
+index 748f7362d3..eb80c792df 100644
+--- a/chrome/installer/mac/signing/modification_test.py
++++ b/chrome/installer/mac/signing/modification_test.py
+@@ -462,6 +462,76 @@ class TestModification(unittest.TestCase):
+                       '/$W/helper-renderer-entitlements.plist', 'xml1'),
+         ])
+ 
++    def test_ad_hoc_entitlements_preserve_existing_capabilities(
++            self, read_plist, **kwargs):
++        def read_with_capabilities(path):
++            value = plist_read(path)
++            if path.endswith('helper-renderer-entitlements.plist'):
++                value['com.apple.security.cs.allow-jit'] = True
++            if path.endswith('helper-gpu-entitlements.plist'):
++                value['com.apple.security.device.audio-input'] = True
++            return value
++
++        read_plist.side_effect = read_with_capabilities
++        dist = model.Distribution()
++        config = dist.to_config(test_config.TestConfig(identity='-'))
++
++        modification.customize_distribution(self.paths, dist, config)
++
++        self.assertEqual(3, kwargs['copy_files'].call_count)
++        kwargs['copy_files'].assert_has_calls([
++            mock.call('/$I/Product Packaging/app-entitlements.plist',
++                      '/$W/app-entitlements.plist'),
++            mock.call('/$I/Product Packaging/helper-gpu-entitlements.plist',
++                      '/$W/helper-gpu-entitlements.plist'),
++            mock.call(
++                '/$I/Product Packaging/helper-renderer-entitlements.plist',
++                '/$W/helper-renderer-entitlements.plist'),
++        ])
++        kwargs['write_plist'].assert_has_calls([
++            mock.call({
++                'com.apple.security.cs.disable-library-validation': True
++            }, '/$W/adhoc-framework-entitlements.plist', 'xml1'),
++            mock.call({
++                'com.apple.application-identifier': config.base_bundle_id,
++                'com.apple.security.cs.disable-library-validation': True,
++            }, '/$W/app-entitlements.plist', 'xml1'),
++            mock.call({
++                'com.apple.security.device.audio-input': True,
++                'com.apple.security.cs.disable-library-validation': True,
++            }, '/$W/helper-gpu-entitlements.plist', 'xml1'),
++            mock.call({
++                'com.apple.security.cs.allow-jit': True,
++                'com.apple.security.cs.disable-library-validation': True,
++            }, '/$W/helper-renderer-entitlements.plist', 'xml1'),
++        ])
++
++    def test_ad_hoc_preserves_get_task_allow(self, read_plist, **kwargs):
++        dist = model.Distribution()
++        config = dist.to_config(
++            test_config.TestConfigInjectGetTaskAllow(identity='-'))
++
++        modification.customize_distribution(self.paths, dist, config)
++
++        kwargs['write_plist'].assert_has_calls([
++            mock.call({
++                'com.apple.security.cs.disable-library-validation': True
++            }, '/$W/adhoc-framework-entitlements.plist', 'xml1'),
++            mock.call({
++                'com.apple.application-identifier': config.base_bundle_id,
++                'com.apple.security.cs.disable-library-validation': True,
++                'com.apple.security.get-task-allow': True,
++            }, '/$W/app-entitlements.plist', 'xml1'),
++            mock.call({
++                'com.apple.security.cs.disable-library-validation': True,
++                'com.apple.security.get-task-allow': True,
++            }, '/$W/helper-gpu-entitlements.plist', 'xml1'),
++            mock.call({
++                'com.apple.security.cs.disable-library-validation': True,
++                'com.apple.security.get-task-allow': True,
++            }, '/$W/helper-renderer-entitlements.plist', 'xml1'),
++        ])
++
+     def test_get_task_allow_customize_channel(self, read_plist, **kwargs):
+         dist = model.Distribution(
+             channel='canary',
+diff --git a/chrome/installer/mac/signing/parts.py b/chrome/installer/mac/signing/parts.py
+index 30ec16279c..30e7530918 100644
+--- a/chrome/installer/mac/signing/parts.py
++++ b/chrome/installer/mac/signing/parts.py
+@@ -14,6 +14,8 @@ from signing.model import CodeSignOptions, CodeSignedProduct, VerifyOptions
+ _PROVISIONPROFILE_EXT = '.provisionprofile'
+ _PROVISIONPROFILE_DEST = 'embedded.provisionprofile'
+ 
++ADHOC_FRAMEWORK_ENTITLEMENTS = 'adhoc-framework-entitlements.plist'
++
+ 
+ def get_parts(config):
+     """Returns all the |model.CodeSignedProduct| objects to be signed for a
+@@ -35,12 +37,21 @@ def get_parts(config):
+ 
+     verify_options = VerifyOptions.DEEP | VerifyOptions.STRICT
+ 
++    framework_loading_options = (CodeSignOptions.RESTRICT
++                                 | CodeSignOptions.KILL
++                                 | CodeSignOptions.HARDENED_RUNTIME)
++    standard_framework_loading_options = (
++        framework_loading_options if config.identity == '-' else
++        CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS)
++    adhoc_framework_entitlements = (
++        ADHOC_FRAMEWORK_ENTITLEMENTS if config.identity == '-' else None)
++
+     parts = {
+         'app':
+             CodeSignedProduct(
+                 '{.app_product}.app'.format(config),
+                 config.base_bundle_id,
+-                options=CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS,
++                options=standard_framework_loading_options,
+                 requirements=config.codesign_requirements_outer_app,
+                 identifier_requirement=False,
+                 entitlements='app-entitlements.plist',
+@@ -63,7 +74,8 @@ def get_parts(config):
+                 '{0.framework_dir}/Helpers/{0.product} Helper.app'.format(
+                     config),
+                 '{}.helper'.format(uncustomized_bundle_id),
+-                options=CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS,
++                options=standard_framework_loading_options,
++                entitlements=adhoc_framework_entitlements,
+                 verify_options=verify_options),
+         'helper-renderer-app':
+             CodeSignedProduct(
+@@ -73,8 +85,7 @@ def get_parts(config):
+                 # Do not use |CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS|
+                 # because library validation is incompatible with the JIT
+                 # entitlement.
+-                options=CodeSignOptions.RESTRICT | CodeSignOptions.KILL
+-                | CodeSignOptions.HARDENED_RUNTIME,
++                options=framework_loading_options,
+                 entitlements='helper-renderer-entitlements.plist',
+                 verify_options=verify_options),
+         'helper-gpu-app':
+@@ -85,8 +96,7 @@ def get_parts(config):
+                 # Do not use |CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS|
+                 # because library validation is incompatible with more
+                 # permissive code signing entitlements.
+-                options=CodeSignOptions.RESTRICT | CodeSignOptions.KILL
+-                | CodeSignOptions.HARDENED_RUNTIME,
++                options=framework_loading_options,
+                 entitlements='helper-gpu-entitlements.plist',
+                 verify_options=verify_options),
+         'helper-alerts':
+@@ -95,21 +105,24 @@ def get_parts(config):
+                 .format(config),
+                 '{}.framework.AlertNotificationService'.format(
+                     config.base_bundle_id),
+-                options=CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS,
++                options=standard_framework_loading_options,
++                entitlements=adhoc_framework_entitlements,
+                 verify_options=verify_options),
+         'app-mode-app':
+             CodeSignedProduct(
+                 '{.framework_dir}/Helpers/app_mode_loader'.format(config),
+                 'app_mode_loader',
+-                options=CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS,
++                options=standard_framework_loading_options,
++                entitlements=adhoc_framework_entitlements,
+                 verify_options=verify_options),
+         'web-app-shortcut-copier':
+             CodeSignedProduct(
+                 '{.framework_dir}/Helpers/web_app_shortcut_copier'.format(
+                     config),
+                 '{}.web_app_shortcut_copier'.format(uncustomized_bundle_id),
+-                options=CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS,
++                options=standard_framework_loading_options,
+                 sign_with_identifier=True,
++                entitlements=adhoc_framework_entitlements,
+                 verify_options=verify_options),
+     }
+ 
+diff --git a/chrome/installer/mac/signing/parts_test.py b/chrome/installer/mac/signing/parts_test.py
+index a1e51697f8..1133f82ada 100644
+--- a/chrome/installer/mac/signing/parts_test.py
++++ b/chrome/installer/mac/signing/parts_test.py
+@@ -113,6 +113,47 @@ class TestGetParts(unittest.TestCase):
+             | model.CodeSignOptions.HARDENED_RUNTIME,
+             all_parts['privileged-helper'].options)
+ 
++    def test_ad_hoc_framework_loading_parts_disable_library_validation(self):
++        all_parts = parts.get_parts(test_config.TestConfig(identity='-'))
++        framework_loading_options = (
++            model.CodeSignOptions.RESTRICT | model.CodeSignOptions.KILL
++            | model.CodeSignOptions.HARDENED_RUNTIME)
++        expected_entitlements = {
++            'app': 'app-entitlements.plist',
++            'helper-app': parts.ADHOC_FRAMEWORK_ENTITLEMENTS,
++            'helper-renderer-app': 'helper-renderer-entitlements.plist',
++            'helper-gpu-app': 'helper-gpu-entitlements.plist',
++            'helper-alerts': parts.ADHOC_FRAMEWORK_ENTITLEMENTS,
++            'app-mode-app': parts.ADHOC_FRAMEWORK_ENTITLEMENTS,
++            'web-app-shortcut-copier': parts.ADHOC_FRAMEWORK_ENTITLEMENTS,
++        }
++        for name, entitlements in expected_entitlements.items():
++            self.assertEqual(framework_loading_options,
++                             all_parts[name].options)
++            self.assertEqual(entitlements, all_parts[name].entitlements)
++
++        full_options = model.CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS
++        self.assertEqual(full_options, all_parts['crashpad'].options)
++        self.assertEqual(full_options, all_parts['privileged-helper'].options)
++        for name in ('framework', 'libEGL.dylib', 'libGLESv2.dylib'):
++            self.assertIsNone(all_parts[name].options)
++            self.assertIsNone(all_parts[name].entitlements)
++
++    def test_real_identity_does_not_add_ad_hoc_entitlements(self):
++        all_parts = parts.get_parts(test_config.TestConfig())
++        for name in ('helper-app', 'helper-alerts', 'app-mode-app',
++                     'web-app-shortcut-copier'):
++            self.assertEqual(
++                model.CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS,
++                all_parts[name].options)
++            self.assertIsNone(all_parts[name].entitlements)
++        self.assertEqual('app-entitlements.plist',
++                         all_parts['app'].entitlements)
++        self.assertEqual('helper-renderer-entitlements.plist',
++                         all_parts['helper-renderer-app'].entitlements)
++        self.assertEqual('helper-gpu-entitlements.plist',
++                         all_parts['helper-gpu-app'].entitlements)
++
+ 
+ def _get_plist_read(other_version):
+ 

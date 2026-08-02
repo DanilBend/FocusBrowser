@@ -1,0 +1,5 @@
+# Path prefixes relative to source_overrides/. Keep the trailing slash.
+# These files belong to the Windows installer/updater/branding path only.
+chrome/app/theme/chromium/win/
+chrome/browser/win/
+chrome/installer/

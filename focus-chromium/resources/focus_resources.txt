@@ -38,11 +38,9 @@ branding/product_logo_name_22_white_200.png chrome/app/theme/default_200_percent
 
 branding/product_logo.svg chrome/app/theme/chromium/product_logo.svg
 
-branding/product_logo.icon chrome/app/vector_icons/browser_logo.icon
 branding/product_logo.icon chrome/app/vector_icons/browser_logo_old.icon
 branding/product_logo.icon chrome/app/vector_icons/chrome_product.icon
 branding/product_logo.icon components/omnibox/browser/vector_icons/chrome_product.icon
-branding/product_logo.icon components/omnibox/browser/vector_icons/product_chrome_refresh.icon
 branding/product_logo.icon components/omnibox/browser/vector_icons/product_chrome_refresh_old.icon
 branding/product_logo.icon components/omnibox/browser/vector_icons/product_old.icon
 branding/product_logo.icon components/vector_icons/chromium/product.icon

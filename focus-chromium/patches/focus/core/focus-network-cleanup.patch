@@ -14,39 +14,6 @@ diff --git a/components/focus_services/focus_services_helpers.h b/components/foc
  
  bool ShouldAccessServices(const PrefService& prefs);
  
-diff --git a/components/focus_services/focus_services_helpers.cc b/components/focus_services/focus_services_helpers.cc
---- a/components/focus_services/focus_services_helpers.cc
-+++ b/components/focus_services/focus_services_helpers.cc
-@@ -28,7 +28,6 @@
- #endif
- 
- #if defined(UPDATES_SUPPORTED)
--constexpr std::string_view kUpdateBaseUrl = "https://updates.focus.computer/";
- constexpr const char kUpdatePath[] =
- #if BUILDFLAG(IS_MAC)
-     "mac/appcast-" CPU_ARCH_STR ".xml";
-@@ -145,15 +144,15 @@ GURL GetBrowserUpdateURL(const PrefService& prefs) {
- 
- #if defined(UPDATES_SUPPORTED)
-   const auto* command_line = base::CommandLine::ForCurrentProcess();
--  std::string baseUrl(kUpdateBaseUrl);
-   if (command_line->HasSwitch(focus::kUpdateServerUrlCommandLine)) {
--    baseUrl =
--        command_line->GetSwitchValueASCII(focus::kUpdateServerUrlCommandLine);
-+    std::optional<GURL> base_url = GetValidUserOverridenURL(
-+        command_line->GetSwitchValueASCII(focus::kUpdateServerUrlCommandLine));
-+    if (base_url) {
-+      return base_url->Resolve(kUpdatePath);
-+    }
-   }
--  return GURL(baseUrl).Resolve(kUpdatePath);
--#else
-+#endif
-   return GetDummyURL();
--#endif
- }
- 
- GURL GetComponentUpdateURL(const PrefService* prefs) {
 diff --git a/chrome/browser/extensions/updater/chrome_extension_downloader_factory.cc b/chrome/browser/extensions/updater/chrome_extension_downloader_factory.cc
 --- a/chrome/browser/extensions/updater/chrome_extension_downloader_factory.cc
 +++ b/chrome/browser/extensions/updater/chrome_extension_downloader_factory.cc
@@ -77,9 +44,9 @@ diff --git a/third_party/ublock/about.html b/third_party/ublock/about.html
  
  <div class="body">
      <div id="aboutNameVer" class="li"></div>
--    <div class="li">Focus fork:</div>
+-    <div class="li">Helium fork:</div>
 -    <div class="liul">
--        <div class="li"><a href="https://focus.computer/privacy" data-i18n="aboutPrivacyPolicy"></a></div>
+-        <div class="li"><a href="https://helium.computer/privacy" data-i18n="aboutPrivacyPolicy"></a></div>
 -        <div class="li"><a href="https://github.com/imputnet/uBlock" data-i18n="aboutCode"></a></div>
 -    </div>
      <div class="li">Upstream:</div>

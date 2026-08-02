@@ -215,10 +215,10 @@
                  if ( bin.assetSourceRegistry instanceof Object ) {
 --- a/chrome/app/settings_strings.grdp
 +++ b/chrome/app/settings_strings.grdp
-@@ -1761,6 +1761,12 @@
-         Focus Browser will automatically check for component updates and install them. We recommend keeping this setting enabled. On Linux, browser updates are handled by your distro's package manager. Please check for Focus Browser package updates at least every week.
-       </message>
-     </if>
+@@ -1751,6 +1751,12 @@
+     <message name="IDS_SETTINGS_FOCUS_SERVICES_SPELLCHECK_TOGGLE_DESCRIPTION" desc="Description of the for enabling/disabling of downloading spellcheck files">
+       Focus Browser will fetch dictionary files used for spell checking when requested. When disabled, spell checking will not work.
+     </message>
 +    <message name="IDS_SETTINGS_FOCUS_SERVICES_UBO" desc="Description of the toggle for uBO filter lists">
 +      Allow downloading filter lists for uBlock Origin
 +    </message>
@@ -230,24 +230,24 @@
      </message>
 --- a/chrome/browser/resources/settings/privacy_page/services_page.html
 +++ b/chrome/browser/resources/settings/privacy_page/services_page.html
-@@ -104,6 +104,11 @@
-                 label="$i18n{focusUpdatesToggle}"
-                 sub-label="$i18n{focusUpdatesToggleDescription}">
-             </settings-toggle-button>
+@@ -97,6 +97,11 @@
+                     pref="{{prefs.focus.services.spellcheck_files}}"
+                     label="$i18n{focusSpellcheckToggle}"
+                     sub-label="$i18n{focusSpellcheckToggleDescription}">
+                 </settings-toggle-button>
+             </if>
 +            <settings-toggle-button id="filterlistToggleButton"
 +                pref="{{prefs.focus.services.ublock_assets}}"
 +                label="$i18n{focusUboToggle}"
 +                sub-label="$i18n{focusUboToggleDescription}">
 +            </settings-toggle-button>
          </cr-collapse>
-     </div>
-     </template>
 --- a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
 +++ b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
-@@ -2364,6 +2364,10 @@ void AddPrivacyStrings(content::WebUIDat
-       {"focusUpdatesToggle", IDS_SETTINGS_FOCUS_SERVICES_UPDATE},
-       {"focusUpdatesToggleDescription",
-         IDS_SETTINGS_FOCUS_SERVICES_UPDATE_DESCRIPTION},
+@@ -2362,6 +2362,10 @@ void AddPrivacyStrings(content::WebUIDat
+       {"focusSpellcheckToggle", IDS_SETTINGS_FOCUS_SERVICES_SPELLCHECK_TOGGLE},
+       {"focusSpellcheckToggleDescription",
+         IDS_SETTINGS_FOCUS_SERVICES_SPELLCHECK_TOGGLE_DESCRIPTION},
 +      {"focusUboToggle",
 +        IDS_SETTINGS_FOCUS_SERVICES_UBO},
 +      {"focusUboToggleDescription",

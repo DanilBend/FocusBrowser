@@ -1,0 +1,507 @@
+name: Publish Sparkle macOS appcast
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published immutable macOS prerelease tag
+        required: true
+        default: v1.0.6-macos
+      version:
+        description: Four-part Focus Browser version
+        required: true
+        default: 1.0.6.0
+      short_version:
+        description: User-facing Focus Browser version
+        required: true
+        default: 1.0.6
+      payload_name:
+        description: Final universal auto-update DMG asset
+        required: true
+        default: FocusBrowser-macOS-1.0.6-universal-autoupdate.dmg
+      published_at:
+        description: Exact RFC3339 UTC timestamp used to sign appcast-macos.xml
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: focus-update-appcasts-pages
+  cancel-in-progress: false
+
+jobs:
+  verify-macos-appcast:
+    name: Verify immutable macOS release and appcast
+    runs-on: macos-15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      FOCUS_VERSION: ${{ inputs.version }}
+      FOCUS_SHORT_VERSION: ${{ inputs.short_version }}
+      PAYLOAD_NAME: ${{ inputs.payload_name }}
+      PUBLISHED_AT: ${{ inputs.published_at }}
+      APPCAST_NAME: appcast-macos.xml
+      CHECKSUMS_NAME: SHA256SUMS-macOS-${{ inputs.short_version }}.txt
+      SPARKLE_PUBLIC_KEY: NcOw/DDSWLfV+kG111aN6fO8b0K4v3dygU7nYlLkkD0=
+      WINSPARKLE_ED_KEY: ${{ vars.WINSPARKLE_ED_KEY }}
+      PRODUCTION_MACOS_APPCAST_URL: https://danilbend.github.io/FocusBrowser/appcast-macos.xml
+      PRODUCTION_X64_APPCAST_URL: https://danilbend.github.io/FocusBrowser/appcast-x64.xml
+      EXPECTED_WINDOWS_LATEST_TAG: v1.0.5
+      WINDOWS_FULL_INSTALLER_NAME: FocusBrowser_1.0.5_x64-installer.exe
+      WINDOWS_PAYLOAD_NAME: FocusBrowser_1.0.5_x64-mini-installer.exe
+      WINDOWS_PORTABLE_NAME: FocusBrowser_1.0.5_x64-windows.zip
+      WINDOWS_CHECKSUMS_NAME: SHA256SUMS-1.0.5.txt
+      WINDOWS_APPCAST_NAME: appcast-x64.xml
+      EXPECTED_MACOS_RELEASE_TAG: v1.0.6-macos
+      RESERVED_STABLE_TAG: v1.0.6
+      EXPECTED_MACOS_VERSION: 1.0.6.0
+      EXPECTED_MACOS_SHORT_VERSION: 1.0.6
+      EXPECTED_MACOS_PAYLOAD_NAME: FocusBrowser-macOS-1.0.6-universal-autoupdate.dmg
+    steps:
+      - name: Reject dispatches outside main
+        if: github.ref != 'refs/heads/main'
+        shell: bash
+        run: |
+          echo "This publication workflow must be dispatched from main" >&2
+          exit 1
+
+      - name: Check out the exact workflow revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate inputs and immutable non-latest prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_TAG" != "$EXPECTED_MACOS_RELEASE_TAG" ]] ||
+             [[ "$FOCUS_VERSION" != "$EXPECTED_MACOS_VERSION" ]] ||
+             [[ "$FOCUS_SHORT_VERSION" != "$EXPECTED_MACOS_SHORT_VERSION" ]] ||
+             [[ "$PAYLOAD_NAME" != "$EXPECTED_MACOS_PAYLOAD_NAME" ]]; then
+            echo "This workflow is pinned to the exact v1.0.6-macos prerelease contract" >&2
+            exit 1
+          fi
+          if [[ ! "$PUBLISHED_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+            echo "published_at must be canonical UTC RFC3339" >&2
+            exit 1
+          fi
+
+          release_json="$RUNNER_TEMP/focus-macos-release.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$release_json"
+          if [[ "$(jq -r '.draft' "$release_json")" != false ]] ||
+             [[ "$(jq -r '.prerelease' "$release_json")" != true ]] ||
+             [[ "$(jq -r '.immutable' "$release_json")" != true ]] ||
+             [[ "$(jq -r '.published_at // empty' "$release_json")" == "" ]]; then
+            echo "The macOS appcast requires a published immutable prerelease" >&2
+            exit 1
+          fi
+          if [[ "$(jq -r '.tag_name' "$release_json")" != "$RELEASE_TAG" ]] ||
+             [[ "$(jq -r '.html_url' "$release_json")" != \
+               "https://github.com/DanilBend/FocusBrowser/releases/tag/$RELEASE_TAG" ]]; then
+            echo "Release identity does not match the requested tag" >&2
+            exit 1
+          fi
+
+          latest_json="$RUNNER_TEMP/focus-latest-release.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/latest" > "$latest_json"
+          if [[ "$(jq -r '.tag_name' "$latest_json")" != \
+                "$EXPECTED_WINDOWS_LATEST_TAG" ]] ||
+             [[ "$(jq -r '.draft' "$latest_json")" != false ]] ||
+             [[ "$(jq -r '.prerelease' "$latest_json")" != false ]] ||
+             [[ "$(jq -r '.immutable' "$latest_json")" != true ]] ||
+             [[ "$(jq -r '.html_url' "$latest_json")" != \
+               "https://github.com/DanilBend/FocusBrowser/releases/tag/$EXPECTED_WINDOWS_LATEST_TAG" ]]; then
+            echo "The latest endpoint must remain on immutable Windows v1.0.5" >&2
+            exit 1
+          fi
+
+          assert_github_object_absent() {
+            local endpoint="$1"
+            local label="$2"
+            local response_file="$3"
+            local status
+            status=$(curl --silent --show-error \
+              --proto '=https' --tlsv1.2 \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              --output "$response_file" --write-out '%{http_code}' \
+              "https://api.github.com/$endpoint")
+            if [[ "$status" == 404 ]]; then
+              return 0
+            fi
+            if [[ "$status" == 200 ]]; then
+              echo "$label already exists; the plain v1.0.6 identity is reserved" >&2
+            else
+              echo "Could not prove $label absent; GitHub API returned HTTP $status" >&2
+            fi
+            exit 1
+          }
+          assert_github_object_absent \
+            "repos/$GITHUB_REPOSITORY/git/ref/tags/$RESERVED_STABLE_TAG" \
+            "reserved git tag $RESERVED_STABLE_TAG" \
+            "$RUNNER_TEMP/focus-reserved-tag-response.json"
+          assert_github_object_absent \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$RESERVED_STABLE_TAG" \
+            "reserved release $RESERVED_STABLE_TAG" \
+            "$RUNNER_TEMP/focus-reserved-release-response.json"
+
+          expected_assets=$(printf '%s\n%s\n%s\n' \
+            "$PAYLOAD_NAME" "$APPCAST_NAME" "$CHECKSUMS_NAME" | sort)
+          observed_assets=$(jq -r \
+            '.assets[].name | select(test("^(FocusBrowser-macOS-|appcast-macos\\.xml$|SHA256SUMS-macOS-)"))' \
+            "$release_json" | sort)
+          if [[ "$(jq '.assets | length' "$release_json")" != 3 ]] ||
+             [[ "$observed_assets" != "$expected_assets" ]]; then
+            echo "The release macOS asset inventory is not exact" >&2
+            exit 1
+          fi
+          for asset_name in "$PAYLOAD_NAME" "$APPCAST_NAME" "$CHECKSUMS_NAME"; do
+            count=$(jq --arg name "$asset_name" \
+              '[.assets[] | select(.name == $name)] | length' "$release_json")
+            state=$(jq -r --arg name "$asset_name" \
+              '.assets[] | select(.name == $name) | .state' "$release_json")
+            size=$(jq -r --arg name "$asset_name" \
+              '.assets[] | select(.name == $name) | .size' "$release_json")
+            digest=$(jq -r --arg name "$asset_name" \
+              '.assets[] | select(.name == $name) | .digest // empty' "$release_json")
+            url=$(jq -r --arg name "$asset_name" \
+              '.assets[] | select(.name == $name) | .browser_download_url' "$release_json")
+            expected_url="https://github.com/DanilBend/FocusBrowser/releases/download/${RELEASE_TAG}/${asset_name}"
+            if [[ "$count" != 1 ]] || [[ "$state" != uploaded ]] ||
+               [[ ! "$size" =~ ^[1-9][0-9]*$ ]] ||
+               [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+               [[ "$url" != "$expected_url" ]]; then
+              echo "Release metadata is incomplete for $asset_name" >&2
+              exit 1
+            fi
+          done
+
+          main_ref=$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/git/ref/heads/main")
+          main_sha=$(jq -r '.object.sha' <<< "$main_ref")
+          if [[ "$(jq -r '.object.type' <<< "$main_ref")" != commit ]] ||
+             [[ "$main_sha" != "$GITHUB_SHA" ]]; then
+            echo "Workflow must run from the current main commit" >&2
+            exit 1
+          fi
+          tag_ref=$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG")
+          tag_type=$(jq -r '.object.type' <<< "$tag_ref")
+          tag_sha=$(jq -r '.object.sha' <<< "$tag_ref")
+          peel_depth=0
+          while [[ "$tag_type" == tag ]]; do
+            peel_depth=$((peel_depth + 1))
+            if (( peel_depth > 8 )); then
+              echo "Release tag contains too many nested annotated tags" >&2
+              exit 1
+            fi
+            tag_object=$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/git/tags/$tag_sha")
+            tag_type=$(jq -r '.object.type' <<< "$tag_object")
+            tag_sha=$(jq -r '.object.sha' <<< "$tag_object")
+          done
+          if [[ "$tag_type" != commit ]]; then
+            echo "Release tag must ultimately resolve to a commit" >&2
+            exit 1
+          fi
+          comparison=$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/compare/${tag_sha}...${main_sha}")
+          comparison_status=$(jq -r '.status' <<< "$comparison")
+          if [[ "$(jq -r '.merge_base_commit.sha' <<< "$comparison")" != "$tag_sha" ]] ||
+             [[ "$comparison_status" != ahead && "$comparison_status" != identical ]]; then
+            echo "Release tag must resolve to a commit on current main history" >&2
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+          from pathlib import Path
+
+          release = json.loads(
+              (Path(os.environ["RUNNER_TEMP"]) / "focus-macos-release.json")
+              .read_text(encoding="utf-8")
+          )
+          appcast_time = datetime.datetime.strptime(
+              os.environ["PUBLISHED_AT"], "%Y-%m-%dT%H:%M:%SZ"
+          ).replace(tzinfo=datetime.timezone.utc)
+          release_time = datetime.datetime.fromisoformat(
+              release["published_at"].replace("Z", "+00:00")
+          )
+          if appcast_time > release_time + datetime.timedelta(minutes=5):
+              raise SystemExit("appcast timestamp is after release publication")
+          if appcast_time < release_time - datetime.timedelta(days=30):
+              raise SystemExit("appcast timestamp is older than 30 days before release")
+          PY
+
+      - name: Download and verify exact public macOS assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_json="$RUNNER_TEMP/focus-macos-release.json"
+          payload_dir="$RUNNER_TEMP/focus-macos-public-assets"
+          mkdir -m 700 "$payload_dir"
+          for asset_name in "$PAYLOAD_NAME" "$APPCAST_NAME" "$CHECKSUMS_NAME"; do
+            url=$(jq -r --arg name "$asset_name" \
+              '.assets[] | select(.name == $name) | .browser_download_url' "$release_json")
+            expected_size=$(jq -r --arg name "$asset_name" \
+              '.assets[] | select(.name == $name) | .size' "$release_json")
+            expected_digest=$(jq -r --arg name "$asset_name" \
+              '.assets[] | select(.name == $name) | .digest' "$release_json")
+            if [[ ! "$expected_size" =~ ^[1-9][0-9]*$ ]]; then
+              echo "Release metadata has an invalid size for $asset_name" >&2
+              exit 1
+            fi
+            destination="$payload_dir/$asset_name"
+            curl --fail --silent --show-error --location \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 \
+              --max-filesize "$expected_size" \
+              --output "$destination" "$url"
+            actual_size=$(stat -f '%z' "$destination")
+            actual_digest="sha256:$(shasum -a 256 "$destination" | awk '{print $1}')"
+            if [[ "$actual_size" != "$expected_size" ]] ||
+               [[ "$actual_digest" != "$expected_digest" ]]; then
+              echo "Public download identity mismatch for $asset_name" >&2
+              exit 1
+            fi
+          done
+          if (( $(stat -f '%z' "$payload_dir/$PAYLOAD_NAME") < 1048576 )); then
+            echo "Universal DMG is unexpectedly small" >&2
+            exit 1
+          fi
+          if (( $(stat -f '%z' "$payload_dir/$APPCAST_NAME") > 1048576 )); then
+            echo "macOS appcast is unexpectedly large" >&2
+            exit 1
+          fi
+
+          PAYLOAD_DIR="$payload_dir" python3 - <<'PY'
+          import hashlib
+          import os
+          import re
+          from pathlib import Path
+
+          root = Path(os.environ["PAYLOAD_DIR"])
+          expected_names = {os.environ["PAYLOAD_NAME"], os.environ["APPCAST_NAME"]}
+          checksum_path = root / os.environ["CHECKSUMS_NAME"]
+          lines = checksum_path.read_text(encoding="utf-8").splitlines()
+          if len(lines) != 2 or any(not line for line in lines):
+              raise SystemExit("macOS checksum file must contain exactly two lines")
+          entries = {}
+          for line in lines:
+              match = re.fullmatch(r"([0-9a-f]{64})  ([^/\\]+)", line)
+              if match is None or match.group(2) in entries:
+                  raise SystemExit("macOS checksum file is malformed")
+              entries[match.group(2)] = match.group(1)
+          if set(entries) != expected_names:
+              raise SystemExit("macOS checksum inventory is not exact")
+          for name, expected in entries.items():
+              actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              if actual != expected:
+                  raise SystemExit("macOS checksum mismatch for " + name)
+          PY
+
+          payload_size=$(stat -f '%z' "$payload_dir/$PAYLOAD_NAME")
+          payload_sha=$(shasum -a 256 "$payload_dir/$PAYLOAD_NAME" | awk '{print $1}')
+          {
+            echo "FOCUS_MACOS_PAYLOAD=$payload_dir/$PAYLOAD_NAME"
+            echo "FOCUS_MACOS_APPCAST=$payload_dir/$APPCAST_NAME"
+            echo "FOCUS_MACOS_PAYLOAD_SIZE=$payload_size"
+            echo "FOCUS_MACOS_PAYLOAD_SHA256=$payload_sha"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate public DMG, Sparkle provenance, and appcast signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          sparkle_root="$RUNNER_TEMP/focus-sparkle-2.9.4"
+          sparkle_e2e_receipt="$RUNNER_TEMP/focus-sparkle-e2e.json"
+          sparkle_e2e_challenge="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+          python3 platform/macos/acquire_sparkle.py \
+            --destination "$sparkle_root" \
+            --execute
+          python3 platform/macos/sparkle_update_e2e.py \
+            --sparkle-source-root "$sparkle_root" \
+            --developer-dir "$(xcode-select -p)" \
+            --release-challenge "$sparkle_e2e_challenge" \
+            --output "$sparkle_e2e_receipt" \
+            > "$RUNNER_TEMP/focus-sparkle-e2e.stdout.json"
+          python3 .github/scripts/verify_public_macos_dmg.py \
+            --dmg "$FOCUS_MACOS_PAYLOAD" \
+            --expected-size "$FOCUS_MACOS_PAYLOAD_SIZE" \
+            --expected-sha256 "$FOCUS_MACOS_PAYLOAD_SHA256" \
+            --sparkle-source-root "$sparkle_root" \
+            --sparkle-e2e-receipt "$sparkle_e2e_receipt" \
+            --sparkle-e2e-challenge "$sparkle_e2e_challenge"
+          python3 platform/macos/prepare_sparkle_appcast.py validate-public \
+            --public-key "$SPARKLE_PUBLIC_KEY" \
+            --payload "$FOCUS_MACOS_PAYLOAD" \
+            --expected-size "$FOCUS_MACOS_PAYLOAD_SIZE" \
+            --expected-sha256 "$FOCUS_MACOS_PAYLOAD_SHA256" \
+            --asset-url "https://github.com/DanilBend/FocusBrowser/releases/download/$RELEASE_TAG/$PAYLOAD_NAME" \
+            --release-url "https://github.com/DanilBend/FocusBrowser/releases/tag/$RELEASE_TAG" \
+            --version "$FOCUS_VERSION" \
+            --short-version "$FOCUS_SHORT_VERSION" \
+            --published-at "$PUBLISHED_AT" \
+            --appcast "$FOCUS_MACOS_APPCAST"
+
+      - name: Verify immutable Windows v1.0.5 Pages handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ ! "$WINSPARKLE_ED_KEY" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
+            echo "WINSPARKLE_ED_KEY is missing or malformed" >&2
+            exit 1
+          fi
+
+          windows_dir="$RUNNER_TEMP/focus-windows-v1.0.5-handoff"
+          mkdir -m 700 "$windows_dir"
+          windows_release_json="$windows_dir/release-by-tag.json"
+          windows_latest_json="$windows_dir/release-latest.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$EXPECTED_WINDOWS_LATEST_TAG" \
+            > "$windows_release_json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/latest" \
+            > "$windows_latest_json"
+
+          download_release_asset() {
+            local asset_name="$1"
+            local count state expected_size expected_digest url expected_url
+            local destination actual_size actual_digest
+            count=$(jq --arg name "$asset_name" \
+              '[.assets[] | select(.name == $name)] | length' \
+              "$windows_release_json")
+            state=$(jq -r --arg name "$asset_name" \
+              '.assets[] | select(.name == $name) | .state' \
+              "$windows_release_json")
+            expected_size=$(jq -r --arg name "$asset_name" \
+              '.assets[] | select(.name == $name) | .size' \
+              "$windows_release_json")
+            expected_digest=$(jq -r --arg name "$asset_name" \
+              '.assets[] | select(.name == $name) | .digest // empty' \
+              "$windows_release_json")
+            url=$(jq -r --arg name "$asset_name" \
+              '.assets[] | select(.name == $name) | .browser_download_url' \
+              "$windows_release_json")
+            expected_url="https://github.com/DanilBend/FocusBrowser/releases/download/${EXPECTED_WINDOWS_LATEST_TAG}/${asset_name}"
+            if [[ "$count" != 1 ]] || [[ "$state" != uploaded ]] ||
+               [[ ! "$expected_size" =~ ^[1-9][0-9]*$ ]] ||
+               [[ ! "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+               [[ "$url" != "$expected_url" ]]; then
+              echo "Immutable Windows release metadata is invalid for $asset_name" >&2
+              exit 1
+            fi
+            destination="$windows_dir/$asset_name"
+            curl --fail --silent --show-error --location \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 \
+              --max-filesize "$expected_size" \
+              --output "$destination" "$url"
+            actual_size=$(stat -f '%z' "$destination")
+            actual_digest="sha256:$(shasum -a 256 "$destination" | awk '{print $1}')"
+            if [[ "$actual_size" != "$expected_size" ]] ||
+               [[ "$actual_digest" != "$expected_digest" ]]; then
+              echo "Immutable Windows release download mismatch for $asset_name" >&2
+              exit 1
+            fi
+          }
+
+          download_release_asset "$WINDOWS_PAYLOAD_NAME"
+          download_release_asset "$WINDOWS_APPCAST_NAME"
+          download_release_asset "$WINDOWS_CHECKSUMS_NAME"
+
+          current_pages_x64="$windows_dir/current-pages-appcast-x64.xml"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 \
+            --max-filesize 1048576 \
+            --output "$current_pages_x64" "$PRODUCTION_X64_APPCAST_URL"
+
+          python3 .github/scripts/verify_windows_feed_handoff.py \
+            --release-json "$windows_release_json" \
+            --latest-json "$windows_latest_json" \
+            --payload "$windows_dir/$WINDOWS_PAYLOAD_NAME" \
+            --appcast "$windows_dir/$WINDOWS_APPCAST_NAME" \
+            --checksums "$windows_dir/$WINDOWS_CHECKSUMS_NAME" \
+            --pages-appcast "$current_pages_x64" \
+            --public-key "$WINSPARKLE_ED_KEY" \
+            > "$windows_dir/handoff-report.json"
+          {
+            echo "FOCUS_WINDOWS_CANONICAL_APPCAST=$windows_dir/$WINDOWS_APPCAST_NAME"
+            echo "FOCUS_WINDOWS_PAGES_APPCAST=$current_pages_x64"
+          } >> "$GITHUB_ENV"
+
+      - name: Stage both public appcasts without rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          site_root="$RUNNER_TEMP/focus-pages"
+          mkdir -m 700 "$site_root"
+
+          fetch_optional_feed() {
+            local url="$1"
+            local destination="$2"
+            local status
+            status=$(curl --silent --show-error --location \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --max-filesize 1048576 \
+              --output "$destination" --write-out '%{http_code}' "$url")
+            if [[ "$status" == 200 ]]; then
+              return 0
+            fi
+            rm -f "$destination"
+            if [[ "$status" == 404 ]]; then
+              return 1
+            fi
+            echo "Unexpected HTTP status $status for $url" >&2
+            exit 1
+          }
+
+          previous_macos="$RUNNER_TEMP/previous-appcast-macos.xml"
+          if fetch_optional_feed "$PRODUCTION_MACOS_APPCAST_URL" "$previous_macos"; then
+            python3 .github/scripts/stage_public_appcast.py \
+              --source "$FOCUS_MACOS_APPCAST" \
+              --feed-name appcast-macos.xml \
+              --destination-dir "$site_root" \
+              --previous "$previous_macos"
+          else
+            python3 .github/scripts/stage_public_appcast.py \
+              --source "$FOCUS_MACOS_APPCAST" \
+              --feed-name appcast-macos.xml \
+              --destination-dir "$site_root"
+          fi
+
+          python3 .github/scripts/stage_public_appcast.py \
+            --source "$FOCUS_WINDOWS_CANONICAL_APPCAST" \
+            --feed-name appcast-x64.xml \
+            --destination-dir "$site_root" \
+            --previous "$FOCUS_WINDOWS_PAGES_APPCAST"
+          python3 .github/scripts/stage_macos_page.py \
+            --source-dir .github/pages/macos \
+            --destination-dir "$site_root"
+          : > "$site_root/.nojekyll"
+          find "$site_root" -type f -print | sort
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: ${{ runner.temp }}/focus-pages
+          include-hidden-files: true
+
+  deploy-macos-appcast:
+    name: Deploy macOS prerelease appcast
+    needs: verify-macos-appcast
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5

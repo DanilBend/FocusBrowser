@@ -193,7 +193,7 @@
          bookmark_sub_menu_model_.get(),
          features::IsRoundedIconsEnabled() ? kStarIcon
                                            : kBookmarksListsMenuOldIcon);
-@@ -2057,28 +1945,11 @@ void AppMenuModel::Build() {
+@@ -2057,35 +1945,18 @@ void AppMenuModel::Build() {
          kTabGroupsMenuItem);
    }
  
@@ -224,6 +224,13 @@
 +      features::IsRoundedIconsEnabled()
 +          ? vector_icons::kChromeExtensionIcon
 +          : vector_icons::kExtensionChromeRefreshOldIcon);
+ 
+   AddItemWithIcon(
+       IDC_OPEN_MEDITATION, u"Медитация",
+       ui::ImageModel::FromVectorIcon(
+           features::IsRoundedIconsEnabled() ? vector_icons::kPlayArrowIcon
+                                             : vector_icons::kPlayArrowOldIcon,
+           ui::kColorMenuIcon, kDefaultIconSize));
  
    AddItemWithStringIdAndVectorIcon(
        this, IDC_CLEAR_BROWSING_DATA, IDS_CLEAR_BROWSING_DATA,

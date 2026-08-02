@@ -1,0 +1,28 @@
+diff --git a/sandbox/mac/seatbelt.cc b/sandbox/mac/seatbelt.cc
+--- a/sandbox/mac/seatbelt.cc
++++ b/sandbox/mac/seatbelt.cc
+@@ -139,12 +139,6 @@ Seatbelt::Parameters::~Parameters() {
+   }
+ }
+ 
+-// Initialize the static member variables.
+-#pragma clang diagnostic push
+-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+-const char* Seatbelt::kProfilePureComputation = kSBXProfilePureComputation;
+-#pragma clang diagnostic pop
+-
+ // static
+ bool Seatbelt::Init(const char* profile, uint64_t flags, std::string* error) {
+ // OS X deprecated these functions, but did not provide a suitable replacement,
+diff --git a/sandbox/mac/seatbelt.h b/sandbox/mac/seatbelt.h
+--- a/sandbox/mac/seatbelt.h
++++ b/sandbox/mac/seatbelt.h
+@@ -84,8 +84,6 @@ class SEATBELT_EXPORT Seatbelt {
+   // Returns whether or not the process is currently sandboxed.
+   static bool IsSandboxed();
+ 
+-  static const char* kProfilePureComputation;
+-
+   Seatbelt(const Seatbelt& other) = delete;
+   Seatbelt& operator=(const Seatbelt& other) = delete;
+ 

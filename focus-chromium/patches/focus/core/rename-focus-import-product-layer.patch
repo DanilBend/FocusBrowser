@@ -1,342 +1,1028 @@
-diff --git a/chrome/browser/ui/webui/settings/brave_import_data_handler.cc b/chrome/browser/ui/webui/settings/focus_import_data_handler.cc
-similarity index 90%
-rename from chrome/browser/ui/webui/settings/brave_import_data_handler.cc
-rename to chrome/browser/ui/webui/settings/focus_import_data_handler.cc
+diff --git a/chrome/browser/ui/webui/settings/brave_import_data_handler.cc b/chrome/browser/ui/webui/settings/brave_import_data_handler.cc
+deleted file mode 100644
 --- a/chrome/browser/ui/webui/settings/brave_import_data_handler.cc
-+++ b/chrome/browser/ui/webui/settings/focus_import_data_handler.cc
-@@ -3,7 +3,7 @@
-  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
-  * You can obtain one at http://mozilla.org/MPL/2.0/. */
- 
++++ /dev/null
+@@ -1,272 +0,0 @@
+-/* Copyright (c) 2020 The Brave Authors. All rights reserved.
+- * This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+- * You can obtain one at http://mozilla.org/MPL/2.0/. */
+-
 -#include "chrome/browser/ui/webui/settings/brave_import_data_handler.h"
-+#include "chrome/browser/ui/webui/settings/focus_import_data_handler.h"
- 
- #include <memory>
- #include <string>
-@@ -64,10 +64,10 @@
- 
- namespace settings {
- 
+-
+-#include <memory>
+-#include <string>
+-#include <utility>
+-
+-#include "base/check.h"
+-#include "base/logging.h"
+-#include "chrome/browser/importer/brave_external_process_importer_host.h"
+-#include "chrome/browser/importer/importer_list.h"
+-#include "chrome/browser/importer/profile_writer.h"
+-#include "chrome/browser/profiles/profile.h"
+-#include "content/public/browser/browser_task_traits.h"
+-#include "content/public/browser/browser_thread.h"
+-#include "content/public/browser/web_contents.h"
+-
+-#if BUILDFLAG(IS_MAC)
+-#include "base/apple/foundation_util.h"
+-#include "base/files/file_path.h"
+-#include "base/files/file_util.h"
+-#include "base/task/thread_pool.h"
+-#include "chrome/browser/ui/webui/settings/brave_full_disk_access_confirm_dialog_delegate.h"
+-#include "chrome/browser/ui/browser_finder.h"
+-#include "chrome/browser/ui/tab_modal_confirm_dialog.h"
+-#endif  // BUILDFLAG(IS_MAC)
+-
+-namespace {
+-#if BUILDFLAG(IS_MAC)
+-bool HasProperDiskAccessPermission(uint16_t imported_items) {
+-  DCHECK(imported_items);
+-
+-  const base::FilePath& library_dir = base::apple::GetUserLibraryPath();
+-  const base::FilePath safari_dir = library_dir.Append("Safari");
+-
+-  if (imported_items & user_data_importer::FAVORITES) {
+-    const base::FilePath bookmarks_path = safari_dir.Append("Bookmarks.plist");
+-    if (!PathIsWritable(bookmarks_path)) {
+-      LOG(ERROR) << __func__ << " " << bookmarks_path << " is not accessible."
+-                 << " Please check full disk access permission.";
+-      return false;
+-    }
+-  }
+-
+-  if (imported_items & user_data_importer::HISTORY) {
+-    const base::FilePath history_path = safari_dir.Append("History.plist");
+-    if (!PathIsWritable(history_path)) {
+-      LOG(ERROR) << __func__ << " " << history_path << " is not accessible."
+-                 << " Please check full disk access permission.";
+-      return false;
+-    }
+-  }
+-
+-  return true;
+-}
+-#endif  // BUILDFLAG(IS_MAC)
+-constexpr char kImportStatusSucceeded[] = "succeeded";
+-constexpr char kImportStatusFailed[] = "failed";
+-}  // namespace
+-
+-namespace settings {
+-
 -BraveImportDataHandler::BraveImportDataHandler() = default;
 -BraveImportDataHandler::~BraveImportDataHandler() = default;
+-
+-void BraveImportDataHandler::StartImport(
+-    const user_data_importer::SourceProfile& source_profile,
+-    uint16_t imported_items) {
+-  if (!imported_items) {
+-    if (IsJavascriptAllowed()) {
+-      FireWebUIListener("import-data-status-changed",
+-                        base::Value(kImportStatusFailed));
+-    }
+-    return;
+-  }
+-  content::WebUI* ui = web_ui();
+-  content::WebContents* web_contents = ui ? ui->GetWebContents() : nullptr;
+-  if (!web_contents) {
+-    LOG(ERROR) << "Cannot start import without a live profile and WebContents.";
+-    if (IsJavascriptAllowed()) {
+-      FireWebUIListener("import-data-status-changed",
+-                        base::Value(kImportStatusFailed));
+-    }
+-    return;
+-  }
+-  Profile* profile = Profile::FromWebUI(ui);
+-  if (!profile) {
+-    LOG(ERROR) << "Cannot start import without a live profile.";
+-    if (IsJavascriptAllowed()) {
+-      FireWebUIListener("import-data-status-changed",
+-                        base::Value(kImportStatusFailed));
+-    }
+-    return;
+-  }
+-#if BUILDFLAG(IS_MAC)
+-  CheckDiskAccess(imported_items, source_profile.source_path,
+-                  source_profile.importer_type,
+-                  base::BindOnce(&BraveImportDataHandler::StartImportImpl,
+-                                 weak_factory_.GetWeakPtr(), source_profile,
+-                                 imported_items, profile));
+-#else
+-  StartImportImpl(source_profile, imported_items, profile);
+-#endif
+-}
+-
+-void BraveImportDataHandler::StartImportImpl(
+-    const user_data_importer::SourceProfile& source_profile,
+-    uint16_t imported_items,
+-    Profile* profile) {
+-  content::WebUI* ui = web_ui();
+-  content::WebContents* web_contents = ui ? ui->GetWebContents() : nullptr;
+-  if (!web_contents) {
+-    LOG(ERROR) << "Import target disappeared before import could start.";
+-    if (IsJavascriptAllowed()) {
+-      FireWebUIListener("import-data-status-changed",
+-                        base::Value(kImportStatusFailed));
+-    }
+-    return;
+-  }
+-  Profile* current_profile = Profile::FromWebUI(ui);
+-  if (!imported_items || !profile || profile != current_profile) {
+-    LOG(ERROR) << "Import target profile disappeared before import could start.";
+-    if (IsJavascriptAllowed()) {
+-      FireWebUIListener("import-data-status-changed",
+-                        base::Value(kImportStatusFailed));
+-    }
+-    return;
+-  }
+-
+-  // Keep a single terminal result for the active WebUI request. Starting a
+-  // second import while the first host is still reporting progress would mix
+-  // their success state and can report a stale result.
+-  if (!import_observers_.empty()) {
+-    LOG(WARNING) << "Ignored a concurrent import request.";
+-    return;
+-  }
+-
+-  import_did_succeed_ = false;
+-  FireWebUIListener("import-data-status-changed", base::Value("inProgress"));
+-
+-  // Using weak pointers because it destroys itself when finshed.
+-  auto* importer_host = new BraveExternalProcessImporterHost();
+-  import_observers_[source_profile.source_path] =
+-      std::make_unique<BraveImporterObserver>(
+-          importer_host, source_profile, imported_items,
+-          base::BindRepeating(&BraveImportDataHandler::NotifyImportProgress,
+-                              weak_factory_.GetWeakPtr()));
+-
+-  importer_host->set_parent_window(web_contents->GetTopLevelNativeWindow());
+-  importer_host->set_parent_view(web_contents->GetNativeView());
+-
+-  importer_host->StartImportSettings(source_profile, profile, imported_items,
+-                                     new ProfileWriter(profile));
+-}
+-
+-void BraveImportDataHandler::NotifyImportProgress(
+-    const user_data_importer::SourceProfile& source_profile,
+-    const base::DictValue& info) {
+-  const std::string* event = info.FindString("event");
+-  if (!event) {
+-    return;
+-  }
+-  if (*event == "ImportItemEnded") {
+-    import_did_succeed_ = true;
+-  } else if (*event == "ImportEnded") {
+-    content::GetUIThreadTaskRunner({})->PostTask(
+-        FROM_HERE, base::BindOnce(&BraveImportDataHandler::OnImportEnded,
+-                                  weak_factory_.GetWeakPtr(), source_profile));
+-  }
+-}
+-
+-void BraveImportDataHandler::HandleImportData(const base::ListValue& args) {
+-  ImportDataHandler::HandleImportData(args);
+-}
+-
+-void BraveImportDataHandler::OnImportEnded(
+-    const user_data_importer::SourceProfile& source_profile) {
+-  import_observers_.erase(source_profile.source_path);
+-  FireWebUIListener("import-data-status-changed",
+-                    base::Value(import_did_succeed_ ? kImportStatusSucceeded
+-                                                    : kImportStatusFailed));
+-}
+-
+-void BraveImportDataHandler::OnJavascriptDisallowed() {
+-  weak_factory_.InvalidateWeakPtrs();
+-  ImportDataHandler::OnJavascriptDisallowed();
+-
+-  // When the WebUI is unloading, we ignore all further updates from the host as
+-  // ImportDataHandler does.
+-  import_observers_.clear();
+-}
+-
+-const user_data_importer::SourceProfile&
+-BraveImportDataHandler::GetSourceProfileAt(int browser_index) {
+-  return importer_list_->GetSourceProfileAt(browser_index);
+-}
+-
+-#if BUILDFLAG(IS_MAC)
+-void BraveImportDataHandler::CheckDiskAccess(
+-    uint16_t imported_items,
+-    base::FilePath source_path,
+-    user_data_importer::ImporterType importer_type,
+-    ContinueImportCallback callback) {
+-  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+-
+-  guide_dialog_is_requested_ = false;
+-
+-  if (importer_type == user_data_importer::TYPE_SAFARI) {
+-    // Start import if Brave has full disk access permission.
+-    // If not, show dialog that has infos about that permission.
+-    base::ThreadPool::PostTaskAndReplyWithResult(
+-        FROM_HERE, {base::MayBlock()},
+-        base::BindOnce(&HasProperDiskAccessPermission, imported_items),
+-        base::BindOnce(&BraveImportDataHandler::OnGetDiskAccessPermission,
+-                       weak_factory_.GetWeakPtr(), std::move(callback),
+-                       source_path));
+-    return;
+-  }
+-  std::move(callback).Run();
+-}
+-
+-void BraveImportDataHandler::OnGetDiskAccessPermission(
+-    ContinueImportCallback callback,
+-    base::FilePath source_path,
+-    bool allowed) {
+-  if (!allowed) {
+-    // Notify to webui to finish import process and launch tab modal dialog
+-    // to guide full disk access information to users.
+-    // Guide dialog will be opened after import dialog is closed.
+-    FireWebUIListener("import-data-status-changed", base::Value("failed"));
+-    if (import_observers_.count(source_path)) {
+-      import_observers_[source_path]->ImportEnded();
+-    }
+-    // Observing web_contents is started here to know the closing timing of
+-    // import dialog.
+-    Observe(web_ui()->GetWebContents());
+-
+-    guide_dialog_is_requested_ = true;
+-    return;
+-  }
+-
+-  std::move(callback).Run();
+-}
+-
+-void BraveImportDataHandler::DidStopLoading() {
+-  Observe(nullptr);
+-
+-  if (!guide_dialog_is_requested_) {
+-    return;
+-  }
+-
+-  guide_dialog_is_requested_ = false;
+-
+-  content::WebUI* ui = web_ui();
+-  content::WebContents* web_contents = ui ? ui->GetWebContents() : nullptr;
+-  Browser* browser = web_contents ? chrome::FindBrowserWithTab(web_contents)
+-                                  : nullptr;
+-  if (!web_contents || !browser) {
+-    LOG(ERROR) << "Cannot show disk-access guidance without a live tab.";
+-    return;
+-  }
+-  TabModalConfirmDialog::Create(
+-      std::make_unique<FullDiskAccessConfirmDialogDelegate>(
+-          web_contents, browser),
+-      web_contents);
+-}
+-#endif
+-}  // namespace settings
+diff --git a/chrome/browser/ui/webui/settings/focus_import_data_handler.cc b/chrome/browser/ui/webui/settings/focus_import_data_handler.cc
+new file mode 100644
+--- /dev/null
++++ b/chrome/browser/ui/webui/settings/focus_import_data_handler.cc
+@@ -0,0 +1,272 @@
++/* Copyright (c) 2020 The Brave Authors. All rights reserved.
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "chrome/browser/ui/webui/settings/focus_import_data_handler.h"
++
++#include <memory>
++#include <string>
++#include <utility>
++
++#include "base/check.h"
++#include "base/logging.h"
++#include "chrome/browser/importer/brave_external_process_importer_host.h"
++#include "chrome/browser/importer/importer_list.h"
++#include "chrome/browser/importer/profile_writer.h"
++#include "chrome/browser/profiles/profile.h"
++#include "content/public/browser/browser_task_traits.h"
++#include "content/public/browser/browser_thread.h"
++#include "content/public/browser/web_contents.h"
++
++#if BUILDFLAG(IS_MAC)
++#include "base/apple/foundation_util.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/task/thread_pool.h"
++#include "chrome/browser/ui/webui/settings/brave_full_disk_access_confirm_dialog_delegate.h"
++#include "chrome/browser/ui/browser_finder.h"
++#include "chrome/browser/ui/tab_modal_confirm_dialog.h"
++#endif  // BUILDFLAG(IS_MAC)
++
++namespace {
++#if BUILDFLAG(IS_MAC)
++bool HasProperDiskAccessPermission(uint16_t imported_items) {
++  DCHECK(imported_items);
++
++  const base::FilePath& library_dir = base::apple::GetUserLibraryPath();
++  const base::FilePath safari_dir = library_dir.Append("Safari");
++
++  if (imported_items & user_data_importer::FAVORITES) {
++    const base::FilePath bookmarks_path = safari_dir.Append("Bookmarks.plist");
++    if (!PathIsWritable(bookmarks_path)) {
++      LOG(ERROR) << __func__ << " " << bookmarks_path << " is not accessible."
++                 << " Please check full disk access permission.";
++      return false;
++    }
++  }
++
++  if (imported_items & user_data_importer::HISTORY) {
++    const base::FilePath history_path = safari_dir.Append("History.plist");
++    if (!PathIsWritable(history_path)) {
++      LOG(ERROR) << __func__ << " " << history_path << " is not accessible."
++                 << " Please check full disk access permission.";
++      return false;
++    }
++  }
++
++  return true;
++}
++#endif  // BUILDFLAG(IS_MAC)
++constexpr char kImportStatusSucceeded[] = "succeeded";
++constexpr char kImportStatusFailed[] = "failed";
++}  // namespace
++
++namespace settings {
++
 +FocusImportDataHandler::FocusImportDataHandler() = default;
 +FocusImportDataHandler::~FocusImportDataHandler() = default;
- 
--void BraveImportDataHandler::StartImport(
++
 +void FocusImportDataHandler::StartImport(
-     const user_data_importer::SourceProfile& source_profile,
-     uint16_t imported_items) {
-   if (!imported_items) {
-@@ -99,7 +99,7 @@
- #if BUILDFLAG(IS_MAC)
-   CheckDiskAccess(imported_items, source_profile.source_path,
-                   source_profile.importer_type,
--                  base::BindOnce(&BraveImportDataHandler::StartImportImpl,
++    const user_data_importer::SourceProfile& source_profile,
++    uint16_t imported_items) {
++  if (!imported_items) {
++    if (IsJavascriptAllowed()) {
++      FireWebUIListener("import-data-status-changed",
++                        base::Value(kImportStatusFailed));
++    }
++    return;
++  }
++  content::WebUI* ui = web_ui();
++  content::WebContents* web_contents = ui ? ui->GetWebContents() : nullptr;
++  if (!web_contents) {
++    LOG(ERROR) << "Cannot start import without a live profile and WebContents.";
++    if (IsJavascriptAllowed()) {
++      FireWebUIListener("import-data-status-changed",
++                        base::Value(kImportStatusFailed));
++    }
++    return;
++  }
++  Profile* profile = Profile::FromWebUI(ui);
++  if (!profile) {
++    LOG(ERROR) << "Cannot start import without a live profile.";
++    if (IsJavascriptAllowed()) {
++      FireWebUIListener("import-data-status-changed",
++                        base::Value(kImportStatusFailed));
++    }
++    return;
++  }
++#if BUILDFLAG(IS_MAC)
++  CheckDiskAccess(imported_items, source_profile.source_path,
++                  source_profile.importer_type,
 +                  base::BindOnce(&FocusImportDataHandler::StartImportImpl,
-                                  weak_factory_.GetWeakPtr(), source_profile,
-                                  imported_items, profile));
- #else
-@@ -107,7 +107,7 @@
- #endif
- }
- 
--void BraveImportDataHandler::StartImportImpl(
++                                 weak_factory_.GetWeakPtr(), source_profile,
++                                 imported_items, profile));
++#else
++  StartImportImpl(source_profile, imported_items, profile);
++#endif
++}
++
 +void FocusImportDataHandler::StartImportImpl(
-     const user_data_importer::SourceProfile& source_profile,
-     uint16_t imported_items,
-     Profile* profile) {
-@@ -145,9 +145,9 @@
-   // Using weak pointers because it destroys itself when finshed.
-   auto* importer_host = new BraveExternalProcessImporterHost();
-   import_observers_[source_profile.source_path] =
--      std::make_unique<BraveImporterObserver>(
++    const user_data_importer::SourceProfile& source_profile,
++    uint16_t imported_items,
++    Profile* profile) {
++  content::WebUI* ui = web_ui();
++  content::WebContents* web_contents = ui ? ui->GetWebContents() : nullptr;
++  if (!web_contents) {
++    LOG(ERROR) << "Import target disappeared before import could start.";
++    if (IsJavascriptAllowed()) {
++      FireWebUIListener("import-data-status-changed",
++                        base::Value(kImportStatusFailed));
++    }
++    return;
++  }
++  Profile* current_profile = Profile::FromWebUI(ui);
++  if (!imported_items || !profile || profile != current_profile) {
++    LOG(ERROR) << "Import target profile disappeared before import could start.";
++    if (IsJavascriptAllowed()) {
++      FireWebUIListener("import-data-status-changed",
++                        base::Value(kImportStatusFailed));
++    }
++    return;
++  }
++
++  // Keep a single terminal result for the active WebUI request. Starting a
++  // second import while the first host is still reporting progress would mix
++  // their success state and can report a stale result.
++  if (!import_observers_.empty()) {
++    LOG(WARNING) << "Ignored a concurrent import request.";
++    return;
++  }
++
++  import_did_succeed_ = false;
++  FireWebUIListener("import-data-status-changed", base::Value("inProgress"));
++
++  // Using weak pointers because it destroys itself when finshed.
++  auto* importer_host = new BraveExternalProcessImporterHost();
++  import_observers_[source_profile.source_path] =
 +      std::make_unique<FocusImporterObserver>(
-           importer_host, source_profile, imported_items,
--          base::BindRepeating(&BraveImportDataHandler::NotifyImportProgress,
++          importer_host, source_profile, imported_items,
 +          base::BindRepeating(&FocusImportDataHandler::NotifyImportProgress,
-                               weak_factory_.GetWeakPtr()));
- 
-   importer_host->set_parent_window(web_contents->GetTopLevelNativeWindow());
-@@ -157,7 +157,7 @@
-                                      new ProfileWriter(profile));
- }
- 
--void BraveImportDataHandler::NotifyImportProgress(
++                              weak_factory_.GetWeakPtr()));
++
++  importer_host->set_parent_window(web_contents->GetTopLevelNativeWindow());
++  importer_host->set_parent_view(web_contents->GetNativeView());
++
++  importer_host->StartImportSettings(source_profile, profile, imported_items,
++                                     new ProfileWriter(profile));
++}
++
 +void FocusImportDataHandler::NotifyImportProgress(
-     const user_data_importer::SourceProfile& source_profile,
-     const base::DictValue& info) {
-   const std::string* event = info.FindString("event");
-@@ -168,16 +168,16 @@
-     import_did_succeed_ = true;
-   } else if (*event == "ImportEnded") {
-     content::GetUIThreadTaskRunner({})->PostTask(
--        FROM_HERE, base::BindOnce(&BraveImportDataHandler::OnImportEnded,
++    const user_data_importer::SourceProfile& source_profile,
++    const base::DictValue& info) {
++  const std::string* event = info.FindString("event");
++  if (!event) {
++    return;
++  }
++  if (*event == "ImportItemEnded") {
++    import_did_succeed_ = true;
++  } else if (*event == "ImportEnded") {
++    content::GetUIThreadTaskRunner({})->PostTask(
 +        FROM_HERE, base::BindOnce(&FocusImportDataHandler::OnImportEnded,
-                                   weak_factory_.GetWeakPtr(), source_profile));
-   }
- }
- 
--void BraveImportDataHandler::HandleImportData(const base::ListValue& args) {
++                                  weak_factory_.GetWeakPtr(), source_profile));
++  }
++}
++
 +void FocusImportDataHandler::HandleImportData(const base::ListValue& args) {
-   ImportDataHandler::HandleImportData(args);
- }
- 
--void BraveImportDataHandler::OnImportEnded(
++  ImportDataHandler::HandleImportData(args);
++}
++
 +void FocusImportDataHandler::OnImportEnded(
-     const user_data_importer::SourceProfile& source_profile) {
-   import_observers_.erase(source_profile.source_path);
-   FireWebUIListener("import-data-status-changed",
-@@ -185,7 +185,7 @@
-                                                     : kImportStatusFailed));
- }
- 
--void BraveImportDataHandler::OnJavascriptDisallowed() {
++    const user_data_importer::SourceProfile& source_profile) {
++  import_observers_.erase(source_profile.source_path);
++  FireWebUIListener("import-data-status-changed",
++                    base::Value(import_did_succeed_ ? kImportStatusSucceeded
++                                                    : kImportStatusFailed));
++}
++
 +void FocusImportDataHandler::OnJavascriptDisallowed() {
-   weak_factory_.InvalidateWeakPtrs();
-   ImportDataHandler::OnJavascriptDisallowed();
- 
-@@ -195,12 +195,12 @@
- }
- 
- const user_data_importer::SourceProfile&
--BraveImportDataHandler::GetSourceProfileAt(int browser_index) {
++  weak_factory_.InvalidateWeakPtrs();
++  ImportDataHandler::OnJavascriptDisallowed();
++
++  // When the WebUI is unloading, we ignore all further updates from the host as
++  // ImportDataHandler does.
++  import_observers_.clear();
++}
++
++const user_data_importer::SourceProfile&
 +FocusImportDataHandler::GetSourceProfileAt(int browser_index) {
-   return importer_list_->GetSourceProfileAt(browser_index);
- }
- 
- #if BUILDFLAG(IS_MAC)
--void BraveImportDataHandler::CheckDiskAccess(
++  return importer_list_->GetSourceProfileAt(browser_index);
++}
++
++#if BUILDFLAG(IS_MAC)
 +void FocusImportDataHandler::CheckDiskAccess(
-     uint16_t imported_items,
-     base::FilePath source_path,
-     user_data_importer::ImporterType importer_type,
-@@ -215,7 +215,7 @@
-     base::ThreadPool::PostTaskAndReplyWithResult(
-         FROM_HERE, {base::MayBlock()},
-         base::BindOnce(&HasProperDiskAccessPermission, imported_items),
--        base::BindOnce(&BraveImportDataHandler::OnGetDiskAccessPermission,
++    uint16_t imported_items,
++    base::FilePath source_path,
++    user_data_importer::ImporterType importer_type,
++    ContinueImportCallback callback) {
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++
++  guide_dialog_is_requested_ = false;
++
++  if (importer_type == user_data_importer::TYPE_SAFARI) {
++    // Start import if Brave has full disk access permission.
++    // If not, show dialog that has infos about that permission.
++    base::ThreadPool::PostTaskAndReplyWithResult(
++        FROM_HERE, {base::MayBlock()},
++        base::BindOnce(&HasProperDiskAccessPermission, imported_items),
 +        base::BindOnce(&FocusImportDataHandler::OnGetDiskAccessPermission,
-                        weak_factory_.GetWeakPtr(), std::move(callback),
-                        source_path));
-     return;
-@@ -223,7 +223,7 @@
-   std::move(callback).Run();
- }
- 
--void BraveImportDataHandler::OnGetDiskAccessPermission(
++                       weak_factory_.GetWeakPtr(), std::move(callback),
++                       source_path));
++    return;
++  }
++  std::move(callback).Run();
++}
++
 +void FocusImportDataHandler::OnGetDiskAccessPermission(
-     ContinueImportCallback callback,
-     base::FilePath source_path,
-     bool allowed) {
-@@ -246,7 +246,7 @@
-   std::move(callback).Run();
- }
- 
--void BraveImportDataHandler::DidStopLoading() {
++    ContinueImportCallback callback,
++    base::FilePath source_path,
++    bool allowed) {
++  if (!allowed) {
++    // Notify to webui to finish import process and launch tab modal dialog
++    // to guide full disk access information to users.
++    // Guide dialog will be opened after import dialog is closed.
++    FireWebUIListener("import-data-status-changed", base::Value("failed"));
++    if (import_observers_.count(source_path)) {
++      import_observers_[source_path]->ImportEnded();
++    }
++    // Observing web_contents is started here to know the closing timing of
++    // import dialog.
++    Observe(web_ui()->GetWebContents());
++
++    guide_dialog_is_requested_ = true;
++    return;
++  }
++
++  std::move(callback).Run();
++}
++
 +void FocusImportDataHandler::DidStopLoading() {
-   Observe(nullptr);
- 
-   if (!guide_dialog_is_requested_) {
-diff --git a/chrome/browser/ui/webui/settings/brave_import_data_handler.h b/chrome/browser/ui/webui/settings/focus_import_data_handler.h
-similarity index 90%
-rename from chrome/browser/ui/webui/settings/brave_import_data_handler.h
-rename to chrome/browser/ui/webui/settings/focus_import_data_handler.h
++  Observe(nullptr);
++
++  if (!guide_dialog_is_requested_) {
++    return;
++  }
++
++  guide_dialog_is_requested_ = false;
++
++  content::WebUI* ui = web_ui();
++  content::WebContents* web_contents = ui ? ui->GetWebContents() : nullptr;
++  Browser* browser = web_contents ? chrome::FindBrowserWithTab(web_contents)
++                                  : nullptr;
++  if (!web_contents || !browser) {
++    LOG(ERROR) << "Cannot show disk-access guidance without a live tab.";
++    return;
++  }
++  TabModalConfirmDialog::Create(
++      std::make_unique<FullDiskAccessConfirmDialogDelegate>(
++          web_contents, browser),
++      web_contents);
++}
++#endif
++}  // namespace settings
+diff --git a/chrome/browser/ui/webui/settings/brave_import_data_handler.h b/chrome/browser/ui/webui/settings/brave_import_data_handler.h
+deleted file mode 100644
 --- a/chrome/browser/ui/webui/settings/brave_import_data_handler.h
-+++ b/chrome/browser/ui/webui/settings/focus_import_data_handler.h
-@@ -3,24 +3,24 @@
-  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
-  * You can obtain one at http://mozilla.org/MPL/2.0/. */
- 
++++ /dev/null
+@@ -1,86 +0,0 @@
+-/* Copyright (c) 2020 The Brave Authors. All rights reserved.
+- * This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+- * You can obtain one at http://mozilla.org/MPL/2.0/. */
+-
 -#ifndef BRAVE_BROWSER_UI_WEBUI_SETTINGS_BRAVE_IMPORT_DATA_HANDLER_H_
 -#define BRAVE_BROWSER_UI_WEBUI_SETTINGS_BRAVE_IMPORT_DATA_HANDLER_H_
-+#ifndef CHROME_BROWSER_UI_WEBUI_SETTINGS_FOCUS_IMPORT_DATA_HANDLER_H_
-+#define CHROME_BROWSER_UI_WEBUI_SETTINGS_FOCUS_IMPORT_DATA_HANDLER_H_
- 
- #include <memory>
- #include <unordered_map>
- 
- #include "base/memory/weak_ptr.h"
+-
+-#include <memory>
+-#include <unordered_map>
+-
+-#include "base/memory/weak_ptr.h"
 -#include "chrome/browser/ui/webui/settings/brave_importer_observer.h"
-+#include "chrome/browser/ui/webui/settings/focus_importer_observer.h"
- #include "build/build_config.h"
- #include "chrome/browser/ui/webui/settings/import_data_handler.h"
- #include "content/public/browser/web_contents_observer.h"
- 
- namespace settings {
- 
+-#include "build/build_config.h"
+-#include "chrome/browser/ui/webui/settings/import_data_handler.h"
+-#include "content/public/browser/web_contents_observer.h"
+-
+-namespace settings {
+-
 -// This class checks whether Brave has full disk access permission to import
 -// safari data on macOS. ImportDataHandler::StartImport() will be run after
 -// checking disk access permission. If Brave doesn't have that permission, this
 -// will launch tab modal dialog to notify users about this lack of permission.
+-
+-// We should display tab modal dialog after import dialog is closed from webui.
+-// To do that, this observes web contents to launch dialog after import dialog
+-// closed. If dialog is launched right after notifying import failure,
+-// dialog will be closed immediately because tab modal dialog is closed with
+-// new navigation start and tab is newly loaded for closing webui import dialog.
+-// The reason why native tab modal dialog is used here is to avoid modifying
+-// upstream import html/js source code.
+-class BraveImportDataHandler : public ImportDataHandler,
+-                                      content::WebContentsObserver {
+- public:
+-  BraveImportDataHandler();
+-  ~BraveImportDataHandler() override;
+-
+-  BraveImportDataHandler(const BraveImportDataHandler&) = delete;
+-  BraveImportDataHandler& operator=(const BraveImportDataHandler&) = delete;
+-
+- protected:
+-  using ContinueImportCallback = base::OnceCallback<void()>;
+-
+-  const user_data_importer::SourceProfile& GetSourceProfileAt(
+-      int browser_index);
+-  void HandleImportData(const base::ListValue& args);
+-  // ImportDataHandler overrides:
+-  void StartImport(const user_data_importer::SourceProfile& source_profile,
+-                   uint16_t imported_items) override;
+-
+-  void StartImportImpl(const user_data_importer::SourceProfile& source_profile,
+-                       uint16_t imported_items,
+-                       Profile* profile);
+-  virtual void NotifyImportProgress(
+-      const user_data_importer::SourceProfile& source_profile,
+-      const base::DictValue& info);
+-  virtual void OnImportEnded(
+-      const user_data_importer::SourceProfile& source_profile);
+-
+-  void OnJavascriptDisallowed() override;
+-
+-  void OnStartImport(const user_data_importer::SourceProfile& source_profile,
+-                     uint16_t imported_items);
+-#if BUILDFLAG(IS_MAC)
+-  void CheckDiskAccess(uint16_t imported_items,
+-                       base::FilePath source_path,
+-                       user_data_importer::ImporterType importer_type,
+-                       ContinueImportCallback callback);
+-  void OnGetDiskAccessPermission(ContinueImportCallback callback,
+-                                 base::FilePath source_path,
+-                                 bool allowed);
+-
+-  // content::WebContentsObserver overrides:
+-  void DidStopLoading() override;
+-
+-  bool guide_dialog_is_requested_ = false;
+-#endif
+- private:
+-  std::unordered_map<base::FilePath, std::unique_ptr<BraveImporterObserver>>
+-      import_observers_;
+-  base::WeakPtrFactory<BraveImportDataHandler> weak_factory_{this};
+-};
+-
+-}  // namespace settings
+-
+-#endif  // BRAVE_BROWSER_UI_WEBUI_SETTINGS_BRAVE_IMPORT_DATA_HANDLER_H_
+diff --git a/chrome/browser/ui/webui/settings/focus_import_data_handler.h b/chrome/browser/ui/webui/settings/focus_import_data_handler.h
+new file mode 100644
+--- /dev/null
++++ b/chrome/browser/ui/webui/settings/focus_import_data_handler.h
+@@ -0,0 +1,86 @@
++/* Copyright (c) 2020 The Brave Authors. All rights reserved.
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef CHROME_BROWSER_UI_WEBUI_SETTINGS_FOCUS_IMPORT_DATA_HANDLER_H_
++#define CHROME_BROWSER_UI_WEBUI_SETTINGS_FOCUS_IMPORT_DATA_HANDLER_H_
++
++#include <memory>
++#include <unordered_map>
++
++#include "base/memory/weak_ptr.h"
++#include "chrome/browser/ui/webui/settings/focus_importer_observer.h"
++#include "build/build_config.h"
++#include "chrome/browser/ui/webui/settings/import_data_handler.h"
++#include "content/public/browser/web_contents_observer.h"
++
++namespace settings {
++
 +// This class checks whether Focus Browser has full disk access permission to
 +// import Safari data on macOS. ImportDataHandler::StartImport() will be run
 +// after checking disk access permission. If Focus Browser doesn't have that
 +// permission, this will launch a tab modal dialog to notify the user.
- 
- // We should display tab modal dialog after import dialog is closed from webui.
- // To do that, this observes web contents to launch dialog after import dialog
-@@ -29,14 +29,14 @@
- // new navigation start and tab is newly loaded for closing webui import dialog.
- // The reason why native tab modal dialog is used here is to avoid modifying
- // upstream import html/js source code.
--class BraveImportDataHandler : public ImportDataHandler,
--                                      content::WebContentsObserver {
++
++// We should display tab modal dialog after import dialog is closed from webui.
++// To do that, this observes web contents to launch dialog after import dialog
++// closed. If dialog is launched right after notifying import failure,
++// dialog will be closed immediately because tab modal dialog is closed with
++// new navigation start and tab is newly loaded for closing webui import dialog.
++// The reason why native tab modal dialog is used here is to avoid modifying
++// upstream import html/js source code.
 +class FocusImportDataHandler : public ImportDataHandler,
 +                               content::WebContentsObserver {
-  public:
--  BraveImportDataHandler();
--  ~BraveImportDataHandler() override;
++ public:
 +  FocusImportDataHandler();
 +  ~FocusImportDataHandler() override;
- 
--  BraveImportDataHandler(const BraveImportDataHandler&) = delete;
--  BraveImportDataHandler& operator=(const BraveImportDataHandler&) = delete;
++
 +  FocusImportDataHandler(const FocusImportDataHandler&) = delete;
 +  FocusImportDataHandler& operator=(const FocusImportDataHandler&) = delete;
- 
-  protected:
-   using ContinueImportCallback = base::OnceCallback<void()>;
-@@ -76,11 +77,11 @@
-   bool guide_dialog_is_requested_ = false;
- #endif
-  private:
--  std::unordered_map<base::FilePath, std::unique_ptr<BraveImporterObserver>>
++
++ protected:
++  using ContinueImportCallback = base::OnceCallback<void()>;
++
++  const user_data_importer::SourceProfile& GetSourceProfileAt(
++      int browser_index);
++  void HandleImportData(const base::ListValue& args);
++  // ImportDataHandler overrides:
++  void StartImport(const user_data_importer::SourceProfile& source_profile,
++                   uint16_t imported_items) override;
++
++  void StartImportImpl(const user_data_importer::SourceProfile& source_profile,
++                       uint16_t imported_items,
++                       Profile* profile);
++  virtual void NotifyImportProgress(
++      const user_data_importer::SourceProfile& source_profile,
++      const base::DictValue& info);
++  virtual void OnImportEnded(
++      const user_data_importer::SourceProfile& source_profile);
++
++  void OnJavascriptDisallowed() override;
++
++  void OnStartImport(const user_data_importer::SourceProfile& source_profile,
++                     uint16_t imported_items);
++#if BUILDFLAG(IS_MAC)
++  void CheckDiskAccess(uint16_t imported_items,
++                       base::FilePath source_path,
++                       user_data_importer::ImporterType importer_type,
++                       ContinueImportCallback callback);
++  void OnGetDiskAccessPermission(ContinueImportCallback callback,
++                                 base::FilePath source_path,
++                                 bool allowed);
++
++  // content::WebContentsObserver overrides:
++  void DidStopLoading() override;
++
++  bool guide_dialog_is_requested_ = false;
++#endif
++ private:
 +  std::unordered_map<base::FilePath, std::unique_ptr<FocusImporterObserver>>
-       import_observers_;
--  base::WeakPtrFactory<BraveImportDataHandler> weak_factory_{this};
++      import_observers_;
 +  base::WeakPtrFactory<FocusImportDataHandler> weak_factory_{this};
- };
- 
- }  // namespace settings
- 
--#endif  // BRAVE_BROWSER_UI_WEBUI_SETTINGS_BRAVE_IMPORT_DATA_HANDLER_H_
++};
++
++}  // namespace settings
++
 +#endif  // CHROME_BROWSER_UI_WEBUI_SETTINGS_FOCUS_IMPORT_DATA_HANDLER_H_
-diff --git a/chrome/browser/ui/webui/settings/brave_importer_observer.cc b/chrome/browser/ui/webui/settings/focus_importer_observer.cc
-similarity index 90%
-rename from chrome/browser/ui/webui/settings/brave_importer_observer.cc
-rename to chrome/browser/ui/webui/settings/focus_importer_observer.cc
+diff --git a/chrome/browser/ui/webui/settings/brave_importer_observer.cc b/chrome/browser/ui/webui/settings/brave_importer_observer.cc
+deleted file mode 100644
 --- a/chrome/browser/ui/webui/settings/brave_importer_observer.cc
-+++ b/chrome/browser/ui/webui/settings/focus_importer_observer.cc
-@@ -3,14 +3,14 @@
-  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
-  * You can obtain one at http://mozilla.org/MPL/2.0/. */
- 
++++ /dev/null
+@@ -1,85 +0,0 @@
+-/* Copyright (c) 2022 The Brave Authors. All rights reserved.
+- * This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+- * You can obtain one at http://mozilla.org/MPL/2.0/. */
+-
 -#include "chrome/browser/ui/webui/settings/brave_importer_observer.h"
-+#include "chrome/browser/ui/webui/settings/focus_importer_observer.h"
- 
- #include <utility>
- 
- #include "base/check.h"
- #include "chrome/browser/importer/external_process_importer_host.h"
- 
+-
+-#include <utility>
+-
+-#include "base/check.h"
+-#include "chrome/browser/importer/external_process_importer_host.h"
+-
 -BraveImporterObserver::BraveImporterObserver(
-+FocusImporterObserver::FocusImporterObserver(
-     ExternalProcessImporterHost* importer_host,
-     const user_data_importer::SourceProfile& source_profile,
-     uint16_t imported_items,
-@@ -23,13 +23,13 @@
-   importer_host->set_observer(this);
- }
- 
+-    ExternalProcessImporterHost* importer_host,
+-    const user_data_importer::SourceProfile& source_profile,
+-    uint16_t imported_items,
+-    ReportProgressCallback callback)
+-    : source_profile_(source_profile),
+-      imported_items_(imported_items),
+-      callback_(std::move(callback)),
+-      importer_host_(importer_host) {
+-  DCHECK(importer_host);
+-  importer_host->set_observer(this);
+-}
+-
 -BraveImporterObserver::~BraveImporterObserver() {
-+FocusImporterObserver::~FocusImporterObserver() {
-   if (importer_host_)
-     importer_host_->set_observer(nullptr);
- }
- 
- // user_data_importer::ImporterProgressObserver:
+-  if (importer_host_)
+-    importer_host_->set_observer(nullptr);
+-}
+-
+-// user_data_importer::ImporterProgressObserver:
 -void BraveImporterObserver::ImportStarted() {
-+void FocusImporterObserver::ImportStarted() {
-   if (import_started_called_)
-     return;
-   import_started_called_ = true;
-@@ -41,7 +41,7 @@
-   callback_.Run(source_profile_, data);
- }
- 
+-  if (import_started_called_)
+-    return;
+-  import_started_called_ = true;
+-  base::DictValue data;
+-  data.Set("importer_name", source_profile_.importer_name);
+-  data.Set("importer_type", source_profile_.importer_type);
+-  data.Set("items_to_import", imported_items_);
+-  data.Set("event", "ImportStarted");
+-  callback_.Run(source_profile_, data);
+-}
+-
 -void BraveImporterObserver::ImportItemStarted(
-+void FocusImporterObserver::ImportItemStarted(
-     user_data_importer::ImportItem item) {
-   base::DictValue data;
-   data.Set("importer_name", source_profile_.importer_name);
-@@ -52,7 +52,7 @@
-   callback_.Run(source_profile_, data);
- }
- 
+-    user_data_importer::ImportItem item) {
+-  base::DictValue data;
+-  data.Set("importer_name", source_profile_.importer_name);
+-  data.Set("importer_type", source_profile_.importer_type);
+-  data.Set("items_to_import", imported_items_);
+-  data.Set("event", "ImportItemStarted");
+-  data.Set("item", item);
+-  callback_.Run(source_profile_, data);
+-}
+-
 -void BraveImporterObserver::ImportItemEnded(
-+void FocusImporterObserver::ImportItemEnded(
-     user_data_importer::ImportItem item) {
-   base::DictValue data;
-   data.Set("importer_name", source_profile_.importer_name);
-@@ -63,7 +63,7 @@
-   callback_.Run(source_profile_, data);
- }
- 
+-    user_data_importer::ImportItem item) {
+-  base::DictValue data;
+-  data.Set("importer_name", source_profile_.importer_name);
+-  data.Set("importer_type", source_profile_.importer_type);
+-  data.Set("items_to_import", imported_items_);
+-  data.Set("event", "ImportItemEnded");
+-  data.Set("item", item);
+-  callback_.Run(source_profile_, data);
+-}
+-
 -void BraveImporterObserver::ImportEnded() {
-+void FocusImporterObserver::ImportEnded() {
-   base::DictValue data;
-   data.Set("importer_name", source_profile_.importer_name);
-   data.Set("importer_type", source_profile_.importer_type);
-@@ -80,6 +80,6 @@
- }
- 
- ExternalProcessImporterHost*
+-  base::DictValue data;
+-  data.Set("importer_name", source_profile_.importer_name);
+-  data.Set("importer_type", source_profile_.importer_type);
+-  data.Set("items_to_import", imported_items_);
+-  data.Set("event", "ImportEnded");
+-
+-  DCHECK(importer_host_);
+-  if (importer_host_)
+-    importer_host_->set_observer(nullptr);
+-
+-  importer_host_ = nullptr;
+-
+-  callback_.Run(source_profile_, data);
+-}
+-
+-ExternalProcessImporterHost*
 -BraveImporterObserver::GetImporterHostForTesting() {
+-  return importer_host_.get();
+-}
+diff --git a/chrome/browser/ui/webui/settings/focus_importer_observer.cc b/chrome/browser/ui/webui/settings/focus_importer_observer.cc
+new file mode 100644
+--- /dev/null
++++ b/chrome/browser/ui/webui/settings/focus_importer_observer.cc
+@@ -0,0 +1,85 @@
++/* Copyright (c) 2022 The Brave Authors. All rights reserved.
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "chrome/browser/ui/webui/settings/focus_importer_observer.h"
++
++#include <utility>
++
++#include "base/check.h"
++#include "chrome/browser/importer/external_process_importer_host.h"
++
++FocusImporterObserver::FocusImporterObserver(
++    ExternalProcessImporterHost* importer_host,
++    const user_data_importer::SourceProfile& source_profile,
++    uint16_t imported_items,
++    ReportProgressCallback callback)
++    : source_profile_(source_profile),
++      imported_items_(imported_items),
++      callback_(std::move(callback)),
++      importer_host_(importer_host) {
++  DCHECK(importer_host);
++  importer_host->set_observer(this);
++}
++
++FocusImporterObserver::~FocusImporterObserver() {
++  if (importer_host_)
++    importer_host_->set_observer(nullptr);
++}
++
++// user_data_importer::ImporterProgressObserver:
++void FocusImporterObserver::ImportStarted() {
++  if (import_started_called_)
++    return;
++  import_started_called_ = true;
++  base::DictValue data;
++  data.Set("importer_name", source_profile_.importer_name);
++  data.Set("importer_type", source_profile_.importer_type);
++  data.Set("items_to_import", imported_items_);
++  data.Set("event", "ImportStarted");
++  callback_.Run(source_profile_, data);
++}
++
++void FocusImporterObserver::ImportItemStarted(
++    user_data_importer::ImportItem item) {
++  base::DictValue data;
++  data.Set("importer_name", source_profile_.importer_name);
++  data.Set("importer_type", source_profile_.importer_type);
++  data.Set("items_to_import", imported_items_);
++  data.Set("event", "ImportItemStarted");
++  data.Set("item", item);
++  callback_.Run(source_profile_, data);
++}
++
++void FocusImporterObserver::ImportItemEnded(
++    user_data_importer::ImportItem item) {
++  base::DictValue data;
++  data.Set("importer_name", source_profile_.importer_name);
++  data.Set("importer_type", source_profile_.importer_type);
++  data.Set("items_to_import", imported_items_);
++  data.Set("event", "ImportItemEnded");
++  data.Set("item", item);
++  callback_.Run(source_profile_, data);
++}
++
++void FocusImporterObserver::ImportEnded() {
++  base::DictValue data;
++  data.Set("importer_name", source_profile_.importer_name);
++  data.Set("importer_type", source_profile_.importer_type);
++  data.Set("items_to_import", imported_items_);
++  data.Set("event", "ImportEnded");
++
++  DCHECK(importer_host_);
++  if (importer_host_)
++    importer_host_->set_observer(nullptr);
++
++  importer_host_ = nullptr;
++
++  callback_.Run(source_profile_, data);
++}
++
++ExternalProcessImporterHost*
 +FocusImporterObserver::GetImporterHostForTesting() {
-   return importer_host_.get();
- }
-diff --git a/chrome/browser/ui/webui/settings/brave_importer_observer.h b/chrome/browser/ui/webui/settings/focus_importer_observer.h
-similarity index 90%
-rename from chrome/browser/ui/webui/settings/brave_importer_observer.h
-rename to chrome/browser/ui/webui/settings/focus_importer_observer.h
++  return importer_host_.get();
++}
+diff --git a/chrome/browser/ui/webui/settings/brave_importer_observer.h b/chrome/browser/ui/webui/settings/brave_importer_observer.h
+deleted file mode 100644
 --- a/chrome/browser/ui/webui/settings/brave_importer_observer.h
-+++ b/chrome/browser/ui/webui/settings/focus_importer_observer.h
-@@ -3,8 +3,8 @@
-  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
-  * You can obtain one at http://mozilla.org/MPL/2.0/. */
- 
++++ /dev/null
+@@ -1,50 +0,0 @@
+-/* Copyright (c) 2022 The Brave Authors. All rights reserved.
+- * This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+- * You can obtain one at http://mozilla.org/MPL/2.0/. */
+-
 -#ifndef BRAVE_BROWSER_UI_WEBUI_SETTINGS_BRAVE_IMPORTER_OBSERVER_H_
 -#define BRAVE_BROWSER_UI_WEBUI_SETTINGS_BRAVE_IMPORTER_OBSERVER_H_
+-
+-#include "base/functional/callback.h"
+-#include "base/gtest_prod_util.h"
+-#include "base/memory/raw_ptr.h"
+-#include "base/values.h"
+-#include "chrome/browser/importer/importer_progress_observer.h"
+-
+-class ExternalProcessImporterHost;
+-
+-class BraveImporterObserver : public importer::ImporterProgressObserver {
+- public:
+-  using ReportProgressCallback = base::RepeatingCallback<void(
+-      const user_data_importer::SourceProfile& source_profile,
+-      const base::DictValue&)>;
+-
+-  BraveImporterObserver(ExternalProcessImporterHost* host,
+-                        const user_data_importer::SourceProfile& source_profile,
+-                        uint16_t imported_items,
+-                        ReportProgressCallback callback);
+-  ~BraveImporterObserver() override;
+-
+-  void ImportStarted() override;
+-  void ImportItemStarted(user_data_importer::ImportItem item) override;
+-  void ImportItemEnded(user_data_importer::ImportItem item) override;
+-  void ImportEnded() override;
+-
+- private:
+-  FRIEND_TEST_ALL_PREFIXES(BraveImporterObserverUnitTest, ImportEvents);
+-
+-  ExternalProcessImporterHost* GetImporterHostForTesting();
+-
+-  user_data_importer::SourceProfile source_profile_;
+-  uint16_t imported_items_ = 0;
+-  ReportProgressCallback callback_;
+-  // By some reasons ImportStarted event is called few times from different
+-  // places, we expect only one call.
+-  bool import_started_called_ = false;
+-  // If non-null it means importing is in progress. ImporterHost takes care
+-  // of deleting itself when import is complete.
+-  raw_ptr<ExternalProcessImporterHost> importer_host_;  // weak
+-};
+-
+-#endif  // BRAVE_BROWSER_UI_WEBUI_SETTINGS_BRAVE_IMPORTER_OBSERVER_H_
+diff --git a/chrome/browser/ui/webui/settings/focus_importer_observer.h b/chrome/browser/ui/webui/settings/focus_importer_observer.h
+new file mode 100644
+--- /dev/null
++++ b/chrome/browser/ui/webui/settings/focus_importer_observer.h
+@@ -0,0 +1,50 @@
++/* Copyright (c) 2022 The Brave Authors. All rights reserved.
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
 +#ifndef CHROME_BROWSER_UI_WEBUI_SETTINGS_FOCUS_IMPORTER_OBSERVER_H_
 +#define CHROME_BROWSER_UI_WEBUI_SETTINGS_FOCUS_IMPORTER_OBSERVER_H_
- 
- #include "base/functional/callback.h"
- #include "base/gtest_prod_util.h"
-@@ -14,17 +14,17 @@
- 
- class ExternalProcessImporterHost;
- 
--class BraveImporterObserver : public importer::ImporterProgressObserver {
++
++#include "base/functional/callback.h"
++#include "base/gtest_prod_util.h"
++#include "base/memory/raw_ptr.h"
++#include "base/values.h"
++#include "chrome/browser/importer/importer_progress_observer.h"
++
++class ExternalProcessImporterHost;
++
 +class FocusImporterObserver : public importer::ImporterProgressObserver {
-  public:
-   using ReportProgressCallback = base::RepeatingCallback<void(
-       const user_data_importer::SourceProfile& source_profile,
-       const base::DictValue&)>;
- 
--  BraveImporterObserver(ExternalProcessImporterHost* host,
++ public:
++  using ReportProgressCallback = base::RepeatingCallback<void(
++      const user_data_importer::SourceProfile& source_profile,
++      const base::DictValue&)>;
++
 +  FocusImporterObserver(ExternalProcessImporterHost* host,
-                         const user_data_importer::SourceProfile& source_profile,
-                         uint16_t imported_items,
-                         ReportProgressCallback callback);
--  ~BraveImporterObserver() override;
++                        const user_data_importer::SourceProfile& source_profile,
++                        uint16_t imported_items,
++                        ReportProgressCallback callback);
 +  ~FocusImporterObserver() override;
- 
-   void ImportStarted() override;
-   void ImportItemStarted(user_data_importer::ImportItem item) override;
-@@ -32,7 +32,7 @@
-   void ImportEnded() override;
- 
-  private:
--  FRIEND_TEST_ALL_PREFIXES(BraveImporterObserverUnitTest, ImportEvents);
++
++  void ImportStarted() override;
++  void ImportItemStarted(user_data_importer::ImportItem item) override;
++  void ImportItemEnded(user_data_importer::ImportItem item) override;
++  void ImportEnded() override;
++
++ private:
 +  FRIEND_TEST_ALL_PREFIXES(FocusImporterObserverUnitTest, ImportEvents);
- 
-   ExternalProcessImporterHost* GetImporterHostForTesting();
- 
-@@ -47,4 +47,4 @@
-   raw_ptr<ExternalProcessImporterHost> importer_host_;  // weak
- };
- 
--#endif  // BRAVE_BROWSER_UI_WEBUI_SETTINGS_BRAVE_IMPORTER_OBSERVER_H_
++
++  ExternalProcessImporterHost* GetImporterHostForTesting();
++
++  user_data_importer::SourceProfile source_profile_;
++  uint16_t imported_items_ = 0;
++  ReportProgressCallback callback_;
++  // By some reasons ImportStarted event is called few times from different
++  // places, we expect only one call.
++  bool import_started_called_ = false;
++  // If non-null it means importing is in progress. ImporterHost takes care
++  // of deleting itself when import is complete.
++  raw_ptr<ExternalProcessImporterHost> importer_host_;  // weak
++};
++
 +#endif  // CHROME_BROWSER_UI_WEBUI_SETTINGS_FOCUS_IMPORTER_OBSERVER_H_
 diff --git a/chrome/browser/ui/webui/settings/import_data_handler.h b/chrome/browser/ui/webui/settings/import_data_handler.h
 --- a/chrome/browser/ui/webui/settings/import_data_handler.h

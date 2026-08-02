@@ -1,0 +1,37 @@
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -418,6 +418,7 @@
+ #include "services/network/public/mojom/network_service.mojom.h"
+ #include "services/network/public/mojom/url_loader_factory.mojom.h"
+ #include "services/network/public/mojom/web_transport.mojom.h"
++#include "services/screen_ai/buildflags/buildflags.h"
+ #include "third_party/blink/public/common/chrome_debug_urls.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/common/loader/url_loader_throttle.h"
+@@ -553,7 +554,9 @@
+ #include "chrome/browser/metrics/usage_scenario/chrome_responsiveness_calculator_delegate.h"
+ #include "chrome/browser/new_tab_page/new_tab_page_util.h"
+ #include "chrome/browser/picture_in_picture/auto_picture_in_picture_tab_helper.h"
++#if BUILDFLAG(ENABLE_SCREEN_AI_SERVICE)
+ #include "chrome/browser/screen_ai/screen_ai_install_state.h"
++#endif
+ #include "chrome/browser/search/instant_service.h"
+ #include "chrome/browser/search/instant_service_factory.h"
+ #include "chrome/browser/themes/theme_service.h"
+@@ -8387,6 +8390,7 @@ bool ChromeContentBrowserClient::SetupEmbedderSandboxParameters(
+                                    soda_language_pack_path.value()));
+     return true;
+   }
++#if BUILDFLAG(ENABLE_SCREEN_AI_SERVICE)
+   if (sandbox_type == sandbox::mojom::Sandbox::kScreenAI) {
+     // ScreenAI service needs read access to ScreenAI component binary path to
+     // load it.
+@@ -8401,6 +8405,7 @@ bool ChromeContentBrowserClient::SetupEmbedderSandboxParameters(
+         sandbox::policy::kParamScreenAiComponentPath,
+         screen_ai_binary_path.value());
+   }
++#endif
+   if (sandbox_type == sandbox::mojom::Sandbox::kOnDeviceTranslation) {
+     auto translatekit_binary_path =
+         on_device_translation::ComponentManager::GetInstance()

@@ -7,21 +7,24 @@
 <h1 align="center">Focus Browser</h1>
 
 <p align="center">
-  Браузер на базе Chromium для сфокусированной работы в Windows.
+  Браузер на базе Chromium для сфокусированной работы в Windows и macOS.
 </p>
 
 <p align="center">
-  <a href="https://github.com/DanilBend/FocusBrowser/releases/latest">Скачать</a>
+  <a href="https://github.com/DanilBend/FocusBrowser/releases">Скачать Windows</a>
+  · <a href="docs/MACOS.md">Focus Browser для macOS</a>
   · <a href="https://github.com/DanilBend/FocusBrowser/issues">Сообщить об ошибке</a>
-  · <a href="docs/RELEASING.md">Инструкция по выпуску</a>
+  · <a href="docs/RELEASING.md">Выпуск Windows</a>
 </p>
 
 ## Focus Browser 1.0.5
 
 Focus Browser использует движок Chromium, уменьшает количество
 отвлекающих элементов и переносит основные инструменты концентрации прямо в
-интерфейс браузера. Версия 1.0.5 основана на Chromium 150.0.7871.128 и рассчитана
-на 64-битные Windows 10 и Windows 11.
+интерфейс браузера. Версия исходников 1.0.5 основана на Chromium
+150.0.7871.128 и рассчитана на 64-битные Windows 10 и Windows 11. В репозитории
+также находится отдельный нативный порт для macOS 12 и новее: одна локальная
+universal-сборка для Apple Silicon и 64-битных Intel Mac.
 
 ### Основные возможности
 
@@ -43,11 +46,14 @@ Focus Browser использует движок Chromium, уменьшает к�
   видео в обычной вкладке без встроенного проигрывателя.
 - Встроенный менеджер паролей, установка совместимых расширений,
   проприетарные медиакодеки и точки интеграции DRM.
-- **Обновления без прерывания работы** — найденное обновление предлагается при
-  следующем запуске с вариантами обновить сейчас, напомнить позже или пропустить
-  конкретную версию.
+- **Подписанные обновления** — Windows использует отдельный WinSparkle-канал,
+  а universal-сборка macOS — Sparkle 2 и отдельный Ed25519-подписанный appcast.
+  На macOS обновление проверяется автоматически раз в сутки; ручная проверка
+  остаётся на странице «О браузере».
 
 ## Скачивание и установка
+
+### Windows
 
 Установщик и портативный архив доступны в разделе
 [Releases](https://github.com/DanilBend/FocusBrowser/releases).
@@ -63,6 +69,19 @@ production-канала
 `https://danilbend.github.io/FocusBrowser/appcast-x64.xml`. Если канал временно
 недоступен, используйте ручную установку из GitHub Releases.
 
+### macOS
+
+Отдельный macOS-порт создаёт ad-hoc подписанный universal DMG для Apple Silicon
+и 64-битных Intel Mac с macOS 12 или новее. Он не нотарифицирован Apple.
+
+Новая сборка включает Sparkle 2.9.4, но не ChromiumUpdater/Keystone. Архив и
+appcast проверяются отдельной Ed25519-подписью; feed жёстко закреплён за
+`https://danilbend.github.io/FocusBrowser/appcast-macos.xml`. Старая локально
+принятая ручная DMG остаётся резервным вариантом. Поскольку в ней ещё нет
+Sparkle, первый переход на автообновляемую сборку всегда выполняется вручную
+через конкретный [GitHub Release](https://github.com/DanilBend/FocusBrowser/releases).
+Текущий статус и ограничения: [Focus Browser для macOS](docs/MACOS.md).
+
 ## Конфиденциальность и внешние сервисы
 
 - FocusBlock фильтрует запросы локально.
@@ -74,7 +93,8 @@ production-канала
   локальный импорт закладок и истории из обнаруженного поддерживаемого профиля.
   Пароли и данные автозаполнения этим импортёром не переносятся.
 - Поддержка DRM включена при сборке, но проприетарный модуль не хранится в
-  репозитории и может загружаться отдельным компонентом браузера.
+  репозитории и может загружаться отдельным компонентом браузера. Обновление
+  компонентов Chromium не является обновлением самого приложения macOS.
 
 Подробнее: [PRIVACY.md](PRIVACY.md).
 
@@ -99,12 +119,21 @@ python package.py --cpu-arch 64bit
 [docs/RELEASING.md](docs/RELEASING.md), ручной чек-лист — в
 [build_support/FOCUS_RELEASE_QA.md](build_support/FOCUS_RELEASE_QA.md).
 
+## Сборка в macOS
+
+Нативный macOS-порт собирает из одного дерева Chromium отдельные `arm64` и
+`x86_64` срезы, объединяет их в universal-приложение и создаёт локальный DMG.
+Он не затрагивает Windows/Android и не публикует результат. Контракты и точный
+порядок описаны в [platform/macos/README.md](platform/macos/README.md).
+
 ## Структура репозитория
 
 - `focus-chromium/` — конфигурация, брендинг и набор патчей Chromium.
 - `patches/focus/` — интеграция с Windows и патчи обновления.
 - `source_overrides/` — файлы, накладываемые поверх checkout Chromium.
 - `installer/` — NSIS-установщик Focus Browser.
+- `platform/macos/` — нативная universal-сборка и локальная DMG-упаковка для
+  macOS.
 - `build.py`, `package.py` — подготовка исходников, сборка и упаковка.
 - `build_support/`, `qa/` — автоматические проверки выпуска.
 

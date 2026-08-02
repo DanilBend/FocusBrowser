@@ -8,6 +8,7 @@ permissions:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
@@ -19,5 +20,22 @@ jobs:
     - name: Validate Focus 1.0 release configuration
       run: |
         python build_support/test_release_configuration.py
+        python -m unittest discover -s .github/scripts -p 'test_*.py'
         node .github/actions/stage/release-version.test.js
     - run: python focus-chromium/devutils/lint.py -t .
+
+  macos-release-tests:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Pin root-owned system Python provider
+      run: |
+        sudo xcode-select --switch /Library/Developer/CommandLineTools
+        test "$(xcode-select -p)" = "/Library/Developer/CommandLineTools"
+    - name: Validate macOS release helpers
+      run: |
+        python -m unittest discover -s platform/macos/tests -p 'test_*.py'

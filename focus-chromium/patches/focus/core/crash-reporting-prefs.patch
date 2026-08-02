@@ -73,12 +73,13 @@
  }  // namespace
  
  ProductInfo::ProductInfo() = default;
-@@ -146,8 +151,14 @@ void CrashReporterClient::GetSanitizatio
- #endif
- 
+@@ -148,7 +153,13 @@ std::string CrashReporterClient::GetUploadUrl() {
  std::string CrashReporterClient::GetUploadUrl() {
 -#if BUILDFLAG(GOOGLE_CHROME_BRANDING) && defined(OFFICIAL_BUILD)
 -  return kDefaultUploadURL;
+-#else
+-  return std::string();
+-#endif
 +#if !BUILDFLAG(IS_WIN)
 +  const auto* command_line = base::CommandLine::ForCurrentProcess();
 +  if (command_line->HasSwitch(kCrashServerUrlCommandLine)) {
@@ -90,9 +91,7 @@
 +  // local unless a developer explicitly supplies a custom endpoint where that
 +  // platform supports it.
 +  return std::string();
--#else
--  return std::string();
--#endif
+ }
 --- a/components/crash/core/app/crashpad.cc
 +++ b/components/crash/core/app/crashpad.cc
 @@ -247,26 +247,37 @@ void DestroyCrashpadClient() {
